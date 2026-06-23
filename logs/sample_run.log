@@ -1,0 +1,55 @@
+Провайдер: ollama | base_url: http://localhost:11434/v1 | chat: llama3.2 | vision: llama3.2-vision
+Классификатор: llama3.2 | Аудио настроено: True
+
+############ ВАРИАНТ А: VISION (Ollama, llama3.2-vision) ############
+2026-06-22 12:15:41 | INFO    | vision | Анализ изображения: /mnt/user-data/outputs/multapi/samples/chart.png | модель: llama3.2-vision | вопрос: Какой квартал лучший?
+2026-06-22 12:15:41 | INFO    | client | Запрос к провайдеру=ollama модель=llama3.2-vision
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=1/5 код=429 ошибка=RateLimitError
+      [retry] ждать ~1.39s перед попыткой 2
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=2/5 код=429 ошибка=RateLimitError
+      [retry] ждать ~2.40s перед попыткой 3
+ОТВЕТ:
+Тип: график
+- Выручка и прибыль по кварталам 2025 (млн руб.)
+- Лучший квартал — Q4 (выручка 6.7, прибыль 2.0)
+Рекомендация: разобрать драйверы роста Q4.
+>>> повтор того же запроса (ожидаем cache hit)
+2026-06-22 12:15:41 | INFO    | vision | Анализ изображения: /mnt/user-data/outputs/multapi/samples/chart.png | модель: llama3.2-vision | вопрос: Какой квартал лучший?
+2026-06-22 12:15:41 | INFO    | vision | Ответ из кеша (hit).
+USAGE: Вызовов: 1 | prompt_tokens=130 | completion_tokens=70 | аудио=0.0s | итого ≈ $0.000000
+CACHE: {'hits': 1, 'misses': 1, 'total': 2, 'hit_rate_pct': 50.0, 'size': 1}
+
+############ FALLBACK: ollama недоступен -> openrouter ############
+2026-06-22 12:15:41 | INFO    | client | Запрос к провайдеру=ollama модель=llama3.2-vision
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=1/5 код=500 ошибка=InternalServerError
+      [retry] ждать ~1.96s перед попыткой 2
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=2/5 код=500 ошибка=InternalServerError
+      [retry] ждать ~2.13s перед попыткой 3
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=3/5 код=500 ошибка=InternalServerError
+      [retry] ждать ~4.57s перед попыткой 4
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=4/5 код=500 ошибка=InternalServerError
+      [retry] ждать ~8.66s перед попыткой 5
+2026-06-22 12:15:41 | WARNING | client | Провайдер=ollama попытка=5/5 код=500 ошибка=InternalServerError
+2026-06-22 12:15:41 | ERROR   | client | Провайдер=ollama исчерпан (InternalServerError: emulated 500). Следующий.
+2026-06-22 12:15:41 | INFO    | client | Запрос к провайдеру=openrouter модель=llama3.2-vision
+ОТВЕТ (через fallback):
+Тип: график
+- Выручка и прибыль по кварталам 2025 (млн руб.)
+- Лучший квартал — Q4 (выручка 6.7, прибыль 2.0)
+Рекомендация: разобрать драйверы роста Q4.
+USAGE: Вызовов: 1 | prompt_tokens=130 | completion_tokens=70 | аудио=0.0s | итого ≈ $0.000062
+
+############ ВАРИАНТ Б: VOICE PIPELINE (аудио-эндпоинт + классификатор) ############
+2026-06-22 12:15:41 | INFO    | voice | Транскрипция (Whisper): /mnt/user-data/outputs/multapi/samples/voice_question.wav
+2026-06-22 12:15:41 | INFO    | voice | Распознано: Здравствуйте! Подскажите, как сбросить пароль от аккаунта?
+2026-06-22 12:15:41 | INFO    | client | Запрос к провайдеру=ollama модель=llama3.2
+2026-06-22 12:15:41 | INFO    | classifier | Категория обращения: тех. проблема
+2026-06-22 12:15:41 | INFO    | client | Запрос к провайдеру=ollama модель=llama3.2
+2026-06-22 12:15:41 | INFO    | voice | Синтез речи (TTS): голос=alloy -> outputs/answer.mp3
+ТРАНСКРИПЦИЯ: Здравствуйте! Подскажите, как сбросить пароль от аккаунта?
+КАТЕГОРИЯ: тех. проблема
+ОТВЕТ LLM: Чтобы сбросить пароль: 1) на странице входа нажмите «Забыли пароль?»; 2) введите email; 3) перейдите по ссылке из письма. Нет письма — проверьте «Спам».
+АУДИО-ОТВЕТ: outputs/answer.mp3 ( 2051 байт )
+USAGE: Вызовов: 2 | prompt_tokens=260 | completion_tokens=140 | аудио=0.0s | итого ≈ $0.002280
+
+############ ВСЕ ПАЙПЛАЙНЫ ОТРАБОТАЛИ ############

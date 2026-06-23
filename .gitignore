@@ -1,0 +1,26 @@
+# Секреты
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Логи реальных прогонов (sample_run.log оставляем в репозитории)
+logs/app.log
+
+# Генерируемые аудио-ответы
+outputs/*.mp3
+outputs/*.wav
+!outputs/.gitkeep
+
+# Сгенерированные через TTS образцы (исходный .wav-плейсхолдер оставляем)
+samples/voice_question.mp3
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
