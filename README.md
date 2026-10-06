@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блок 3.1
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.3
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -11,6 +11,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Вариант Б — Голосовой пайплайн (Whisper + TTS):** аудио → транскрипция → классификация → ответ (LLM) → озвучка → аудиофайл.
 - **Блок 3.2 — Архитектурный паспорт:** схема слоёв Gateway → Service → LLM → Data, ADR, точки отказа и проверка LiteLLM — [`docs/architecture.md`](docs/architecture.md).
 - **Блок 3.1 — Function Calling:** ассистент техподдержки с инструментами `search_knowledge_base` и `check_service_status`, полный цикл tool_call на локальном Ollama — см. раздел [«Блок 3.1 — Function Calling»](#блок-31--function-calling).
+- **Блок 3.3 — Асинхронная обработка запросов к ИИ:** `AsyncLLMClient` (семафор, таймауты, батч, стриминг), бенчмарк sync vs async и SSE-эндпоинт `/chat/stream` на FastAPI — см. раздел [«Блок 3.3»](#блок-33--асинхронная-обработка-запросов-к-ии).
 
 ## Важно про Ollama и модальности
 
@@ -63,9 +64,12 @@ multapi/
 │   ├── vision.py            # вариант А: base64 + Vision (vision-модель)
 │   ├── voice.py             # вариант Б: Whisper -> classify -> LLM -> TTS
 │   └── utils.py             # логирование, base64, валидация файлов, UsageTracker
-├── app/                     # блок 3.1: Function Calling
-│   ├── config.py            # настройки ассистента с tools (pydantic-settings)
-│   ├── logging_utils.py     # JSON-лог шагов -> logs/tool_calls.jsonl
+├── app/                     # блоки 3.1 и 3.3
+│   ├── config.py            # настройки ассистента с tools и асинхронного клиента (pydantic-settings)
+│   ├── logging_utils.py     # JSON-лог шагов -> logs/tool_calls.jsonl, logs/llm_calls.jsonl
+│   ├── main.py              # блок 3.3: FastAPI — /health, /chat, /chat/stream (SSE)
+│   ├── services/
+│   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
 │   ├── prompts/
 │   │   ├── system_v1.j2     # system prompt ассистента (Jinja2)
 │   │   ├── tools/           # description инструментов (*.md)
@@ -80,6 +84,13 @@ multapi/
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   └── run_tool_call.py     # прогон трёх тест-запросов
+├── scripts/                 # блок 3.3
+│   ├── benchmark.py         # бенчмарк sync vs async -> benchmark_results.md
+│   ├── benchmark_results.md # результаты локального прогона (мок и Ollama)
+│   ├── stream_demo.py       # демо stream_chat: TTFT и общее время
+│   ├── mock_llm_server.py   # мок OpenAI API с задержкой (модель облачного провайдера)
+│   ├── _target.py           # выбор цели: мок или локальный Ollama
+│   └── stream_request.json  # тело запроса для curl.exe
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -87,11 +98,12 @@ multapi/
 │   └── check_proxy.py       # проверка HTTP-прокси (egress-IP)
 ├── tests/
 │   ├── test_review_fixes.py # тесты на моках (без сети): учёт аудио, классификатор, образцы
-│   └── test_tool_call.py    # блок 3.1: схемы, обработчики, цикл tool_call, лог
+│   ├── test_tool_call.py    # блок 3.1: схемы, обработчики, цикл tool_call, лог
+│   └── test_async_client.py # блок 3.3: семафор, батчи, таймаут, стриминг, SSE
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
-                             # app.log и tool_calls.jsonl (локальные прогоны, в git не попадают)
+                             # app.log, tool_calls.jsonl, llm_calls.jsonl (локальные прогоны, в git не попадают)
 ```
 
 `samples/voice_question.wav` — голосовой вопрос «Здравствуйте! Подскажите, как сбросить пароль от аккаунта?» (синтезированная речь, 16 кГц, моно, ~4,6 с). Его использует `demo_voice.py`.
@@ -105,6 +117,8 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 cp .env.example .env        # значения для Ollama уже выставлены
 ```
+
+Нужен Python 3.11 или новее: блок 3.3 использует `asyncio.TaskGroup`, `asyncio.timeout` и `except*`.
 
 Запустите Ollama и подтяните модели:
 
@@ -142,6 +156,21 @@ python examples/run_tool_call.py                          # три тест-за
 python examples/run_tool_call.py "Как включить 2FA?"       # свой запрос
 python main.py ask "Не приходит письмо для сброса пароля"
 ```
+
+**Блок 3.3 — асинхронный клиент:**
+```bash
+python scripts/benchmark.py                                    # мок с задержкой 1 с, 20 запросов
+python scripts/benchmark.py --target ollama --n 6 --max-tokens 60
+python scripts/stream_demo.py                                  # мок
+python scripts/stream_demo.py --target ollama "Что такое event loop?"
+uvicorn app.main:app --port 8000                               # сервис; запросы — во втором терминале
+```
+
+Проверка потока во втором терминале (PowerShell — именно `curl.exe`, тело запроса из файла):
+```powershell
+curl.exe -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d "@scripts/stream_request.json"
+```
+В Linux/macOS: `curl -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d '{"prompt": "Что такое event loop?"}'`.
 
 **Тесты (без сети и без ключей):**
 ```bash
@@ -248,6 +277,131 @@ python -m unittest discover -s tests -v
 | Лог: input → tool + args → result → answer → tokens | `logs/tool_calls.jsonl`; реальный прогон — `logs/tool_calls_sample.jsonl` |
 | Три тест-кейса с наблюдениями | раздел «Результаты на трёх запросах» |
 
+## Блок 3.3 — Асинхронная обработка запросов к ИИ
+
+`AsyncLLMClient` — асинхронная версия `RobustLLMClient` из модуля 2 на `AsyncOpenAI`. От синхронного клиента сохранены fallback-цепочка провайдеров, кеш `LLMCache` и прокси только для удалённых провайдеров. Внутри `async def` нет ни синхронного `OpenAI`, ни `requests`, ни `time.sleep` — это проверяет тест `test_no_blocking_calls`.
+
+### Где что лежит
+
+| Что | Где |
+|-----|-----|
+| Асинхронный клиент | `app/services/llm_client.py`: `complete`, `batch_chat`, `batch_chat_strict`, `stream_chat` |
+| Настройки | `app/config.py`, `AsyncClientSettings`: `LLM_CONCURRENCY`, `LLM_CALL_TIMEOUT`, `LLM_SDK_MAX_RETRIES` |
+| FastAPI и SSE | `app/main.py`: `GET /health`, `POST /chat` (ответ целиком), `POST /chat/stream` (поток SSE) |
+| Бенчмарк sync vs async | `scripts/benchmark.py` → результаты в `scripts/benchmark_results.md` (реальный прогон — в репозитории) |
+| Демо стриминга | `scripts/stream_demo.py`: TTFT и общее время по `time.perf_counter()` |
+| Мок OpenAI API | `scripts/mock_llm_server.py`: отвечает с заданной задержкой, умеет поток и `usage` |
+| Тесты | `tests/test_async_client.py` (без сети: заглушка `AsyncOpenAI` на `asyncio.sleep`) |
+
+### Как устроен клиент
+
+- **Семафор — атрибут экземпляра.** `self._sem = asyncio.Semaphore(concurrency)` создаётся один раз в `__init__`. Его используют `complete` и `stream_chat`, поэтому лимит общий для всех вызовов клиента: и для батча, и для параллельных запросов к `/chat/stream`.
+- **Лимит задаётся при создании клиента.** `batch_chat(prompts, concurrency)` принимает `concurrency`, как в задании, но не создаёт новый семафор: если значение не совпадает с лимитом клиента, будет `ValueError` с подсказкой создать `AsyncLLMClient(concurrency=N)`. Иначе семафор пришлось бы пересоздавать на каждый вызов, и лимит перестал бы быть общим.
+- **Два уровня таймаута.** Таймаут SDK (`LLM_REQUEST_TIMEOUT`) действует на одну HTTP-попытку. `asyncio.timeout(LLM_CALL_TIMEOUT)` ограничивает всю операцию `complete()` вместе с повторами и fallback. Время ожидания в очереди семафора в этот бюджет не входит.
+- **Повторы делает SDK.** `max_retries=LLM_SDK_MAX_RETRIES`: SDK сам повторяет 408, 409, 429, 5xx и ошибки соединения с экспоненциальной задержкой и учитывает `Retry-After`. Если провайдер так и не ответил, запрос уходит следующему провайдеру в цепочке.
+- **`batch_chat`** — `asyncio.gather(..., return_exceptions=True)`. Ответы идут в порядке промптов; упавший запрос возвращается исключением на своей позиции и не роняет остальные.
+- **`batch_chat_strict`** — `asyncio.TaskGroup`, «все ответы или ничего». При первой ошибке остальные задачи отменяются, вызывающий код ловит `ExceptionGroup` через `except*`. Сравнение двух методов — в `scripts/benchmark_results.md`.
+- **`stream_chat`** — async-генератор фрагментов ответа, запрос с `stream_options={"include_usage": True}`. Переключиться на fallback можно только до первого токена. После закрытия потока в лог пишутся `usage`, время до первого токена и общее время. Если клиент перестал читать поток (закрыл SSE-соединение), генератор закрывается, запрос к модели прерывается, а в логе остаётся `status: "cancelled"`.
+
+### Лог вызовов
+
+Каждый вызов пишет JSON-строку в `logs/llm_calls.jsonl`:
+
+- `llm.call` — `status` (`ok`, `cache_hit`, `timeout`, `cancelled`, `error:<тип>`), `duration_ms`, `queue_ms` (ожидание в семафоре), `model`, `provider`, `prompt_chars`, токены;
+- `llm.stream` — то же для потока плюс `chunks`, `ttft_ms` и `last_token_ms`;
+- `llm.fallback` — переход к следующему провайдеру;
+- `llm.batch_strict_failed` — сколько задач строгого батча упало, отменено и успело завершиться.
+
+Пример строки (прогон на моке):
+
+```json
+{"ts": "2026-10-06T20:32:10.452+03:00", "level": "info", "event": "llm.stream", "status": "ok", "provider": "ollama", "model": "mock-model", "prompt_chars": 49, "chunks": 31, "ttft_ms": 905.0, "last_token_ms": 2963.8, "duration_ms": 3034.4, "prompt_tokens": 12, "completion_tokens": 31, "total_tokens": 43}
+```
+
+### Бенчмарк: почему два прогона
+
+Асинхронность ускоряет **I/O-bound** работу: пока один запрос ждёт ответа облачного API, клиент отправляет следующие. Локальный Ollama на CPU — **compute-bound**: модель на ноутбуке всё равно генерирует ответы по очереди, поэтому параллельные запросы почти не ускоряются. Бенчмарк запускается на двух целях:
+
+- **мок** (`--target mock`, по умолчанию) — OpenAI-совместимый сервер с фиксированной задержкой ответа, как у облачного провайдера. Здесь видно ускорение от `concurrency`.
+- **Ollama** (`--target ollama`) — реальная локальная модель из `.env`. Здесь видно, где асинхронность не помогает.
+
+В обоих прогонах кеш выключен, и на каждый уровень `concurrency` создаётся новый клиент. Иначе повторный прогон тех же промптов отвечал бы из кеша, и ускорение было бы ложным.
+
+### Результаты
+
+Прогон 6 октября 2026 года на ноутбуке без видеокарты. Полные таблицы — в [`scripts/benchmark_results.md`](scripts/benchmark_results.md).
+
+**Мок облачного API** (задержка 1 с на ответ, 20 запросов):
+
+| Режим | Время | Ускорение к sync |
+|-------|-------|------------------|
+| sync, последовательно | 21,4 с | ×1,0 |
+| async, concurrency=1 | 20,3 с | ×1,1 |
+| async, concurrency=5 | 4,1 с | ×5,3 |
+| async, concurrency=10 | 2,1 с | ×10,2 |
+
+Критерий «не меньше 4–5× при concurrency=10» выполнен: ×10,2. Пока запросы только ждут ответа, ускорение растёт вместе с concurrency: при concurrency=10 двадцать запросов проходят двумя волнами примерно по секунде.
+
+**Локальный Ollama** (`llama3.2`, 6 запросов, `max_tokens=60`):
+
+| Режим | Время | Ускорение к sync |
+|-------|-------|------------------|
+| sync, последовательно | 30,0 с | ×1,0 |
+| async, concurrency=1 | 34,1 с | ×0,9 |
+| async, concurrency=5 | 35,8 с | ×0,8 |
+| async, concurrency=10 | 33,6 с | ×0,9 |
+
+Ускорения нет, как и ожидалось: модель считает ответы на процессоре ноутбука, и параллельные запросы делят те же ядра, а не ждут сеть. Объём вычислений не меняется, поэтому и общее время не уменьшается. Небольшое замедление — разброс замеров и накладные расходы на параллельную обработку. Асинхронный клиент здесь полезен в другом: пока модель генерирует ответ, event loop свободен, и сервис продолжает отвечать на другие запросы.
+
+**Невалидная модель на 3-м запросе:**
+
+| Метод | Мок (10 запросов) | Ollama (6 запросов) |
+|-------|-------------------|---------------------|
+| `batch_chat` (gather) | 9 из 10 ответов, на позиции 3 — `AllProvidersFailedError`; 1,0 с | 5 из 6 ответов, на позиции 3 — `AllProvidersFailedError`; 27,2 с |
+| `batch_chat_strict` (TaskGroup) | ни одного ответа, `ExceptionGroup` пойман через `except*`; 0,0 с | ни одного ответа, `ExceptionGroup` пойман через `except*`; 0,3 с |
+
+Строгий батч останавливается сразу после ответа 404 на невалидную модель и отменяет остальные запросы. Он подходит, когда частичный результат бесполезен — например, все ответы нужны для одного отчёта. `batch_chat` — когда каждый ответ ценен сам по себе.
+
+**Стриминг** (`scripts/stream_demo.py`):
+
+| Цель | TTFT | Общее время |
+|------|------|-------------|
+| мок, задержка 2 с | 1,36 с | 2,85 с |
+| Ollama, `llama3.2`, «Что такое event loop?» | 3,11 с | 42,31 с |
+
+TTFT меньше общего времени в обоих случаях. На Ollama пользователь видит начало ответа через 3 с вместо 42 с — для медленной локальной модели в этом и главный смысл стриминга.
+
+**SSE** (`uvicorn` + `curl.exe -N`, `llama3.2`): ответ пришёл событиями `data:` по мере генерации и завершился событием `done`. Ollama отдаёт поток по токенам, поэтому слова приходят частями — клиент склеивает фрагменты подряд.
+
+```
+data:  цик
+
+data: л
+
+data:  провер
+
+data: ки
+...
+event: done
+data: [DONE]
+```
+
+Качество самого текста (например, «ЭVENT-ЛОК» в начале ответа) — это возможности 3B-модели `llama3.2`, к клиенту и стримингу оно отношения не имеет.
+
+### Соответствие критериям блока 3.3
+
+| Критерий | Реализация |
+|----------|------------|
+| Нет sync `OpenAI`, `requests`, `time.sleep` внутри `async def` | `AsyncOpenAI`, `asyncio.sleep` только в моке; тест `test_no_blocking_calls` |
+| `self._sem` создаётся один раз в `__init__` | тест `test_semaphore_created_once_in_init`; число одновременных запросов проверяет `test_concurrency_limited_and_order_kept` |
+| Таймаут и повторы | таймаут SDK + `asyncio.timeout`, `max_retries` SDK; тест `test_call_timeout` |
+| `batch_chat` с `gather(return_exceptions=True)` | тест `test_failed_request_returned_in_place` |
+| `concurrency=10` даёт ускорение ≥ 4–5× на 20 запросах | ×10,2 на моке облачного API — см. раздел «Результаты» и `scripts/benchmark_results.md` |
+| `stream_chat` с `include_usage`, TTFT < общего времени | `scripts/stream_demo.py`: на Ollama TTFT 3,11 с при общем времени 42,31 с; тест `test_ttft_before_total_and_usage_logged` |
+| Лог `llm.call`: `duration_ms`, `model`, `prompt_chars`, `status` | `logs/llm_calls.jsonl`; тест `test_answer_and_call_log` |
+| Дополнительно: `TaskGroup` + `except*` | `batch_chat_strict`, тест `test_strict_batch_all_or_nothing`, сравнение в `scripts/benchmark_results.md` |
+| Дополнительно: SSE-эндпоинт | `POST /chat/stream` в `app/main.py`, проверен через `curl.exe -N` на `llama3.2`; тест `test_chat_stream_sends_events` |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -261,6 +415,14 @@ SUPPORT_VISION_MODEL=llama3.2-vision
 LLM_PROVIDER=ollama
 LLM_PROXY=                                   # к localhost не применяется; для Ollama не нужен
 AUDIO_API_KEY=                               # реальный ключ OpenAI для Whisper/TTS (вариант Б)
+```
+
+Настройки асинхронного клиента (блок 3.3) необязательны — без них действуют значения по умолчанию:
+
+```
+LLM_CONCURRENCY=5          # одновременных запросов на один клиент (семафор)
+LLM_CALL_TIMEOUT=180       # бюджет на весь вызов complete(), с: повторы и fallback включены
+LLM_SDK_MAX_RETRIES=3      # повторы SDK на 408/409/429/5xx и ошибки соединения
 ```
 
 ## Прокси
