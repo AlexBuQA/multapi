@@ -45,3 +45,24 @@ class ToolSettings(BaseSettings):
 
 
 tool_settings = ToolSettings()
+
+
+class AsyncClientSettings(BaseSettings):
+    """Настройки асинхронного клиента (блок 3.3). Все значения можно задать в .env."""
+
+    model_config = SettingsConfigDict(
+        env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Сколько запросов к LLM одновременно держит один экземпляр клиента (Semaphore).
+    llm_concurrency: int = 5
+    # Бюджет на всю операцию complete() — все попытки и fallback (asyncio.timeout).
+    # На одну HTTP-попытку действует таймаут SDK — LLM_REQUEST_TIMEOUT из src/config.py.
+    llm_call_timeout: float = 180.0
+    # Повторы на уровне SDK: 429 и 5xx с экспоненциальной задержкой и учётом Retry-After.
+    llm_sdk_max_retries: int = 3
+    # JSON-лог каждого вызова (событие llm.call) и стрима (llm.stream).
+    llm_call_log_path: Path = ROOT / "logs" / "llm_calls.jsonl"
+
+
+client_settings = AsyncClientSettings()

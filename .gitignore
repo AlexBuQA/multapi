@@ -13,6 +13,7 @@ env/
 # Логи реальных прогонов (sample_run.log оставляем в репозитории)
 logs/app.log
 logs/tool_calls.jsonl
+logs/llm_calls.jsonl
 
 # Генерируемые аудио-ответы
 outputs/*.mp3
