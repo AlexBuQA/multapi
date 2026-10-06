@@ -1,5 +1,5 @@
 """
-Тесты блока 3.3: AsyncLLMClient и SSE-эндпоинт. Сеть не используется — вместо
+Тесты блока 3.3: AsyncLLMClient. Сеть не используется — вместо
 AsyncOpenAI подставляется асинхронная заглушка с задержкой через asyncio.sleep.
 
 Запуск из корня проекта:
@@ -10,13 +10,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import logging
 import re
 import sys
 import tempfile
 import time
 import unittest
-import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -229,32 +227,6 @@ class TestStream(AsyncClientTestCase):
         parts = [d async for d in client.stream_chat("x")]
         self.assertTrue(parts)
         self.assertEqual(self.events("llm.stream")[0]["provider"], "openrouter")
-
-
-class TestSSEEndpoint(unittest.TestCase):
-    def test_chat_stream_sends_events(self):
-        with warnings.catch_warnings():          # starlette предупреждает о будущей замене httpx
-            warnings.simplefilter("ignore")
-            from fastapi.testclient import TestClient
-
-        from app.main import app
-
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        options = AsyncClientSettings(llm_call_log_path=Path(tmp.name) / "calls.jsonl")
-        fake = AsyncLLMClient(cfg=two_providers_cfg(), options=options, use_cache=False,
-                              client_factory=lambda p: fake_sdk(FakeCompletions(delay=0.01)))
-        self.addCleanup(close_event_logger, fake.events)
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        with TestClient(app) as http:
-            app.state.llm = fake
-            response = http.post("/chat/stream", json={"prompt": "Что такое event loop?"})
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("text/event-stream", response.headers["content-type"])
-            body = response.text
-            self.assertIn("data: Event loop", body)
-            self.assertIn("event: done", body)
-            self.assertEqual(http.post("/chat/stream", json={"prompt": ""}).status_code, 422)
 
 
 if __name__ == "__main__":

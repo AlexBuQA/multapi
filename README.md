@@ -1,9 +1,9 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.3
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.4
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
 
-CLI-приложение с **мультимодальными возможностями**, построенное на наработках блоков 2.1–2.5. Сборка по умолчанию работает на **локальном Ollama** (OpenAI-совместимый API), модели `llama3.2` / `llama3.2-vision`.
+CLI-приложение с **мультимодальными возможностями**, построенное на наработках блоков 2.1–2.5; с блока 3.4 чат-ядро доступно и как HTTP-сервис на FastAPI. Сборка по умолчанию работает на **локальном Ollama** (OpenAI-совместимый API), модели `llama3.2` / `llama3.2-vision`.
 
 Реализованы оба варианта задания:
 
@@ -11,7 +11,8 @@ CLI-приложение с **мультимодальными возможно�
 - **Вариант Б — Голосовой пайплайн (Whisper + TTS):** аудио → транскрипция → классификация → ответ (LLM) → озвучка → аудиофайл.
 - **Блок 3.2 — Архитектурный паспорт:** схема слоёв Gateway → Service → LLM → Data, ADR, точки отказа и проверка LiteLLM — [`docs/architecture.md`](docs/architecture.md).
 - **Блок 3.1 — Function Calling:** ассистент техподдержки с инструментами `search_knowledge_base` и `check_service_status`, полный цикл tool_call на локальном Ollama — см. раздел [«Блок 3.1 — Function Calling»](#блок-31--function-calling).
-- **Блок 3.3 — Асинхронная обработка запросов к ИИ:** `AsyncLLMClient` (семафор, таймауты, батч, стриминг), бенчмарк sync vs async и SSE-эндпоинт `/chat/stream` на FastAPI — см. раздел [«Блок 3.3»](#блок-33--асинхронная-обработка-запросов-к-ии).
+- **Блок 3.3 — Асинхронная обработка запросов к ИИ:** `AsyncLLMClient` (семафор, таймауты, батч, стриминг), бенчмарк sync vs async и первый SSE-эндпоинт `/chat/stream` — см. раздел [«Блок 3.3»](#блок-33--асинхронная-обработка-запросов-к-ии).
+- **Блок 3.4 — FastAPI-сервис для LLM:** `POST /chat` с кешем в Redis, `POST /chat/stream`, `GET /health`, `GET /models`; DI, middleware с `X-Request-ID`, CORS, единый формат ошибок, Swagger с примерами — см. раздел [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
 
 ## Важно про Ollama и модальности
 
@@ -64,12 +65,17 @@ multapi/
 │   ├── vision.py            # вариант А: base64 + Vision (vision-модель)
 │   ├── voice.py             # вариант Б: Whisper -> classify -> LLM -> TTS
 │   └── utils.py             # логирование, base64, валидация файлов, UsageTracker
-├── app/                     # блоки 3.1 и 3.3
+├── app/                     # блоки 3.1, 3.3 и 3.4
+│   ├── main.py              # блок 3.4: FastAPI — lifespan, middleware, CORS, обработчики ошибок
+│   ├── core/                # блок 3.4: config.py (Settings), exceptions.py (ошибки LLM)
+│   ├── deps/providers.py    # блок 3.4: внедрение зависимостей
+│   ├── routers/             # блок 3.4: chat.py, models.py, health.py
+│   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py
+│   ├── services/
+│   │   ├── llm.py           # блок 3.4: LLMService — кеш в Redis, поток, перевод ошибок
+│   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
 │   ├── config.py            # настройки ассистента с tools и асинхронного клиента (pydantic-settings)
 │   ├── logging_utils.py     # JSON-лог шагов -> logs/tool_calls.jsonl, logs/llm_calls.jsonl
-│   ├── main.py              # блок 3.3: FastAPI — /health, /chat, /chat/stream (SSE)
-│   ├── services/
-│   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
 │   ├── prompts/
 │   │   ├── system_v1.j2     # system prompt ассистента (Jinja2)
 │   │   ├── tools/           # description инструментов (*.md)
@@ -83,14 +89,14 @@ multapi/
 │   ├── knowledge_base.json  # руководство пользователя: 10 статей с разделами
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
-│   └── run_tool_call.py     # прогон трёх тест-запросов
+│   ├── run_tool_call.py     # прогон трёх тест-запросов
+│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4)
 ├── scripts/                 # блок 3.3
 │   ├── benchmark.py         # бенчмарк sync vs async -> benchmark_results.md
 │   ├── benchmark_results.md # результаты локального прогона (мок и Ollama)
 │   ├── stream_demo.py       # демо stream_chat: TTFT и общее время
 │   ├── mock_llm_server.py   # мок OpenAI API с задержкой (модель облачного провайдера)
-│   ├── _target.py           # выбор цели: мок или локальный Ollama
-│   └── stream_request.json  # тело запроса для curl.exe
+│   └── _target.py           # выбор цели: мок или локальный Ollama
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -99,7 +105,8 @@ multapi/
 ├── tests/
 │   ├── test_review_fixes.py # тесты на моках (без сети): учёт аудио, классификатор, образцы
 │   ├── test_tool_call.py    # блок 3.1: схемы, обработчики, цикл tool_call, лог
-│   └── test_async_client.py # блок 3.3: семафор, батчи, таймаут, стриминг, SSE
+│   ├── test_async_client.py # блок 3.3: семафор, батчи, таймаут, стриминг
+│   └── test_service.py      # блок 3.4: настройки, ручки, кеш, ошибки, поток, CORS, Swagger
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
@@ -119,6 +126,8 @@ cp .env.example .env        # значения для Ollama уже выстав
 ```
 
 Нужен Python 3.11 или новее: блок 3.3 использует `asyncio.TaskGroup`, `asyncio.timeout` и `except*`.
+
+Для HTTP-сервиса (блок 3.4) впишите в `.env` переменные `LLM__*` из конца `.env.example` и, чтобы работал кеш, запустите Redis — см. раздел [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
 
 Запустите Ollama и подтяните модели:
 
@@ -163,14 +172,12 @@ python scripts/benchmark.py                                    # мок с за�
 python scripts/benchmark.py --target ollama --n 6 --max-tokens 60
 python scripts/stream_demo.py                                  # мок
 python scripts/stream_demo.py --target ollama "Что такое event loop?"
-uvicorn app.main:app --port 8000                               # сервис; запросы — во втором терминале
 ```
 
-Проверка потока во втором терминале (PowerShell — именно `curl.exe`, тело запроса из файла):
-```powershell
-curl.exe -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d "@scripts/stream_request.json"
+**Блок 3.4 — HTTP-сервис** (Swagger — http://localhost:8000/docs; запросы через `curl.exe` — в разделе [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm)):
+```bash
+uvicorn app.main:app --reload --port 8000
 ```
-В Linux/macOS: `curl -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d '{"prompt": "Что такое event loop?"}'`.
 
 **Тесты (без сети и без ключей):**
 ```bash
@@ -287,7 +294,7 @@ python -m unittest discover -s tests -v
 |-----|-----|
 | Асинхронный клиент | `app/services/llm_client.py`: `complete`, `batch_chat`, `batch_chat_strict`, `stream_chat` |
 | Настройки | `app/config.py`, `AsyncClientSettings`: `LLM_CONCURRENCY`, `LLM_CALL_TIMEOUT`, `LLM_SDK_MAX_RETRIES` |
-| FastAPI и SSE | `app/main.py`: `GET /health`, `POST /chat` (ответ целиком), `POST /chat/stream` (поток SSE) |
+| FastAPI и SSE | в блоке 3.3 — `app/main.py` на `sse-starlette` (`/chat`, `/chat/stream` с полем `prompt`); в блоке 3.4 заменены сервисом с роутерами, см. раздел «Блок 3.4» |
 | Бенчмарк sync vs async | `scripts/benchmark.py` → результаты в `scripts/benchmark_results.md` (реальный прогон — в репозитории) |
 | Демо стриминга | `scripts/stream_demo.py`: TTFT и общее время по `time.perf_counter()` |
 | Мок OpenAI API | `scripts/mock_llm_server.py`: отвечает с заданной задержкой, умеет поток и `usage` |
@@ -295,7 +302,7 @@ python -m unittest discover -s tests -v
 
 ### Как устроен клиент
 
-- **Семафор — атрибут экземпляра.** `self._sem = asyncio.Semaphore(concurrency)` создаётся один раз в `__init__`. Его используют `complete` и `stream_chat`, поэтому лимит общий для всех вызовов клиента: и для батча, и для параллельных запросов к `/chat/stream`.
+- **Семафор — атрибут экземпляра.** `self._sem = asyncio.Semaphore(concurrency)` создаётся один раз в `__init__`. Его используют `complete` и `stream_chat`, поэтому лимит общий для всех вызовов клиента: и для батча, и для параллельных потоков.
 - **Лимит задаётся при создании клиента.** `batch_chat(prompts, concurrency)` принимает `concurrency`, как в задании, но не создаёт новый семафор: если значение не совпадает с лимитом клиента, будет `ValueError` с подсказкой создать `AsyncLLMClient(concurrency=N)`. Иначе семафор пришлось бы пересоздавать на каждый вызов, и лимит перестал бы быть общим.
 - **Два уровня таймаута.** Таймаут SDK (`LLM_REQUEST_TIMEOUT`) действует на одну HTTP-попытку. `asyncio.timeout(LLM_CALL_TIMEOUT)` ограничивает всю операцию `complete()` вместе с повторами и fallback. Время ожидания в очереди семафора в этот бюджет не входит.
 - **Повторы делает SDK.** `max_retries=LLM_SDK_MAX_RETRIES`: SDK сам повторяет 408, 409, 429, 5xx и ошибки соединения с экспоненциальной задержкой и учитывает `Retry-After`. Если провайдер так и не ответил, запрос уходит следующему провайдеру в цепочке.
@@ -371,7 +378,7 @@ python -m unittest discover -s tests -v
 
 TTFT меньше общего времени в обоих случаях. На Ollama пользователь видит начало ответа через 3 с вместо 42 с — для медленной локальной модели в этом и главный смысл стриминга.
 
-**SSE** (`uvicorn` + `curl.exe -N`, `llama3.2`): ответ пришёл событиями `data:` по мере генерации и завершился событием `done`. Ollama отдаёт поток по токенам, поэтому слова приходят частями — клиент склеивает фрагменты подряд.
+**SSE** (`uvicorn` + `curl.exe -N`, `llama3.2`; формат блока 3.3 — текст прямо в `data:`, в блоке 3.4 он внутри JSON): ответ пришёл событиями `data:` по мере генерации и завершился событием `done`. Ollama отдаёт поток по токенам, поэтому слова приходят частями — клиент склеивает фрагменты подряд.
 
 ```
 data:  цик
@@ -400,7 +407,204 @@ data: [DONE]
 | `stream_chat` с `include_usage`, TTFT < общего времени | `scripts/stream_demo.py`: на Ollama TTFT 3,11 с при общем времени 42,31 с; тест `test_ttft_before_total_and_usage_logged` |
 | Лог `llm.call`: `duration_ms`, `model`, `prompt_chars`, `status` | `logs/llm_calls.jsonl`; тест `test_answer_and_call_log` |
 | Дополнительно: `TaskGroup` + `except*` | `batch_chat_strict`, тест `test_strict_batch_all_or_nothing`, сравнение в `scripts/benchmark_results.md` |
-| Дополнительно: SSE-эндпоинт | `POST /chat/stream` в `app/main.py`, проверен через `curl.exe -N` на `llama3.2`; тест `test_chat_stream_sends_events` |
+| Дополнительно: SSE-эндпоинт | `POST /chat/stream` на `sse-starlette`, проверен через `curl.exe -N` на `llama3.2`; в блоке 3.4 заменён на `StreamingResponse`, тесты — в `tests/test_service.py` |
+
+## Блок 3.4 — FastAPI-сервис для LLM
+
+Чат-ядро проекта стало HTTP-сервисом: `uvicorn app.main:app` отвечает на `POST /chat` и отдаёт ответ потоком через `POST /chat/stream`. Структура повторяет эталон из репозитория курса ([`m3_b4`](https://github.com/abat-voix/ai-tools-and-links/tree/main/m3_b4)) и адаптирована к проекту: провайдер по умолчанию — локальный Ollama, повторы делает SDK, а семафор из блока 3.3 ограничивает запросы всего сервиса.
+
+### Структура
+
+```
+app/
+├── main.py              # FastAPI: lifespan, middleware request_id, CORS, обработчики ошибок, роутеры
+├── core/
+│   ├── config.py        # Settings + вложенный LLMSettings (pydantic-settings v2), get_settings() с @lru_cache
+│   └── exceptions.py    # LLMError, LLMRateLimitError, LLMTimeoutError, LLMAuthError, LLMUnavailableError
+├── deps/
+│   └── providers.py     # get_settings, get_openai, get_cache, get_llm_service + Annotated-алиасы
+├── routers/
+│   ├── chat.py          # POST /chat, POST /chat/stream
+│   ├── models.py        # GET /models
+│   └── health.py        # GET /health, GET /ready
+├── services/
+│   └── llm.py           # LLMService: complete() с кешем в Redis, stream(), перевод ошибок SDK
+└── schemas/
+    ├── chat.py          # ChatRequest, ChatResponse.from_openai(), ChatDelta, Usage
+    ├── models.py        # ModelInfo и статический каталог моделей с ценами
+    └── errors.py        # единый формат ошибок и описания ответов для Swagger
+```
+
+Код блоков 3.1 и 3.3 (`app/config.py`, `app/llm/`, `app/tools/`, `app/services/llm_client.py`) не менялся: ассистент с инструментами и бенчмарк работают как раньше.
+
+### Эндпоинты
+
+| Метод и путь | Что делает | Коды ответа |
+|--------------|------------|-------------|
+| `POST /chat` | Ответ целиком. Повторный одинаковый запрос берётся из Redis с `cached: true` | 200, 422, 429, 502, 504 |
+| `POST /chat/stream` | Ответ потоком SSE: кадры `data: {"content": ...}`, затем `data: {"usage": {...}}` и `data: [DONE]` | 200, 422, 429, 502, 504 |
+| `GET /health` | `{"status": "ok"}` без зависимостей: 200 даже без Redis и провайдера | 200 |
+| `GET /ready` | Состояние Redis: `ready` или `degraded` — сервис работает без кеша | 200 |
+| `GET /models` | Каталог: модели OpenAI со справочными ценами и локальные модели Ollama | 200 |
+
+Swagger открывается на http://localhost:8000/docs. У `POST /chat` и `POST /chat/stream` есть два готовых примера запроса (список «Examples»), у каждого кода ответа — пример тела. Примеры не задают `model`, поэтому «Try it out» работает с любым провайдером из настроек. `/health`, `/ready` и `/models` не принимают тело и не обращаются к модели, поэтому у них в Swagger только код 200: 422, 429, 502 и 504 там возникнуть не могут.
+
+### Как обрабатывается запрос
+
+1. **Middleware** присваивает запросу `request_id` или берёт его из заголовка `X-Request-ID`, если там только буквы, цифры, `.`, `_` и `-`. Затем кладёт его в `request.state`, замеряет `duration_ms` через `time.perf_counter()`, пишет одну строку лога и возвращает `X-Request-ID` в ответе. Для `/chat/stream` `duration_ms` — время до первого фрагмента, потому что тело потока уходит позже.
+   ```
+   2026-10-06 21:11:04,839 INFO llm-service: request_id=rid-abc-123 method=GET path=/health status=200 duration_ms=0.5
+   ```
+2. **Внедрение зависимостей.** Ручка получает `LLMServiceDep`. `get_llm_service` собирает `LLMService(openai, cache, settings)` из объектов, которые `lifespan` создал один раз и положил в `app.state`. Глобальных клиентов на уровне модулей нет, поэтому тесты подменяют их через `app.dependency_overrides` и `app.state`.
+3. **Кеш.** `complete()` строит ключ `chat:` + sha256 от запроса без `user_id`, `session_id` и `stream`; модель по умолчанию подставляется до расчёта ключа. Чтение — `await cache.get`, запись — `await cache.setex` с TTL `CACHE_TTL_SECONDS`. Попадание в кеш возвращается через `ChatResponse.model_validate_json(...)` с `cached: true`. Ответы кешируются при любой `temperature`, а `temperature` входит в ключ: ассистент техподдержки на одинаковый вопрос с теми же параметрами отвечает одинаково и не тратит токены. В эталоне курса кеш работает только при `temperature == 0`.
+4. **Ошибки провайдера** `LLMService` переводит в доменные исключения, а обработчик в `app/main.py` — в JSON `{"error": {"code": ..., "message": ..., "request_id": ...}}`:
+
+   | Ошибка OpenAI SDK | Исключение | HTTP | `error.code` |
+   |-------------------|------------|------|--------------|
+   | `RateLimitError` | `LLMRateLimitError` | 429 и `Retry-After`, если его прислал провайдер | `llm_rate_limit` |
+   | `APITimeoutError` | `LLMTimeoutError` | 504 | `llm_timeout` |
+   | `AuthenticationError`, `PermissionDeniedError` | `LLMAuthError` | 502 | `llm_auth` |
+   | `APIConnectionError` (Ollama не запущен, неверный адрес) | `LLMUnavailableError` | 502 | `llm_unavailable` |
+   | другие ошибки API, например 404 — модели нет у провайдера | `LLMError` | 502 | `llm_error` |
+
+   Наружу уходит понятный текст, а исходная ошибка провайдера — только в лог сервиса вместе с `request_id`. Ошибка валидации возвращается с кодом 422: `{"error": {"code": "validation_error", "message": ..., "fields": [{"field": ..., "message": ...}]}}`. Любое другое исключение — 500 `internal_error` без трейсбека.
+5. **Поток.** До ответа клиенту сервис дожидается первого фрагмента. Поэтому, если провайдер недоступен или ключ неверный, клиент получит обычный JSON с кодом 502, 429 или 504, а не поток с кодом 200 и ошибкой внутри. Обрыв посреди ответа приходит кадром `data: {"error": {...}}` перед `[DONE]`. Текст передаётся внутри JSON, как в эталоне курса: перевод строки в ответе модели (списки, код) не ломает разметку SSE, где пустая строка означает конец события. Если клиент закрыл соединение, сервис закрывает поток к провайдеру и освобождает слот семафора.
+6. **Надёжность.** Повторы встроены в SDK (`LLM__MAX_RETRIES`): 408, 409, 429, 5xx и ошибки соединения повторяются с экспоненциальной задержкой и учётом `Retry-After`. Tenacity поверх не добавлен, иначе попытки перемножились бы: 3 × 3 = 9. Семафор из блока 3.3 создаётся один раз в `lifespan` и ограничивает число одновременных запросов к модели (`LLM__MAX_CONCURRENCY`) — это Bulkhead из архитектурного паспорта. Если Redis недоступен при старте, сервис работает без кеша до перезапуска. Если Redis упал во время работы, ошибка кеша пишется в лог, а запрос уходит в модель.
+7. **CORS** разрешает только адреса из `CORS_ORIGINS` и открывает фронтенду заголовок `X-Request-ID`. Сочетание `CORS_ALLOW_CREDENTIALS=true` и `["*"]` настройки не пропускают: сервис не стартует и объясняет почему.
+
+### Настройки
+
+`app/core/config.py`: `Settings(BaseSettings)` с вложенным `LLMSettings`. Переменные вложенной секции задаются с префиксом `LLM__` (`env_nested_delimiter="__"`), ключ хранится как `SecretStr`. `get_settings()` обёрнут в `@lru_cache`. Пустое значение в `.env` (`КЛЮЧ=`) означает значение по умолчанию.
+
+| Переменная | По умолчанию | Для локального Ollama |
+|------------|--------------|-----------------------|
+| `LLM__OPENAI_API_KEY` | — (обязательна) | `ollama` — любое непустое значение |
+| `LLM__BASE_URL` | `https://api.openai.com/v1` | `http://localhost:11434/v1` |
+| `LLM__DEFAULT_MODEL` | `gpt-4o-mini` | `llama3.2` |
+| `LLM__REQUEST_TIMEOUT` | `30` с на одну попытку | `120` — на CPU ответ генерируется долго |
+| `LLM__MAX_RETRIES` | `3` | `2` |
+| `LLM__MAX_CONCURRENCY` | `10` | |
+| `REDIS_URL` | `redis://localhost:6379/0` | |
+| `CACHE_TTL_SECONDS` | `3600` | |
+| `CORS_ORIGINS` | `["http://localhost:3000"]` | |
+| `CORS_ALLOW_CREDENTIALS` | `false` | |
+| `APP_NAME` | `multapi — LLM-сервис техподдержки` | |
+
+Переменные блоков 2–3 (`OPENAI_API_KEY`, `SUPPORT_PRIMARY_MODEL`, `LLM_REQUEST_TIMEOUT` и др.) сервис не читает: они по-прежнему нужны CLI, ассистенту с инструментами и бенчмарку.
+
+Без `LLM__OPENAI_API_KEY` uvicorn не стартует — так pydantic-settings и должен себя вести:
+
+```
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+llm.openai_api_key
+  Field required [type=missing, input_value={}, input_type=dict]
+```
+
+### Redis
+
+Кеш нужен только для критерия «повторный запрос — `cached: true`»: без Redis сервис работает, просто без кеша. На Windows Redis удобно запустить в Docker Desktop — он понадобится и в следующем блоке.
+
+```powershell
+docker run -d --name multapi-redis -p 6379:6379 mirror.gcr.io/library/redis:7.4
+docker exec multapi-redis redis-cli ping     # PONG
+docker stop multapi-redis                    # выключить — проверка /health без Redis
+docker start multapi-redis                   # включить снова
+```
+
+Две особенности, с которыми столкнулись при проверке:
+
+- **Docker Hub недоступен** (`TLS handshake timeout` при обращении к `auth.docker.io`), поэтому образ берётся с зеркала Google `mirror.gcr.io` — это тот же официальный образ `redis:7.4`.
+- **Docker Desktop забирает память у Ollama.** Его виртуальная машина WSL по умолчанию занимает несколько гигабайт, и Ollama не может загрузить модель: `llama runner process has terminated: ... failed to allocate compute pp buffers`. Помогает предел памяти в `%USERPROFILE%\.wslconfig` — Redis хватает и одного гигабайта:
+  ```ini
+  [wsl2]
+  memory=1GB
+  ```
+  После правки: закрыть Docker Desktop, выполнить `wsl --shutdown` и запустить Docker Desktop снова.
+
+Без Docker Redis можно поставить в WSL: `sudo apt install redis-server`, затем `sudo service redis-server start`; сервис на Windows видит его по `localhost:6379`.
+
+### Проверка
+
+Терминал 1 — сервис:
+```powershell
+uvicorn app.main:app --reload --port 8000
+```
+
+Терминал 2 — запросы. В PowerShell используется `curl.exe`, а тело запроса берётся из файла, чтобы не воевать с кавычками:
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+curl.exe -s -w "\ntime_total: %{time_total}s\n" -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "@examples/requests/chat.json"
+curl.exe -s -w "\ntime_total: %{time_total}s\n" -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "@examples/requests/chat.json"
+curl.exe -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d "@examples/requests/chat_stream.json"
+curl.exe -N -X POST http://localhost:8000/chat/stream -H "Content-Type: application/json" -d "@examples/requests/chat_stream_long.json"
+curl.exe -i http://localhost:8000/health
+curl.exe http://localhost:8000/ready
+```
+
+`chat_stream.json` — запрос из задания («считай до пяти»), `chat_stream_long.json` — вопрос техподдержки с длинным ответом, на котором хорошо видно, как ответ приходит кусками.
+
+В Linux и macOS — как в задании: `curl -X POST localhost:8000/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}'`.
+
+**Неверный ключ.** Ollama ключ не проверяет, а OpenRouter из нашей сети недоступен: сервис отвечает `502 llm_unavailable`, до проверки ключа дело не доходит. Поэтому ответ `502 llm_auth` проверяется на моке OpenAI API из блока 3.3: с параметром `--api-key` он, как настоящий API, отвечает 401 на чужой ключ. Переменные окружения важнее `.env`, поэтому сам `.env` менять не нужно.
+
+Redis на время проверки выключается: иначе запрос, ответ на который уже лежит в кеше, вернётся оттуда с `cached: true`, и до провайдера с его проверкой ключа дело не дойдёт (см. «Наблюдения» ниже).
+
+Терминал 3 — мок, принимающий только ключ `sk-correct`:
+```powershell
+python scripts/mock_llm_server.py --port 8001 --api-key sk-correct
+```
+Терминал 1 — Redis выключен, сервис с другим ключом:
+```powershell
+docker stop multapi-redis
+$env:LLM__BASE_URL = "http://127.0.0.1:8001/v1"
+$env:LLM__OPENAI_API_KEY = "sk-broken"
+uvicorn app.main:app --port 8000
+```
+Запрос к `/chat` из терминала 2 вернёт `502` и `{"error": {"code": "llm_auth", ...}}`, а в логе сервиса будет исходная ошибка: `AuthenticationError("Error code: 401 - ... Incorrect API key provided ...")`. После проверки остановите мок и сервис, а в терминале 1 уберите переменные и включите Redis: `Remove-Item Env:LLM__BASE_URL, Env:LLM__OPENAI_API_KEY`, затем `docker start multapi-redis`.
+
+### Результаты
+
+Прогон 6 октября 2026 года на ноутбуке без видеокарты: Ollama `llama3.2`, Redis 7.4 в Docker Desktop.
+
+| Проверка | Результат |
+|----------|-----------|
+| Старт `uvicorn app.main:app --reload` | `Redis redis://localhost:6379/0 доступен — кеш ответов включён`, `Модель по умолчанию: llama3.2` |
+| `POST /chat` `{"messages":[{"role":"user","content":"hi"}]}` | 200, `"content":"How can I assist you today?"`, `usage` 26 + 8 = 34 токена, `cached: false`; 2,80 с (на сервере 2544 мс) |
+| Тот же запрос повторно | 200, тот же ответ с `cached: true`; 0,22 с (на сервере 4,4 мс) |
+| `POST /chat/stream` «считай до пяти» | кадры `data: {"content":"4"}`, `data: {"content":"."}`, затем `data: {"usage":{...}}` и `data: [DONE]`; до первого фрагмента 386 мс |
+| `POST /chat/stream` с вопросом из `chat_stream_long.json` | 151 кадр `data: {"content":...}` по мере генерации, затем `data: {"usage":{"prompt_tokens":73,"completion_tokens":152,"total_tokens":225}}` и `data: [DONE]`; до первого фрагмента 10,5 с |
+| `GET /health` при остановленном Redis | `HTTP/1.1 200 OK`, `{"status":"ok"}`, заголовок `x-request-id` |
+| `GET /ready` при остановленном Redis | `{"status":"degraded","components":{"redis":false}}` |
+| `POST /chat` при остановленном Redis | 200; в логе `cache.get failed, идём в модель без кеша` и `cache.setex failed, ответ не закеширован` |
+| Swagger, «Try it out» с примером «Один вопрос» | 200: `POST /chat status=200 duration_ms=44315` в логе сервиса — длинный ответ `llama3.2` на CPU |
+| Неверный ключ: мок с `--api-key sk-correct`, сервис с `sk-broken`, Redis выключен | `HTTP 502`, `{"error":{"code":"llm_auth","message":"Провайдер LLM отклонил ключ доступа сервиса.",...}}`; мок ответил `401 Unauthorized`, в логе сервиса — `llm_error=llm_auth cause=AuthenticationError("Error code: 401 - ... Incorrect API key provided: sk-***oken. ...")` |
+| То же с включённым Redis | `HTTP 200`, `cached: true` за 13,8 мс: ответ на `hi` уже был в кеше, мок не получил ни одного запроса |
+| Ollama не хватило памяти — ошибка 500 | `502 {"error":{"code":"llm_error","message":"Провайдер LLM вернул ошибку 500.",...}}` без трейсбека; текст Ollama — только в логе сервиса |
+| Провайдер недоступен (OpenRouter из нашей сети) | `502 {"error":{"code":"llm_unavailable",...}}` |
+
+Наблюдения:
+
+- **Кеш.** Повтор отвечает за 4,4 мс на сервере вместо 2,5 с — модель не вызывается. `curl` показывает 0,22 с: для `localhost` он сначала 200 мс ждёт ответа по IPv6 (`::1`), а uvicorn слушает только `127.0.0.1`. С адресом `http://127.0.0.1:8000` эта задержка пропадает.
+- **Поток.** 3B-модель `llama3.2` поняла «считай до пяти» по-своему и ответила «4.» — двумя фрагментами. Это качество маленькой модели, а не сервиса; на вопросе из `chat_stream_long.json` ответ приходит десятками фрагментов.
+- **Redis выключен на ходу.** Запрос не падает, но каждое обращение к кешу ждёт таймаута подключения — до 1 с на `get` и столько же на `setex`. Если Redis недоступен уже при старте, сервис сразу работает без кеша и на него время не тратит.
+- **Повторы SDK.** Ошибку 500 от Ollama SDK повторил ещё 2 раза (`LLM__MAX_RETRIES=2`), поэтому ответ 502 пришёл через 10–15 с. На 401 SDK не повторяет запрос: ответ `llm_auth` пришёл за 0,9 с.
+- **Кеш и смена провайдера.** Ключ кеша строится по самому запросу — модель, сообщения, параметры, — как требует задание; адрес провайдера в него не входит. Поэтому после переключения на другой провайдер с той же моделью сервис ещё `CACHE_TTL_SECONDS` отдаёт прежние ответы из кеша. Для деградации это плюс: пока провайдер недоступен или ключ сломан, уже заданные вопросы получают ответ. Если провайдеры отвечают по-разному, в ключ стоит добавить `LLM__BASE_URL`.
+- **Перевод строки внутри ответа.** Модель присылает фрагменты вроде `":\n\n"` — внутри JSON они безопасны. Без JSON пустая строка закрыла бы событие SSE посреди ответа.
+
+### Соответствие критериям блока 3.4
+
+| Критерий | Реализация |
+|----------|------------|
+| `uvicorn app.main:app --reload` стартует; без ключа — падает | `get_settings()` в `app/main.py`; тест `test_missing_api_key_stops_start` |
+| `POST /chat` → 200, JSON с `content`, `usage`, `cached: false` | `routers/chat.py`, `LLMService.complete`; тест `test_chat_ok` |
+| `POST /chat/stream` отдаёт ответ кусками, в конце `data: [DONE]` | `StreamingResponse`, кадры собираются вручную; тест `test_stream_frames_usage_and_done` |
+| `GET /health` — 200 при выключенном Redis | ручка без зависимостей; тесты `test_health_without_dependencies`, `test_starts_without_redis` |
+| Повторный запрос — `cached: true` и быстрее | Redis `get`/`setex`, ключ `chat:` + sha256; тест `test_repeat_request_served_from_cache` |
+| Сломанный ключ → 502 `llm_auth`, а не 500 с трейсбеком | `provider_errors()` + обработчик `LLMError`; тест `test_provider_errors_mapped`; живая проверка — мок с `--api-key` |
+| Swagger: примеры запроса, `summary`, `responses` 200/422/429/502/504; «Try it out» не даёт 422 | `json_schema_extra` и `openapi_examples`; тест `test_swagger_examples_summaries_and_responses` |
+| DI без глобальных клиентов, `Annotated`-алиасы | `app/deps/providers.py` |
+| Middleware: `request_id`, `duration_ms`, лог, `X-Request-ID` | `request_context` в `app/main.py`; тест `test_request_id_generated_propagated_and_logged` |
+| CORS без `["*"]` вместе с `allow_credentials=True` | `Settings._check_cors`; тесты `test_cors_wildcard_with_credentials_rejected`, `test_cors_allows_only_configured_origin` |
 
 ## Конфигурация (.env)
 
@@ -424,6 +628,18 @@ LLM_CONCURRENCY=5          # одновременных запросов на о
 LLM_CALL_TIMEOUT=180       # бюджет на весь вызов complete(), с: повторы и fallback включены
 LLM_SDK_MAX_RETRIES=3      # повторы SDK на 408/409/429/5xx и ошибки соединения
 ```
+
+HTTP-сервис (блок 3.4) читает свои переменные с префиксом `LLM__`; для локального Ollama:
+
+```
+LLM__OPENAI_API_KEY=ollama                  # обязательна: без неё сервис не стартует
+LLM__BASE_URL=http://localhost:11434/v1
+LLM__DEFAULT_MODEL=llama3.2
+LLM__REQUEST_TIMEOUT=120
+LLM__MAX_RETRIES=2
+```
+
+Остальные (`REDIS_URL`, `CACHE_TTL_SECONDS`, `CORS_ORIGINS` …) — в таблице раздела [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
 
 ## Прокси
 
