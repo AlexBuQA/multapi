@@ -66,5 +66,8 @@ def analyze_image(
         messages, temperature=temperature, max_tokens=600,
         label="vision", model_override=vision_model,
     )
-    cache.set(vision_model, messages, temperature, answer)
+    # Заглушку «Сервис временно недоступен» не кешируем: иначе повторный
+    # запрос вернёт её из кеша, даже когда провайдер уже восстановится.
+    if answer != client.USER_FACING_FAILURE:
+        cache.set(vision_model, messages, temperature, answer)
     return answer
