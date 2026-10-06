@@ -41,6 +41,10 @@ logger = get_logger("client")
 RETRYABLE = (RateLimitError, APITimeoutError, InternalServerError, APIConnectionError)
 
 
+class AllProvidersFailedError(RuntimeError):
+    """Все провайдеры цепочки недоступны (после retry и fallback)."""
+
+
 class RobustLLMClient:
     """Надёжный клиент с retry + fallback. Параметры — из Settings."""
 
@@ -160,6 +164,68 @@ class RobustLLMClient:
 
         logger.critical("Все провайдеры недоступны. Последняя ошибка: %s", last_exc)
         return self.USER_FACING_FAILURE
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+        label: str = "complete",
+        model_override: str | None = None,
+    ) -> Any:
+        """
+        Chat-completion с retry+fallback, возвращает ответ целиком (Function Calling).
+
+        В отличие от chat(), отдаёт объект ответа SDK: в нём есть
+        choices[0].message.tool_calls, finish_reason и usage. model_override
+        применяется только к основному провайдеру — имя локальной модели Ollama
+        не подходит облачному fallback, он использует свою chat_model.
+        Если все провайдеры недоступны — AllProvidersFailedError.
+        """
+        last_exc: Exception | None = None
+        for provider in self.settings.chain():
+            is_primary = provider.name == self.settings.provider
+            model = (model_override if is_primary else None) or provider.chat_model
+            kwargs: dict[str, Any] = {
+                "model": model, "messages": messages, "temperature": temperature,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            if tools:
+                kwargs["tools"] = tools
+                if tool_choice is not None:
+                    kwargs["tool_choice"] = tool_choice
+            try:
+                logger.info(
+                    "Запрос к провайдеру=%s модель=%s tools=%d",
+                    provider.name, model, len(tools or []),
+                )
+                response = self._call_with_retry(
+                    provider, lambda client: client.chat.completions.create(**kwargs)
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.error(
+                    "Провайдер=%s исчерпан (%s: %s). Следующий.",
+                    provider.name, type(exc).__name__, exc,
+                )
+                continue
+
+            u = getattr(response, "usage", None)
+            if u is not None:
+                self.usage.add_chat(
+                    getattr(u, "prompt_tokens", 0) or 0,
+                    getattr(u, "completion_tokens", 0) or 0,
+                    provider.price_in_per_1m, provider.price_out_per_1m,
+                    label=f"{label}/{provider.name}",
+                )
+            return response
+
+        logger.critical("Все провайдеры недоступны. Последняя ошибка: %s", last_exc)
+        raise AllProvidersFailedError(str(last_exc)) from last_exc
 
     def chat_stream(
         self,

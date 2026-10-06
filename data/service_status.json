@@ -1,0 +1,27 @@
+{
+  "updated_at": "2026-10-06T15:00:00+03:00",
+  "components": {
+    "auth": {
+      "title": "Вход и авторизация",
+      "status": "operational"
+    },
+    "email": {
+      "title": "Почтовые уведомления",
+      "status": "degraded",
+      "incident": "Задержка доставки писем (в том числе писем для сброса пароля) до 30 минут. Инженеры работают над устранением.",
+      "since": "2026-10-06T13:40:00+03:00"
+    },
+    "billing": {
+      "title": "Оплата и биллинг",
+      "status": "operational"
+    },
+    "api": {
+      "title": "Публичный API",
+      "status": "operational"
+    },
+    "mobile": {
+      "title": "Мобильное приложение",
+      "status": "operational"
+    }
+  }
+}
