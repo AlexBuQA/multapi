@@ -9,7 +9,7 @@ jinja2>=3.1,<4.0
 jsonschema>=4.18,<5.0
 pydantic-settings>=2.2,<3.0
 
-# Блок 3.3: асинхронный клиент, FastAPI и SSE-стриминг
+# Блоки 3.3–3.4: асинхронный клиент и HTTP-сервис на FastAPI, кеш в Redis
 fastapi>=0.115,<1.0
 uvicorn>=0.30,<1.0
-sse-starlette>=2.1,<4.0
+redis>=5.0.1,<9.0
