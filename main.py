@@ -1,5 +1,5 @@
 """
-CLI мультимодального помощника (ДЗ 2.6).
+CLI мультимодального помощника (ДЗ 2.6, блок 3.1).
 
 Автор: Александра Бужор
 Репозиторий: https://github.com/AlexBuQA/multapi
@@ -7,11 +7,13 @@ CLI мультимодального помощника (ДЗ 2.6).
 Подкоманды:
   vision  — анализ изображения (вариант А)
   voice   — голосовой пайплайн Whisper -> LLM -> TTS (вариант Б)
+  ask     — вопрос ассистенту техподдержки с инструментами (Function Calling, блок 3.1)
 
 Примеры:
   python main.py vision samples/chart.png --question "Какой квартал лучший?"
   python main.py voice samples/voice_question.wav --out outputs/answer.mp3
   python main.py voice --make-sample "Как сбросить пароль?" --out samples/my_question.mp3
+  python main.py ask "Не приходит письмо для сброса пароля"
 
 Ключи берутся только из .env (хардкода нет). См. .env.example.
 """
@@ -86,10 +88,28 @@ def cmd_voice(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    # Импорт здесь: зависимости блока 3 нужны только этой подкоманде.
+    import json
+
+    from app.config import tool_settings
+    from app.llm.client import ToolCallingAssistant
+
+    reply = ToolCallingAssistant().ask(args.question)
+    for call in reply.tool_calls:
+        print(f"Инструмент: {call.name}({json.dumps(call.arguments, ensure_ascii=False)})")
+    if not reply.tool_calls:
+        print("Инструмент: не вызывался")
+    _print_block("Ответ ассистента", reply.answer)
+    print(f"\nLLM-вызовов: {reply.llm_calls} | total_tokens={reply.total_tokens}")
+    print(f"Лог шагов: {tool_settings.tool_log_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multimodal-assistant",
-        description="Мультимодальный ИИ-помощник: Vision + Voice (ДЗ 2.6).",
+        description="Мультимодальный ИИ-помощник: Vision + Voice + Function Calling.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -112,6 +132,10 @@ def build_parser() -> argparse.ArgumentParser:
         "(формат по расширению --out: .mp3, .wav, ...)",
     )
     p_voice.set_defaults(func=cmd_voice)
+
+    p_ask = sub.add_parser("ask", help="Вопрос ассистенту с инструментами (блок 3.1)")
+    p_ask.add_argument("question", help="Текст вопроса")
+    p_ask.set_defaults(func=cmd_ask)
     return parser
 
 
