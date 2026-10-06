@@ -9,6 +9,7 @@ CLI-приложение с **мультимодальными возможно�
 
 - **Вариант А — Анализ изображений (Vision API):** путь к картинке → base64 → Vision-запрос → текстовый ответ. Демо на 3 изображениях разного типа (фото, скриншот, график). Работает локально на Ollama с vision-моделью.
 - **Вариант Б — Голосовой пайплайн (Whisper + TTS):** аудио → транскрипция → классификация → ответ (LLM) → озвучка → аудиофайл.
+- **Блок 3.2 — Архитектурный паспорт:** схема слоёв Gateway → Service → LLM → Data, ADR, точки отказа и проверка LiteLLM — [`docs/architecture.md`](docs/architecture.md).
 - **Блок 3.1 — Function Calling:** ассистент техподдержки с инструментами `search_knowledge_base` и `check_service_status`, полный цикл tool_call на локальном Ollama — см. раздел [«Блок 3.1 — Function Calling»](#блок-31--function-calling).
 
 ## Важно про Ollama и модальности
@@ -79,6 +80,9 @@ multapi/
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   └── run_tool_call.py     # прогон трёх тест-запросов
+├── docs/
+│   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
+│   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
 ├── tools/
 │   └── check_proxy.py       # проверка HTTP-прокси (egress-IP)
 ├── tests/

@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-litellm/
 venv/
 env/
 

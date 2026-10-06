@@ -1,0 +1,5 @@
+{
+  "model": "support-primary",
+  "messages": [{"role": "user", "content": "Как сбросить пароль? Ответь одним предложением."}],
+  "max_tokens": 80
+}

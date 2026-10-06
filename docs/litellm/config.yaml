@@ -1,0 +1,40 @@
+# LiteLLM proxy for multapi (block 3.2): primary cloud provider -> local fallback.
+# Comments are ASCII-only on purpose: LiteLLM may read this file in the system
+# encoding (cp1251 on Russian Windows). Explanations: docs/litellm/README.md.
+#
+# Run (from the project root, in the separate .venv-litellm):
+#   litellm --config docs/litellm/config.yaml --port 4000
+# Required environment variables:
+#   LITELLM_MASTER_KEY   - key clients send as "Authorization: Bearer ..."
+#   OPENROUTER_API_KEY   - real key, or e.g. sk-or-invalid to emulate a primary failure
+
+model_list:
+  # Primary: OpenRouter -> openai/gpt-4o-mini (fast, cheap, good tool calling, 128K context)
+  - model_name: support-primary
+    litellm_params:
+      model: openrouter/openai/gpt-4o-mini
+      api_key: os.environ/OPENROUTER_API_KEY
+      timeout: 30
+    model_info:
+      description: "cloud primary, latency-critical chat answers"
+
+  # Fallback: local Ollama via its OpenAI-compatible API (free, offline, slow on CPU)
+  - model_name: support-fallback
+    litellm_params:
+      model: openai/qwen3:4b-instruct
+      api_base: http://localhost:11434/v1
+      api_key: ollama
+      timeout: 180
+    model_info:
+      description: "local fallback, degraded mode"
+
+litellm_settings:
+  num_retries: 1             # one retry inside a deployment (auth errors are not retried)
+  request_timeout: 180
+  fallbacks: [{"support-primary": ["support-fallback"]}]   # fallback chain: primary -> secondary
+  allowed_fails: 3           # circuit breaker: failures per minute before cooldown
+  cooldown_time: 60          # circuit breaker: seconds a failing deployment is skipped
+  drop_params: true          # drop params a provider does not support instead of failing
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY   # proxy refuses to start without a master key
