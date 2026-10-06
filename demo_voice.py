@@ -20,7 +20,9 @@ from src.robust_client import RobustLLMClient
 from src.voice import AudioNotConfiguredError, run_pipeline, text_to_speech
 
 SAMPLE_QUESTION_TEXT = "Здравствуйте! Подскажите, как сбросить пароль от аккаунта?"
-SAMPLE_AUDIO = "samples/voice_question.mp3"
+# Образец из репозитория (речь с текстом SAMPLE_QUESTION_TEXT). Если файл удалён,
+# демо сгенерирует его заново через TTS — в том же формате WAV (по расширению).
+SAMPLE_AUDIO = "samples/voice_question.wav"
 OUTPUT_AUDIO = "outputs/answer.mp3"
 
 

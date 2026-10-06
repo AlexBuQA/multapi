@@ -17,8 +17,9 @@ outputs/*.mp3
 outputs/*.wav
 !outputs/.gitkeep
 
-# Сгенерированные через TTS образцы (исходный .wav-плейсхолдер оставляем)
-samples/voice_question.mp3
+# Свои образцы, сгенерированные через TTS (--make-sample).
+# Эталонный samples/voice_question.wav хранится в репозитории.
+samples/*.mp3
 
 # IDE / OS
 .idea/

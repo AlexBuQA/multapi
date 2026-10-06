@@ -15,11 +15,17 @@ Whisper и TTS требуют платного доступа к OpenAI API (AUD
 идут на отдельный OpenAI-совместимый эндпоинт (AudioConfig, ключ AUDIO_API_KEY).
 Если он не настроен — пайплайн поднимет понятную ошибку. Текстовый шаг (ответ)
 по-прежнему идёт на локальный Ollama.
+
+Учёт стоимости: Whisper — через UsageTracker.add_audio() (по длительности аудио),
+TTS — через UsageTracker.add_tts() (по числу символов). Напрямую поля трекера
+не изменяются, поэтому summary() включает все шаги пайплайна.
 """
 from __future__ import annotations
 
 import os
+import wave
 from dataclasses import dataclass
+from typing import Any
 
 from .cache import LLMCache
 from .classifier import classify
@@ -61,22 +67,65 @@ def _audio_provider() -> ProviderConfig:
     )
 
 
+# Форматы, которые умеет отдавать TTS API (параметр response_format).
+TTS_FORMATS = {"mp3", "opus", "aac", "flac", "wav", "pcm"}
+
+
+def _tts_format(output_path: str) -> str:
+    """Формат TTS по расширению выходного файла (по умолчанию mp3)."""
+    ext = os.path.splitext(output_path)[1].lower().lstrip(".")
+    return ext if ext in TTS_FORMATS else "mp3"
+
+
+def _audio_duration_seconds(resp: Any, audio_path: str) -> float:
+    """
+    Длительность распознанного аудио в секундах — база для стоимости Whisper.
+
+    1) поле duration из ответа Whisper (response_format="verbose_json");
+    2) иначе для WAV — по заголовку файла (стандартный модуль wave);
+    3) иначе 0.0 с предупреждением в логе.
+    """
+    duration = getattr(resp, "duration", None)
+    if isinstance(duration, (int, float)) and duration > 0:
+        return float(duration)
+    if audio_path.lower().endswith(".wav"):
+        try:
+            with wave.open(audio_path, "rb") as w:
+                return w.getnframes() / float(w.getframerate())
+        except (wave.Error, EOFError, OSError):
+            pass
+    logger.warning(
+        "Не удалось определить длительность %s — стоимость Whisper учтена как 0.",
+        audio_path,
+    )
+    return 0.0
+
+
 def transcribe(audio_path: str, *, client: RobustLLMClient | None = None) -> str:
-    """Шаг 1–2: приём аудио и транскрипция через Whisper API."""
+    """Шаг 1–2: приём аудио и транскрипция через Whisper API (+ учёт стоимости)."""
     abspath = validate_file(audio_path, kind="audio")
     client = client or RobustLLMClient()
     provider = _audio_provider()
+    model = settings.audio.whisper_model
+    # verbose_json возвращает duration (нужна для расчёта стоимости). Его
+    # поддерживает whisper-1; для прочих моделей запрашиваем обычный json.
+    response_format = "verbose_json" if model.startswith("whisper") else "json"
     logger.info("Транскрипция (Whisper): %s", abspath)
 
     def _do(c):
         with open(abspath, "rb") as f:
             return c.audio.transcriptions.create(
-                model=settings.audio.whisper_model, file=f, language="ru"
+                model=model, file=f, language="ru", response_format=response_format
             )
 
     resp = client.call_with_retry(provider, _do)
-    text = resp.text.strip()
-    logger.info("Распознано: %s", text)
+    text = (resp.text or "").strip()
+
+    seconds = _audio_duration_seconds(resp, abspath)
+    client.usage.add_audio(
+        seconds, settings.audio.price_whisper_per_min, label=f"whisper/{model}"
+    )
+    logger.info("Распознано (%.1f с): %s", seconds, text)
     return text
 
 
@@ -100,7 +149,9 @@ def answer_text(
         return cached
 
     answer = client.chat(messages, temperature=temperature, max_tokens=400, label="voice-llm")
-    cache.set(model, messages, temperature, answer)
+    # Заглушку при недоступности всех провайдеров не кешируем.
+    if answer != client.USER_FACING_FAILURE:
+        cache.set(model, messages, temperature, answer)
     return answer
 
 
@@ -108,23 +159,31 @@ def text_to_speech(
     text: str, output_path: str, *,
     client: RobustLLMClient | None = None, voice: str | None = None,
 ) -> str:
-    """Шаг 4: озвучка текста через TTS API -> аудиофайл."""
+    """
+    Шаг 4: озвучка текста через TTS API -> аудиофайл (+ учёт стоимости).
+
+    Формат аудио выбирается по расширению output_path (.mp3, .wav, .flac, ...),
+    чтобы содержимое файла всегда соответствовало его расширению.
+    """
     client = client or RobustLLMClient()
     provider = _audio_provider()
     voice = voice or settings.audio.tts_voice
+    fmt = _tts_format(output_path)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    logger.info("Синтез речи (TTS): голос=%s -> %s", voice, output_path)
+    logger.info("Синтез речи (TTS): голос=%s формат=%s -> %s", voice, fmt, output_path)
 
     def _do(c):
         with c.audio.speech.with_streaming_response.create(
-            model=settings.audio.tts_model, voice=voice, input=text
+            model=settings.audio.tts_model, voice=voice, input=text,
+            response_format=fmt,
         ) as response:
             response.stream_to_file(output_path)
         return output_path
 
     client.call_with_retry(provider, _do)
-    client.usage.audio_cost_usd += (
-        len(text) / 1_000_000 * settings.audio.price_tts_per_1m_chars
+    client.usage.add_tts(
+        len(text), settings.audio.price_tts_per_1m_chars,
+        label=f"tts/{settings.audio.tts_model}",
     )
     return output_path
 

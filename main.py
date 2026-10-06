@@ -11,7 +11,7 @@ CLI мультимодального помощника (ДЗ 2.6).
 Примеры:
   python main.py vision samples/chart.png --question "Какой квартал лучший?"
   python main.py voice samples/voice_question.wav --out outputs/answer.mp3
-  python main.py voice --make-sample "Как сбросить пароль?" --out samples/voice_question.mp3
+  python main.py voice --make-sample "Как сбросить пароль?" --out samples/my_question.mp3
 
 Ключи берутся только из .env (хардкода нет). См. .env.example.
 """
@@ -54,7 +54,7 @@ def cmd_voice(args: argparse.Namespace) -> int:
 
     # Режим генерации образца голосового вопроса через TTS (без микрофона).
     if args.make_sample:
-        out = args.out or "samples/voice_question.mp3"
+        out = args.out or "samples/my_question.mp3"
         try:
             text_to_speech(args.make_sample, out, client=client, voice=args.voice)
         except AudioNotConfiguredError as exc:
@@ -108,7 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--make-sample",
         default=None,
         metavar="TEXT",
-        help="Сгенерировать образец голосового вопроса из текста через TTS",
+        help="Сгенерировать образец голосового вопроса из текста через TTS "
+        "(формат по расширению --out: .mp3, .wav, ...)",
     )
     p_voice.set_defaults(func=cmd_voice)
     return parser

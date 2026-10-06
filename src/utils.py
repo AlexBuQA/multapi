@@ -103,14 +103,24 @@ def encode_image_data_url(path: str) -> str:
 # --------------------------------------------------------------------------- #
 @dataclass
 class UsageTracker:
-    """Накопительный учёт токенов и стоимости по всем вызовам."""
+    """
+    Накопительный учёт токенов и стоимости по всем вызовам.
+
+    Каждый тип вызова учитывается только через свой метод — так summary()
+    остаётся полным, а журнал событий (_events) — согласованным:
+    - add_chat()  — чат / vision / классификация (токены);
+    - add_audio() — Whisper, тарификация по минутам аудио;
+    - add_tts()   — TTS, тарификация по символам текста.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    cost_usd: float = 0.0
-    calls: int = 0
-    audio_seconds: float = 0.0  # для Whisper/TTS
-    audio_cost_usd: float = 0.0
+    cost_usd: float = 0.0        # стоимость LLM-вызовов
+    calls: int = 0               # число LLM-вызовов
+    audio_seconds: float = 0.0   # Whisper: секунды распознанного аудио
+    tts_chars: int = 0           # TTS: число озвученных символов
+    audio_calls: int = 0         # число аудио-вызовов (Whisper + TTS)
+    audio_cost_usd: float = 0.0  # стоимость аудио-вызовов
     _events: list[str] = field(default_factory=list)
 
     def add_chat(
@@ -136,20 +146,44 @@ class UsageTracker:
         return cost
 
     def add_audio(self, seconds: float, price_per_min: float, label: str = "") -> float:
+        """Учёт транскрипции (Whisper): стоимость = минуты аудио × цена за минуту."""
         cost = seconds / 60.0 * price_per_min
         self.audio_seconds += seconds
         self.audio_cost_usd += cost
-        self._events.append(f"{label or 'audio'}: {seconds:.1f}s cost=${cost:.6f}")
+        self.audio_calls += 1
+        self._events.append(f"{label or 'whisper'}: {seconds:.1f}s cost=${cost:.6f}")
+        return cost
+
+    def add_tts(self, chars: int, price_per_1m_chars: float, label: str = "") -> float:
+        """Учёт синтеза речи (TTS): стоимость = символы × цена за 1M символов."""
+        cost = chars / 1_000_000 * price_per_1m_chars
+        self.tts_chars += chars
+        self.audio_cost_usd += cost
+        self.audio_calls += 1
+        self._events.append(f"{label or 'tts'}: {chars} симв. cost=${cost:.6f}")
         return cost
 
     def total_cost(self) -> float:
         return self.cost_usd + self.audio_cost_usd
 
+    @property
+    def events(self) -> list[str]:
+        """Журнал учтённых вызовов (копия)."""
+        return list(self._events)
+
     def summary(self) -> str:
-        return (
-            f"Вызовов: {self.calls} | "
-            f"prompt_tokens={self.prompt_tokens} | "
-            f"completion_tokens={self.completion_tokens} | "
-            f"аудио={self.audio_seconds:.1f}s | "
-            f"итого ≈ ${self.total_cost():.6f}"
-        )
+        parts = [
+            f"Вызовов LLM: {self.calls}",
+            f"prompt_tokens={self.prompt_tokens}",
+            f"completion_tokens={self.completion_tokens}",
+        ]
+        if self.audio_calls:
+            parts += [
+                f"аудио-вызовов: {self.audio_calls}",
+                f"Whisper={self.audio_seconds:.1f}s",
+                f"TTS={self.tts_chars} симв.",
+                f"LLM ≈ ${self.cost_usd:.6f}",
+                f"аудио ≈ ${self.audio_cost_usd:.6f}",
+            ]
+        parts.append(f"итого ≈ ${self.total_cost():.6f}")
+        return " | ".join(parts)
