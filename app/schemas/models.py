@@ -8,7 +8,7 @@ Ollama бесплатны: они считаются на своём компь�
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -40,3 +40,22 @@ MODEL_CATALOG: list[ModelInfo] = [
     ModelInfo(id="llama3.2-vision", provider="ollama", input_per_1m=0.0, output_per_1m=0.0,
               description="Локально в Ollama, 11B: анализ изображений (вариант А)"),
 ]
+
+_CATALOG_BY_ID = {info.id: info for info in MODEL_CATALOG}
+
+
+def estimate_cost(model: str | None, usage: Any) -> float | None:
+    """Стоимость вызова в долларах по каталогу: токены × цена за 1 млн (блок 3.7).
+
+    usage — объект с prompt_tokens и completion_tokens (Usage сервиса или usage SDK).
+    None — модели нет в каталоге: стоимость неизвестна, а не нулевая. Суффикс «:latest»
+    у моделей Ollama отбрасывается: llama3.2:latest и llama3.2 — одна модель.
+    """
+    if not model:
+        return None
+    info = _CATALOG_BY_ID.get(model.removesuffix(":latest"))
+    if info is None:
+        return None
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    return round((prompt * info.input_per_1m + completion * info.output_per_1m) / 1_000_000, 8)

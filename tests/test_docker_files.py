@@ -103,11 +103,11 @@ class TestDockerignore(unittest.TestCase):
                 self.assertIn(entry, self.patterns)
 
     def test_secrets_and_tests_stay_out_of_context(self):
-        for path in (".env", ".env.local", ".git/config", "tests/test_service.py",
+        for path in (".env", ".env.local", ".git/config", "tests/test_service.py", "data/service_status.json",
                      "app/__pycache__/main.cpython-313.pyc", ".venv/bin/python"):
             with self.subTest(path=path):
                 self.assertTrue(_ignored(path, self.patterns))
-        for path in (".env.example", "app/main.py", "pyproject.toml", "uv.lock"):
+        for path in (".env.example", "app/main.py", "pyproject.toml", "uv.lock", "data/knowledge_base.json"):
             with self.subTest(path=path):
                 self.assertFalse(_ignored(path, self.patterns))
 
@@ -162,8 +162,20 @@ class TestSecrets(unittest.TestCase):
     def test_env_example_lists_variables(self):
         example = _read(".env.example")
         for name in ("LLM__OPENAI_API_KEY", "REDIS_URL", "LOG_LEVEL", "DOCKER_LLM_BASE_URL",
-                     "PHOENIX_COLLECTOR_ENDPOINT", "PHOENIX_PROJECT_NAME", "PII_PRESIDIO"):
+                     "PHOENIX_COLLECTOR_ENDPOINT", "PHOENIX_PROJECT_NAME", "PII_PRESIDIO",
+                     # блок 3.7
+                     "SUPPORT__ENABLED", "EVAL_JUDGE_MODEL", "EVAL_JUDGE_BASE_URL", "EVAL_JUDGE_API_KEY",
+                     "EVAL_JUDGE_REASONING", "EVAL_JUDGE_MAX_TOKENS", "LLM__PROXY_URL", "LLM__USE_SYSTEM_CERTS"):
             self.assertRegex(example, rf"(?m)^{name}=")
+
+    def test_env_example_has_no_api_keys(self):
+        """Ключей API в .env.example нет: OpenRouter участвует в сканировании секретов GitHub,
+        опубликованный учебный ключ отзовут для всей группы. Ключ и адрес прокси — в .env."""
+        example = _read(".env.example")
+        self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
+        for line in example.splitlines():
+            if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY)\s*=", line):
+                self.assertRegex(line, r"=\s*(#|$)", line)        # значение пустое
 
     def test_env_not_tracked_by_git(self):
         if not (ROOT / ".git").exists():

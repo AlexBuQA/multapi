@@ -14,50 +14,20 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Callable
 
 from jsonschema import ValidationError
 
 from app.config import tool_settings
+from app.services.knowledge import search_articles
 from app.tools.schemas import ARGUMENT_EXAMPLES, validate_arguments
 
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# Поиск по базе знаний
+# Поиск по базе знаний (сам поиск — app/services/knowledge.py, общий с HTTP-сервисом)
 # --------------------------------------------------------------------------- #
-_STOPWORDS = {
-    "и", "в", "во", "на", "с", "со", "к", "ко", "по", "за", "из", "у", "о", "об",
-    "а", "но", "или", "не", "ни", "ли", "же", "бы", "то", "это", "как", "что",
-    "где", "когда", "почему", "зачем", "мне", "меня", "мой", "моя", "мои", "я",
-    "вы", "вас", "ваш", "у", "есть", "для", "от", "до", "при", "так", "уже",
-    "можно", "нужно", "подскажите", "пожалуйста", "здравствуйте", "если",
-}
-_MIN_SCORE = 2
-_TOP_K = 3
-
-
-_ENDINGS = "аеиоуыэюяйь"
-
-
-def _tokens(text: str) -> list[str]:
-    text = text.lower().replace("ё", "е")
-    return re.findall(r"\w+", text)
-
-
-def _stem(token: str) -> str:
-    # Грубый стемминг для русского: отбрасываем гласные окончания и берём
-    # первые 5 символов («пароль», «пароля», «паролем» -> «парол»; «ключ», «ключа» -> «ключ»).
-    return (token.rstrip(_ENDINGS) or token)[:5]
-
-
-def _terms(text: str) -> set[str]:
-    stems = (_stem(t) for t in _tokens(text) if t not in _STOPWORDS)
-    return {s for s in stems if len(s) > 1}
-
-
 def _load_json(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -66,25 +36,13 @@ def _load_json(path: Path) -> dict[str, Any]:
 def search_knowledge_base(query: str, product: str | None = None) -> dict[str, Any]:
     """Ищет статьи руководства: совпадения в заголовке весят больше, чем в тексте."""
     kb = _load_json(tool_settings.knowledge_base_path)
-    query_terms = _terms(query)
-    scored = []
-    for article in kb["articles"]:
-        if product and article["product"] != product:
-            continue
-        score = (
-            3 * len(query_terms & _terms(article["title"]))
-            + 2 * len(query_terms & _terms(" ".join(article.get("keywords", []))))
-            + len(query_terms & _terms(article["text"]))
-        )
-        if score >= _MIN_SCORE:
-            scored.append((score, article))
-    scored.sort(key=lambda item: (-item[0], item[1]["id"]))
+    scored = search_articles(query, kb, product=product)
 
     return {
         "source": kb.get("title", "Руководство пользователя"),
         "query": query,
         "product": product,
-        "found": len(scored[:_TOP_K]),
+        "found": len(scored),
         "articles": [
             {
                 "id": a["id"],
@@ -93,7 +51,7 @@ def search_knowledge_base(query: str, product: str | None = None) -> dict[str, A
                 "score": score,
                 "text": a["text"],
             }
-            for score, a in scored[:_TOP_K]
+            for score, a in scored
         ],
     }
 
