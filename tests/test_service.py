@@ -138,8 +138,8 @@ class FakeCompletions:
 
 
 class FakeRedis:
-    def __init__(self, down: bool = False):
-        self.down = down
+    def __init__(self, down: bool = False, ping_delay: float = 0.0):
+        self.down, self.ping_delay = down, ping_delay
         self.data: dict[str, str] = {}
         self.ttl: dict[str, int] = {}
 
@@ -158,6 +158,7 @@ class FakeRedis:
 
     async def ping(self) -> bool:
         self._check()
+        await asyncio.sleep(self.ping_delay)
         return True
 
 
@@ -224,6 +225,13 @@ class TestSettings(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(ValidationError):
             Settings(_env_file=None)
 
+    def test_log_level(self):
+        with mock.patch.dict(os.environ, {"LLM__OPENAI_API_KEY": "k", "LOG_LEVEL": "debug"}, clear=True):
+            self.assertEqual(Settings(_env_file=None).log_level, "DEBUG")
+        with mock.patch.dict(os.environ, {"LLM__OPENAI_API_KEY": "k", "LOG_LEVEL": "LOUD"}, clear=True), \
+                self.assertRaises(ValidationError):
+            Settings(_env_file=None)
+
     def test_get_settings_is_cached(self):
         self.assertIs(get_settings(), get_settings())
 
@@ -237,10 +245,24 @@ class TestHealthAndModels(ServiceTestCase):
 
     async def test_ready_reports_redis_state(self):
         async with self.client() as http:
-            self.assertEqual((await http.get("/ready")).json()["status"], "ready")
+            up = await http.get("/ready")
             self.use(self.completions, FakeRedis(down=True))
-            body = (await http.get("/ready")).json()
-        self.assertEqual(body, {"status": "degraded", "components": {"redis": False}})
+            down = await http.get("/ready")
+            self.use(self.completions, None)
+            missing = await http.get("/ready")
+            health = await http.get("/health")
+        self.assertEqual((up.status_code, up.json()), (200, {"status": "ok", "redis": "up"}))
+        for response in (down, missing):
+            self.assertEqual((response.status_code, response.json()),
+                             (503, {"status": "degraded", "redis": "down"}))
+        self.assertEqual(health.status_code, 200)   # liveness от Redis не зависит
+
+    async def test_ready_times_out_on_hanging_redis(self):
+        self.use(self.completions, FakeRedis(ping_delay=1.0))
+        with mock.patch("app.routers.health.READY_TIMEOUT", 0.05):
+            async with self.client() as http:
+                response = await http.get("/ready")
+        self.assertEqual(response.status_code, 503)
 
     async def test_models_catalog(self):
         async with self.client() as http:
@@ -411,6 +433,7 @@ class TestOpenAPI(unittest.TestCase):
         self.assertEqual(len(spec["components"]["schemas"]["ChatRequest"]["examples"]), 2)
         for path in ("/health", "/ready", "/models"):
             self.assertTrue(spec["paths"][path]["get"]["summary"])
+        self.assertEqual(set(spec["paths"]["/ready"]["get"]["responses"]), {"200", "503"})
         example = spec["paths"]["/chat"]["post"]["requestBody"]["content"]["application/json"]["examples"]
         for item in example.values():           # примеры проходят валидацию: «Try it out» не даст 422
             ChatRequest.model_validate(item["value"])
@@ -435,9 +458,11 @@ class TestLifespan(unittest.TestCase):
         get_settings.cache_clear()
         self.addCleanup(get_settings.cache_clear)
         with self.assertLogs("llm-service", "WARNING") as logs, TestClient(app) as http:
-            self.assertIsNone(app.state.cache)
+            # Клиент Redis создан, хотя Redis не отвечает: поднимется — переподключится сам.
+            self.assertIsNotNone(app.state.cache)
             self.assertIsInstance(app.state.openai, openai.AsyncOpenAI)
             self.assertEqual(http.get("/health").status_code, 200)
+            self.assertEqual(http.get("/ready").status_code, 503)
         self.assertTrue(any(re.search("Redis .* недоступен", m) for m in logs.output))
 
 

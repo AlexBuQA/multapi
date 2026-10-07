@@ -16,7 +16,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "multapi — LLM-сервис техподдержки"
+    # Уровень лога сервиса (логгер llm-service): DEBUG, INFO, WARNING, ERROR.
+    log_level: str = "INFO"
     redis_url: str = "redis://localhost:6379/0"
     cache_ttl_seconds: int = Field(default=3600, ge=1)
     # Адреса фронтенда, которым браузер разрешит обращаться к API. В .env — JSON-список.
@@ -58,6 +60,14 @@ class Settings(BaseSettings):
     # Пустой словарь проверяется при старте, поэтому без ключа ошибка указывает
     # точное поле: llm.openai_api_key — Field required.
     llm: LLMSettings = Field(default_factory=dict, validate_default=True)  # type: ignore[arg-type]
+
+    @field_validator("log_level")
+    @classmethod
+    def _check_log_level(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("LOG_LEVEL: ожидается DEBUG, INFO, WARNING, ERROR или CRITICAL")
+        return value
 
     @model_validator(mode="after")
     def _check_cors(self) -> Settings:

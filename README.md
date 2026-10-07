@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.4
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.5
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -13,6 +13,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 3.1 — Function Calling:** ассистент техподдержки с инструментами `search_knowledge_base` и `check_service_status`, полный цикл tool_call на локальном Ollama — см. раздел [«Блок 3.1 — Function Calling»](#блок-31--function-calling).
 - **Блок 3.3 — Асинхронная обработка запросов к ИИ:** `AsyncLLMClient` (семафор, таймауты, батч, стриминг), бенчмарк sync vs async и первый SSE-эндпоинт `/chat/stream` — см. раздел [«Блок 3.3»](#блок-33--асинхронная-обработка-запросов-к-ии).
 - **Блок 3.4 — FastAPI-сервис для LLM:** `POST /chat` с кешем в Redis, `POST /chat/stream`, `GET /health`, `GET /models`; DI, middleware с `X-Request-ID`, CORS, единый формат ошибок, Swagger с примерами — см. раздел [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
+- **Блок 3.5 — Docker и контейнеризация:** multi-stage `Dockerfile` на `python:3.13-slim-bookworm` с uv и non-root пользователем, `compose.yaml` с сервисом и Redis, healthcheck-и, `/health` и `/ready` — см. раздел [«Блок 3.5»](#блок-35--docker-и-контейнеризация).
 
 ## Важно про Ollama и модальности
 
@@ -53,7 +54,12 @@ multapi/
 ├── main.py                  # CLI: подкоманды vision / voice / ask
 ├── demo_vision.py           # демо варианта А (3 изображения + кеш)
 ├── demo_voice.py            # демо варианта Б (полный голосовой пайплайн)
-├── requirements.txt
+├── requirements.txt         # зависимости всего проекта для локальной разработки (pip)
+├── pyproject.toml           # блок 3.5: зависимости Docker-образа сервиса (uv)
+├── uv.lock                  # блок 3.5: закреплённые версии для образа
+├── Dockerfile               # блок 3.5: multi-stage образ сервиса, non-root
+├── .dockerignore            # блок 3.5: что не уходит в контекст сборки
+├── compose.yaml             # блок 3.5: app + redis, healthcheck-и
 ├── .env.example
 ├── .gitignore
 ├── src/
@@ -106,7 +112,8 @@ multapi/
 │   ├── test_review_fixes.py # тесты на моках (без сети): учёт аудио, классификатор, образцы
 │   ├── test_tool_call.py    # блок 3.1: схемы, обработчики, цикл tool_call, лог
 │   ├── test_async_client.py # блок 3.3: семафор, батчи, таймаут, стриминг
-│   └── test_service.py      # блок 3.4: настройки, ручки, кеш, ошибки, поток, CORS, Swagger
+│   ├── test_service.py      # блок 3.4: настройки, ручки, кеш, ошибки, поток, CORS, Swagger
+│   └── test_docker_files.py # блок 3.5: Dockerfile, .dockerignore, compose.yaml, .env.example
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
@@ -126,6 +133,8 @@ cp .env.example .env        # значения для Ollama уже выстав
 ```
 
 Нужен Python 3.11 или новее: блок 3.3 использует `asyncio.TaskGroup`, `asyncio.timeout` и `except*`.
+
+HTTP-сервис можно запустить и без локального Python — в Docker вместе с Redis: `docker compose up -d --build`, см. раздел [«Блок 3.5»](#блок-35--docker-и-контейнеризация).
 
 Для HTTP-сервиса (блок 3.4) впишите в `.env` переменные `LLM__*` из конца `.env.example` и, чтобы работал кеш, запустите Redis — см. раздел [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
 
@@ -177,6 +186,13 @@ python scripts/stream_demo.py --target ollama "Что такое event loop?"
 **Блок 3.4 — HTTP-сервис** (Swagger — http://localhost:8000/docs; запросы через `curl.exe` — в разделе [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm)):
 ```bash
 uvicorn app.main:app --reload --port 8000
+```
+
+**Блок 3.5 — сервис и Redis в Docker** (настройки Docker Desktop и проверки — в разделе [«Блок 3.5»](#блок-35--docker-и-контейнеризация)):
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose down
 ```
 
 **Тесты (без сети и без ключей):**
@@ -444,10 +460,10 @@ app/
 | `POST /chat` | Ответ целиком. Повторный одинаковый запрос берётся из Redis с `cached: true` | 200, 422, 429, 502, 504 |
 | `POST /chat/stream` | Ответ потоком SSE: кадры `data: {"content": ...}`, затем `data: {"usage": {...}}` и `data: [DONE]` | 200, 422, 429, 502, 504 |
 | `GET /health` | `{"status": "ok"}` без зависимостей: 200 даже без Redis и провайдера | 200 |
-| `GET /ready` | Состояние Redis: `ready` или `degraded` — сервис работает без кеша | 200 |
+| `GET /ready` | Готовность: `PING` в Redis — `{"status":"ok","redis":"up"}` или `{"status":"degraded","redis":"down"}`, сервис работает без кеша (с блока 3.5 — коды 200 и 503) | 200, 503 |
 | `GET /models` | Каталог: модели OpenAI со справочными ценами и локальные модели Ollama | 200 |
 
-Swagger открывается на http://localhost:8000/docs. У `POST /chat` и `POST /chat/stream` есть два готовых примера запроса (список «Examples»), у каждого кода ответа — пример тела. Примеры не задают `model`, поэтому «Try it out» работает с любым провайдером из настроек. `/health`, `/ready` и `/models` не принимают тело и не обращаются к модели, поэтому у них в Swagger только код 200: 422, 429, 502 и 504 там возникнуть не могут.
+Swagger открывается на http://localhost:8000/docs. У `POST /chat` и `POST /chat/stream` есть два готовых примера запроса (список «Examples»), у каждого кода ответа — пример тела. Примеры не задают `model`, поэтому «Try it out» работает с любым провайдером из настроек. `/health`, `/ready` и `/models` не принимают тело и не обращаются к модели, поэтому коды 422, 429, 502 и 504 у них возникнуть не могут: в Swagger у `/health` и `/models` только 200, у `/ready` — 200 и 503.
 
 ### Как обрабатывается запрос
 
@@ -469,7 +485,7 @@ Swagger открывается на http://localhost:8000/docs. У `POST /chat` 
 
    Наружу уходит понятный текст, а исходная ошибка провайдера — только в лог сервиса вместе с `request_id`. Ошибка валидации возвращается с кодом 422: `{"error": {"code": "validation_error", "message": ..., "fields": [{"field": ..., "message": ...}]}}`. Любое другое исключение — 500 `internal_error` без трейсбека.
 5. **Поток.** До ответа клиенту сервис дожидается первого фрагмента. Поэтому, если провайдер недоступен или ключ неверный, клиент получит обычный JSON с кодом 502, 429 или 504, а не поток с кодом 200 и ошибкой внутри. Обрыв посреди ответа приходит кадром `data: {"error": {...}}` перед `[DONE]`. Текст передаётся внутри JSON, как в эталоне курса: перевод строки в ответе модели (списки, код) не ломает разметку SSE, где пустая строка означает конец события. Если клиент закрыл соединение, сервис закрывает поток к провайдеру и освобождает слот семафора.
-6. **Надёжность.** Повторы встроены в SDK (`LLM__MAX_RETRIES`): 408, 409, 429, 5xx и ошибки соединения повторяются с экспоненциальной задержкой и учётом `Retry-After`. Tenacity поверх не добавлен, иначе попытки перемножились бы: 3 × 3 = 9. Семафор из блока 3.3 создаётся один раз в `lifespan` и ограничивает число одновременных запросов к модели (`LLM__MAX_CONCURRENCY`) — это Bulkhead из архитектурного паспорта. Если Redis недоступен при старте, сервис работает без кеша до перезапуска. Если Redis упал во время работы, ошибка кеша пишется в лог, а запрос уходит в модель.
+6. **Надёжность.** Повторы встроены в SDK (`LLM__MAX_RETRIES`): 408, 409, 429, 5xx и ошибки соединения повторяются с экспоненциальной задержкой и учётом `Retry-After`. Tenacity поверх не добавлен, иначе попытки перемножились бы: 3 × 3 = 9. Семафор из блока 3.3 создаётся один раз в `lifespan` и ограничивает число одновременных запросов к модели (`LLM__MAX_CONCURRENCY`) — это Bulkhead из архитектурного паспорта. Если Redis недоступен — при старте или во время работы, — ошибка кеша пишется в лог, а запрос уходит в модель. Когда Redis поднимется, клиент переподключится сам (так с блока 3.5; в блоке 3.4 кеш при недоступном на старте Redis выключался до перезапуска).
 7. **CORS** разрешает только адреса из `CORS_ORIGINS` и открывает фронтенду заголовок `X-Request-ID`. Сочетание `CORS_ALLOW_CREDENTIALS=true` и `["*"]` настройки не пропускают: сервис не стартует и объясняет почему.
 
 ### Настройки
@@ -574,7 +590,7 @@ uvicorn app.main:app --port 8000
 | `POST /chat/stream` «считай до пяти» | кадры `data: {"content":"4"}`, `data: {"content":"."}`, затем `data: {"usage":{...}}` и `data: [DONE]`; до первого фрагмента 386 мс |
 | `POST /chat/stream` с вопросом из `chat_stream_long.json` | 151 кадр `data: {"content":...}` по мере генерации, затем `data: {"usage":{"prompt_tokens":73,"completion_tokens":152,"total_tokens":225}}` и `data: [DONE]`; до первого фрагмента 10,5 с |
 | `GET /health` при остановленном Redis | `HTTP/1.1 200 OK`, `{"status":"ok"}`, заголовок `x-request-id` |
-| `GET /ready` при остановленном Redis | `{"status":"degraded","components":{"redis":false}}` |
+| `GET /ready` при остановленном Redis | `{"status":"degraded","components":{"redis":false}}` (формат блока 3.4; с блока 3.5 — 503 и `{"status":"degraded","redis":"down"}`) |
 | `POST /chat` при остановленном Redis | 200; в логе `cache.get failed, идём в модель без кеша` и `cache.setex failed, ответ не закеширован` |
 | Swagger, «Try it out» с примером «Один вопрос» | 200: `POST /chat status=200 duration_ms=44315` в логе сервиса — длинный ответ `llama3.2` на CPU |
 | Неверный ключ: мок с `--api-key sk-correct`, сервис с `sk-broken`, Redis выключен | `HTTP 502`, `{"error":{"code":"llm_auth","message":"Провайдер LLM отклонил ключ доступа сервиса.",...}}`; мок ответил `401 Unauthorized`, в логе сервиса — `llm_error=llm_auth cause=AuthenticationError("Error code: 401 - ... Incorrect API key provided: sk-***oken. ...")` |
@@ -586,7 +602,7 @@ uvicorn app.main:app --port 8000
 
 - **Кеш.** Повтор отвечает за 4,4 мс на сервере вместо 2,5 с — модель не вызывается. `curl` показывает 0,22 с: для `localhost` он сначала 200 мс ждёт ответа по IPv6 (`::1`), а uvicorn слушает только `127.0.0.1`. С адресом `http://127.0.0.1:8000` эта задержка пропадает.
 - **Поток.** 3B-модель `llama3.2` поняла «считай до пяти» по-своему и ответила «4.» — двумя фрагментами. Это качество маленькой модели, а не сервиса; на вопросе из `chat_stream_long.json` ответ приходит десятками фрагментов.
-- **Redis выключен на ходу.** Запрос не падает, но каждое обращение к кешу ждёт таймаута подключения — до 1 с на `get` и столько же на `setex`. Если Redis недоступен уже при старте, сервис сразу работает без кеша и на него время не тратит.
+- **Redis выключен на ходу.** Запрос не падает, но каждое обращение к кешу ждёт таймаута подключения — до 1 с на `get` и столько же на `setex`. В блоке 3.4 при недоступном на старте Redis сервис сразу работал без кеша и время на него не тратил; с блока 3.5 клиент сохраняется, чтобы переподключиться, когда Redis вернётся.
 - **Повторы SDK.** Ошибку 500 от Ollama SDK повторил ещё 2 раза (`LLM__MAX_RETRIES=2`), поэтому ответ 502 пришёл через 10–15 с. На 401 SDK не повторяет запрос: ответ `llm_auth` пришёл за 0,9 с.
 - **Кеш и смена провайдера.** Ключ кеша строится по самому запросу — модель, сообщения, параметры, — как требует задание; адрес провайдера в него не входит. Поэтому после переключения на другой провайдер с той же моделью сервис ещё `CACHE_TTL_SECONDS` отдаёт прежние ответы из кеша. Для деградации это плюс: пока провайдер недоступен или ключ сломан, уже заданные вопросы получают ответ. Если провайдеры отвечают по-разному, в ключ стоит добавить `LLM__BASE_URL`.
 - **Перевод строки внутри ответа.** Модель присылает фрагменты вроде `":\n\n"` — внутри JSON они безопасны. Без JSON пустая строка закрыла бы событие SSE посреди ответа.
@@ -605,6 +621,156 @@ uvicorn app.main:app --port 8000
 | DI без глобальных клиентов, `Annotated`-алиасы | `app/deps/providers.py` |
 | Middleware: `request_id`, `duration_ms`, лог, `X-Request-ID` | `request_context` в `app/main.py`; тест `test_request_id_generated_propagated_and_logged` |
 | CORS без `["*"]` вместе с `allow_credentials=True` | `Settings._check_cors`; тесты `test_cors_wildcard_with_credentials_rejected`, `test_cors_allows_only_configured_origin` |
+
+## Блок 3.5 — Docker и контейнеризация
+
+HTTP-сервис из блока 3.4 упакован в образ, а `compose.yaml` поднимает его вместе с Redis одной командой: `docker compose up -d --build`. За основу взят эталон из репозитория курса ([`m3_b5`](https://github.com/abat-voix/ai-tools-and-links/tree/main/m3_b5)), адаптированный к проекту: модель работает в Ollama на хосте, а в образ попадает только пакет `app/`.
+
+### Файлы
+
+| Файл | Что в нём |
+|------|-----------|
+| `Dockerfile` | Две стадии на `python:3.13-slim-bookworm`: `builder` ставит зависимости через uv, `runtime` получает только `/app` и запускается под `appuser` (uid 1000) |
+| `.dockerignore` | Что не уходит в контекст сборки: `.git`, окружения, кеши, `.env`, тесты, данные, документация, CLI-часть проекта |
+| `compose.yaml` | Сервисы `app` и `redis`, healthcheck-и, `depends_on: service_healthy`, том `redis_data` |
+| `pyproject.toml`, `uv.lock` | Зависимости образа: только то, что импортирует `app.main` (FastAPI, uvicorn, openai, redis, pydantic-settings), версии закреплены в `uv.lock` |
+| `app/routers/health.py` | `/health` — живость, всегда 200; `/ready` — готовность, 200 или 503 по `PING` в Redis |
+| `tests/test_docker_files.py` | Статические проверки Dockerfile, `.dockerignore`, `compose.yaml` и `.env.example` — без Docker |
+
+`requirements.txt` остаётся для локальной разработки всего проекта (CLI, бенчмарк, ассистент с инструментами). В образ сервиса эти пакеты не нужны, поэтому у него свой короткий список в `pyproject.toml`. Lock-файл делает сборку воспроизводимой: `uv sync --frozen` ставит ровно те версии, что в `uv.lock`, и падает, если lock-файл не соответствует `pyproject.toml`. После правки зависимостей lock-файл обновляется командой `uv lock`.
+
+### Как устроен образ
+
+- **Две стадии.** В `builder` uv копируется из `ghcr.io/astral-sh/uv:0.11.14` (как в эталоне курса; в тексте задания — 0.6.10) и создаёт `/app/.venv`. В `runtime` копируется только `/app` — без uv, без кеша пакетов и без слоёв сборки.
+- **Кеш слоёв.** Сначала `uv sync --frozen --no-dev --no-install-project` с `pyproject.toml` и `uv.lock`, подключёнными через bind mount, и с кешем uv в `--mount=type=cache`. Код (`COPY app/`) копируется последним слоем. Правка кода пересобирает только этот слой.
+- **Настройки uv:** `UV_COMPILE_BYTECODE=1` — байткод компилируется при сборке, `UV_LINK_MODE=copy` — файлы копируются из смонтированного кеша, `UV_PYTHON_DOWNLOADS=0` — используется Python базового образа.
+- **Не root.** `useradd --create-home --uid 1000 appuser`, `COPY --chown=appuser:appuser`, `USER appuser`.
+- **Запуск.** `CMD` в exec-форме с `--host 0.0.0.0`: uvicorn сам получает сигналы остановки и слушает не только loopback контейнера. `EXPOSE 8000`.
+- **`HEALTHCHECK`** обращается к `/ready` через `urllib` — `curl` в slim-образе нет.
+
+### Стек в compose
+
+- **`app`** собирается из `Dockerfile` (образ `llm-service:v1`), публикует порт 8000, читает `.env` через `env_file`. Два адреса compose задаёт сам:
+  - `REDIS_URL: redis://redis:6379/0` — `redis` здесь DNS-имя сервиса во внутренней сети compose, а не `localhost`;
+  - `LLM__BASE_URL: http://host.docker.internal:11434/v1` — Ollama работает на хосте, а `localhost` внутри контейнера — это сам контейнер. Для облачного провайдера адрес задаётся в `.env` переменной `DOCKER_LLM_BASE_URL`.
+  
+  Сервис стартует после того, как Redis прошёл проверку (`depends_on: condition: service_healthy`). Healthcheck — `/ready` (`interval: 15s`, `timeout: 5s`, `retries: 3`, `start_period: 15s`), `restart: unless-stopped`.
+- **`redis`** — `redis:7.4-alpine` с явным тегом, данные в именованном томе `redis_data:/data`, healthcheck `redis-cli ping`. Секции `ports` нет: Redis не виден с хоста, к нему ходит только `app`.
+- **`start_interval`.** Во время `start_period` проверка идёт каждые 1–2 с, поэтому оба сервиса становятся healthy за несколько секунд после старта. Без этого первая проверка `app` выполнялась бы только через 15 с.
+
+### Живость и готовность
+
+| Ручка | Смысл | Ответ |
+|-------|-------|-------|
+| `GET /health` | Процесс жив. Без зависимостей: оркестратор не перезапустит сервис из-за временно лежащего Redis | всегда `200 {"status":"ok"}` |
+| `GET /ready` | Сервис готов: `PING` в Redis с таймаутом 1,5 с | `200 {"status":"ok","redis":"up"}` или `503 {"status":"degraded","redis":"down"}` |
+
+На `/ready` смотрят `HEALTHCHECK` в `Dockerfile` и healthcheck в `compose.yaml`. Если остановить Redis, `/ready` отвечает 503, через три неудачные проверки `app` становится `unhealthy`, а `/health` по-прежнему отвечает 200. Запросы к модели при этом обслуживаются, только без кеша. Клиент Redis создаётся при старте, даже если Redis недоступен, и после его возвращения переподключается сам: `/ready` снова отвечает 200 без перезапуска сервиса.
+
+### Docker Desktop на Windows: три настройки
+
+1. **Зеркало Docker Hub.** Из нашей сети Docker Hub недоступен (`TLS handshake timeout` на `auth.docker.io`). Чтобы образы `python:3.13-slim-bookworm` и `redis:7.4-alpine` скачивались без правки `Dockerfile` и `compose.yaml`, в Docker Desktop: **Settings → Docker Engine**, добавить в JSON строку `"registry-mirrors": ["https://mirror.gcr.io"]`, затем **Apply & restart**.
+2. **Память WSL.** Предел в `%USERPROFILE%\.wslconfig` (`[wsl2]`, `memory=1GB`) из блока 3.4 оставляем: иначе виртуальная машина Docker забирает память у Ollama.
+3. **Ollama на хосте.** Контейнер обращается к Ollama по адресу `host.docker.internal:11434`. Если запросы к модели заканчиваются `502 llm_unavailable`, задайте Ollama переменную окружения `OLLAMA_HOST=0.0.0.0` и перезапустите Ollama.
+4. **`localhost` зависает, `127.0.0.1` отвечает.** Порт 8000 на IPv6-адресе `[::1]` может занять `wslrelay.exe` — служебный процесс WSL, который пересылает `localhost` в виртуальную машину. Windows пробует `localhost` сначала как `::1`, соединение уходит в `wslrelay` и остаётся без ответа (`curl` показывает `000`). Проверка: `netstat -ano | findstr :8000` — на `[::1]:8000` чужой PID, `Get-Process -Id <PID>` — `wslrelay`. Docker Desktop эта пересылка не нужна, он пробрасывает порты сам, поэтому её можно выключить строкой `localhostForwarding=false` в `%USERPROFILE%\.wslconfig`, затем `wsl --shutdown` и перезапуск Docker Desktop. Либо обращаться к сервису по `http://127.0.0.1:8000`.
+
+### Проверка
+
+Перед проверкой остановите локальный uvicorn — порт 8000 займёт контейнер. Redis из блока 3.4 (`multapi-redis`) мешать не будет, но его можно выключить: `docker stop multapi-redis`.
+
+```powershell
+# сборка, проверка Dockerfile, размер, содержимое образа
+docker build -t llm-service:v1 .
+docker build --check .
+docker images llm-service
+docker run --rm llm-service:v1 ls -la /app
+
+# кеш слоёв: правка app/main.py и повторная сборка
+Copy-Item app\main.py $env:TEMP\main.py.bak
+Add-Content app\main.py "# cache check"
+Measure-Command { docker build -t llm-service:v1 . } | Select-Object TotalSeconds
+Copy-Item $env:TEMP\main.py.bak app\main.py -Force
+
+# весь стек одной командой; --wait — дождаться, пока оба сервиса станут healthy
+docker compose up -d --build --wait
+docker compose ps
+curl.exe -s http://localhost:8000/health
+curl.exe -s http://localhost:8000/ready
+curl.exe -s -o NUL -w "docs: %{http_code}\n" http://localhost:8000/docs
+docker compose exec app id
+docker compose exec redis redis-cli ping
+curl.exe -s -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "@examples/requests/chat.json"
+
+# Redis остановлен: /ready — 503, /health — 200
+docker compose stop redis
+curl.exe -s -w " [%{http_code}]\n" http://localhost:8000/ready
+curl.exe -s -w " [%{http_code}]\n" http://localhost:8000/health
+docker compose start redis
+
+# данные Redis переживают перезапуск стека
+docker compose exec redis redis-cli set persist-check ok
+docker compose down
+docker compose up -d
+docker compose exec redis redis-cli get persist-check
+
+# .env нет в git
+git ls-files | Select-String -Pattern '\.env$'
+```
+
+Без `--wait` команда `docker compose up -d` возвращается сразу после запуска контейнеров, а uvicorn поднимается ещё пару секунд: запрос, отправленный в этот момент, получит отказ в соединении (`curl.exe -s` при этом ничего не выводит, `-w "%{http_code}"` показывает `000`). Поэтому проверки — после `--wait` или когда `docker compose ps` покажет `healthy`.
+
+Проверка «как на чистой машине»: `docker compose down -v`, затем снова `docker compose up -d --build --wait`. Флаг `-v` удаляет и том `redis_data`.
+
+### Результаты
+
+Прогон 7 октября 2026 года: Windows, Docker Desktop (WSL 2, предел памяти 1 ГБ, зеркало `mirror.gcr.io`), Ollama `llama3.2` на хосте.
+
+| Проверка | Результат |
+|----------|-----------|
+| `python -m unittest discover -s tests` | 87 тестов, `OK` |
+| `docker build -t llm-service:v1 .` с нуля | 29,6 с; `python:3.13-slim-bookworm` и фронтенд `docker/dockerfile:1.7` — через зеркало, uv — из `ghcr.io` |
+| `docker build --check .` | `Check complete, no warnings found.` |
+| Повторная сборка после правки `app/main.py` | 9,05 с (`Measure-Command`): слой с `uv sync` взят из кеша, пересобраны только слои с кодом |
+| `docker images llm-service` | 253 МБ на диске, 56,9 МБ в сжатом виде |
+| `docker run --rm llm-service:v1 ls -la /app` | только `.venv` и `app`, владелец `appuser`; нет `.env`, `.git`, `tests/`, `__pycache__` |
+| `docker compose up -d --build` | `redis:7.4-alpine` скачан через зеркало, сеть `multapi_default` и том `multapi_redis_data` созданы, Redis healthy за 2,7 с |
+| `docker compose ps` | `multapi-app-1 … Up (healthy) 0.0.0.0:8000->8000/tcp`, `multapi-redis-1 … Up (healthy) 6379/tcp` — порт Redis наружу не опубликован |
+| `docker compose exec app id` | `uid=1000(appuser) gid=1000(appuser) groups=1000(appuser)` |
+| `docker compose exec redis redis-cli ping` | `PONG` |
+| `GET /health` | `200 {"status":"ok"}` |
+| `GET /ready` | `200 {"status":"ok","redis":"up"}` |
+| `GET /docs` | 200 |
+| `POST /chat` (Ollama на хосте через `host.docker.internal`) | 200, `"model":"llama3.2"`, `cached: false`; после `down` и `up` тот же запрос — `cached: true`: кеш пережил перезапуск в томе `redis_data` |
+| `docker compose stop redis` | `/ready` — `503 {"status":"degraded","redis":"down"}`, `/health` — `200 {"status":"ok"}` |
+| `redis-cli set persist-check ok` → `down` → `up -d` → `get persist-check` | `"ok"` |
+| `git ls-files \| Select-String '\.env$'` | пусто |
+
+Строки лога сервиса из `docker compose logs app`: healthcheck обращается к `/ready` каждые 15 с изнутри контейнера (`127.0.0.1`), запросы с хоста приходят с адреса шлюза compose-сети (`172.22.0.1`):
+
+```
+app-1  | 2026-10-07 06:26:37,960 INFO llm-service: request_id=7798bb84dac6424fb00d4a51bbb7f79a method=GET path=/ready status=200 duration_ms=0.9
+app-1  | 2026-10-07 06:26:38,045 INFO llm-service: request_id=77e7e1435cd34a04b99b5f7036b9f728 method=GET path=/docs status=200 duration_ms=18.9
+app-1  | 2026-10-07 06:26:38,444 INFO llm-service: request_id=2440eeb399a2421bae4e458d73b97baf method=POST path=/chat status=200 duration_ms=306.8
+```
+
+Наблюдения:
+
+- **Первые запросы сразу после `up -d`** вернули пустой ответ и `000`: `docker compose ps` показывал `health: starting`, uvicorn ещё не слушал порт. Отсюда `--wait` в инструкции — команда возвращается, когда оба сервиса healthy.
+- **`localhost` против `127.0.0.1`.** Сервис отвечал по `127.0.0.1`, а запросы на `localhost` зависали: `[::1]:8000` занимал `wslrelay.exe` (см. пункт 4 в «Docker Desktop на Windows»). Поэтому `/health`, `/ready`, `/docs` и `/chat` проверены по `http://127.0.0.1:8000`.
+- **Healthcheck виден в логе** строкой каждые 15 с. Для наблюдаемости (блок 3.6) такие строки стоит понизить до DEBUG или отфильтровать.
+
+### Соответствие критериям блока 3.5
+
+| Критерий | Реализация |
+|----------|------------|
+| `docker build -t llm-service:v1 .` без ошибок и предупреждений BuildKit; повторная сборка после правки `app/main.py` — меньше 10 с | зависимости до кода, кеш uv в `--mount=type=cache`; `docker build --check .` — `Check complete, no warnings found` |
+| `docker images llm-service:v1` — меньше 500 МБ | две стадии, slim-база, в образе только `app/` и `.venv` |
+| `docker compose exec app id` — `uid=1000(appuser)`, в Dockerfile `USER appuser` | `useradd --uid 1000`, `USER appuser`; тест `test_runtime_is_non_root` |
+| `docker compose up -d --build` поднимает оба сервиса, оба healthy | healthcheck-и у обоих, `depends_on: service_healthy`, `start_interval` |
+| `/health` — всегда 200; `/ready` — 200 и `redis: up`, при остановленном Redis — 503 | `app/routers/health.py`; тесты `test_ready_reports_redis_state`, `test_ready_times_out_on_hanging_redis` |
+| В образе нет `.env`, `.git`, `tests/`, `__pycache__`; `.env` нет в git | `.dockerignore`, `COPY app/`; тесты `test_secrets_and_tests_stay_out_of_context`, `test_env_not_tracked_by_git` |
+| `depends_on: { redis: { condition: service_healthy } }`, healthcheck у обоих сервисов | `compose.yaml`; тест `test_app_service` |
+| У Redis нет `ports`, данные в именованном томе | `compose.yaml`; тест `test_redis_service` |
 
 ## Конфигурация (.env)
 
@@ -640,6 +806,8 @@ LLM__MAX_RETRIES=2
 ```
 
 Остальные (`REDIS_URL`, `CACHE_TTL_SECONDS`, `CORS_ORIGINS` …) — в таблице раздела [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
+
+Для Docker (блок 3.5) добавлены `LOG_LEVEL` — уровень лога сервиса (`INFO` по умолчанию) — и `DOCKER_LLM_BASE_URL` — адрес провайдера для контейнера (по умолчанию Ollama на хосте, `http://host.docker.internal:11434/v1`). `REDIS_URL` в контейнере задаёт `compose.yaml`: `redis://redis:6379/0`.
 
 ## Прокси
 

@@ -1,0 +1,64 @@
+# Что не отправляется в контекст сборки образа (блок 3.5).
+# Dockerfile копирует только app/, pyproject.toml и uv.lock, но всё, что не исключено
+# здесь, всё равно уходит демону Docker при каждой сборке: лишнее замедляет сборку,
+# а секреты попадали бы в контекст.
+
+# Git
+.git
+.gitignore
+.gitattributes
+.github/
+
+# Python, окружения и кеши
+.venv/
+.venv-litellm/
+venv/
+env/
+# Шаблон без **/ действует только в корне контекста, поэтому кеши байткода — во всех папках
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Секреты: .env не попадает ни в контекст, ни в образ. Пример переменных — можно.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# IDE и ОС
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Не нужно сервису: тесты, данные, документация, CLI-часть проекта и её файлы
+tests/
+notebooks/
+data/
+docs/
+*.md
+!README.md
+samples/
+outputs/
+logs/
+examples/
+scripts/
+tools/
+src/
+demo_*.py
+main.py
+requirements.txt
+
+# Файлы самого Docker
+Dockerfile
+.dockerignore
+compose.yaml
+compose.*.yaml
+docker-compose*.yml
