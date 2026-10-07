@@ -1,0 +1,57 @@
+# Стек сервиса (блок 3.5): HTTP-сервис app + Redis для кеша.
+#
+#   cp .env.example .env           # вписать LLM__OPENAI_API_KEY (для Ollama — любое значение)
+#   docker compose up -d --build
+#   docker compose ps              # через 15–20 с оба сервиса healthy
+#
+# Модель (Ollama) работает на хосте, а не в контейнере: из контейнера она доступна
+# по адресу host.docker.internal.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-service:v1
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Внутри compose-сети Redis — это имя сервиса redis, а не localhost.
+      REDIS_URL: redis://redis:6379/0
+      # localhost внутри контейнера — сам контейнер. По умолчанию — Ollama на хосте;
+      # для облачного провайдера задайте DOCKER_LLM_BASE_URL в .env.
+      LLM__BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+    extra_hosts:
+      # Docker Desktop знает host.docker.internal сам; строка нужна для Docker на Linux.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Готовность: /ready отвечает 200, только когда доступен Redis.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+      start_interval: 2s     # во время start_period проверка чаще — healthy через секунды, а не через 15 с
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # Портов наружу нет: к Redis ходит только app по внутренней сети compose.
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+
+volumes:
+  redis_data: {}

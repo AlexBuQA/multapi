@@ -26,7 +26,7 @@ def get_openai(request: Request) -> AsyncOpenAI:
 
 
 def get_cache(request: Request) -> Redis | None:
-    """None — Redis не ответил при старте сервиса, работаем без кеша."""
+    """Клиент Redis. None бывает только в тестах — сервис тогда работает без кеша."""
     return request.app.state.cache
 
 

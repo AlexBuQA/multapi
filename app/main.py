@@ -1,13 +1,16 @@
 """
-HTTP-сервис ассистента техподдержки на FastAPI (блок 3.4).
+HTTP-сервис ассистента техподдержки на FastAPI (блоки 3.4–3.5).
 
 Запуск из корня проекта:
     uvicorn app.main:app --reload --port 8000
+В Docker (блок 3.5): docker compose up -d --build
 Swagger: http://localhost:8000/docs
 
 Сборка приложения:
 - lifespan создаёт AsyncOpenAI, подключение к Redis и семафор (Bulkhead) и закрывает
-  их при остановке. Если Redis не отвечает, сервис стартует без кеша;
+  их при остановке. Если Redis не отвечает, сервис всё равно стартует: кеш
+  пропускается, /ready отвечает 503, а когда Redis поднимется, клиент
+  переподключится сам;
 - middleware присваивает запросу request_id (или берёт из X-Request-ID), пишет одну
   строку лога на запрос и возвращает X-Request-ID в ответе;
 - CORS — только для адресов из CORS_ORIGINS;
@@ -40,15 +43,15 @@ from app.core.exceptions import LLMError, LLMRateLimitError
 from app.routers import chat, health, models
 from app.services.llm import CACHE_ERRORS
 
+settings = get_settings()   # без ключа здесь ValidationError — uvicorn не стартует
+
 logger = logging.getLogger("llm-service")
 if not logger.handlers:
     _handler = logging.StreamHandler()
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logger.addHandler(_handler)
-    logger.setLevel(logging.INFO)
     logger.propagate = False
-
-settings = get_settings()   # без ключа здесь ValidationError — uvicorn не стартует
+logger.setLevel(settings.log_level)   # LOG_LEVEL из .env
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")   # чужой ID не должен ломать строку лога
@@ -65,29 +68,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.llm_limiter = asyncio.Semaphore(cfg.llm.max_concurrency)
 
-    cache = Redis.from_url(cfg.redis_url, decode_responses=True,
-                           socket_connect_timeout=1.0, socket_timeout=1.0)
+    # Клиент создаётся всегда: подключение ленивое, после падения Redis клиент
+    # переподключается сам. Недоступный Redis замедляет запрос не больше чем на
+    # таймауты ниже, а ошибки кеша LLMService только пишет в лог.
+    app.state.cache = Redis.from_url(cfg.redis_url, decode_responses=True,
+                                     socket_connect_timeout=1.0, socket_timeout=1.0)
     try:
-        await cache.ping()
-        app.state.cache = cache
+        await app.state.cache.ping()
         logger.info("Redis %s доступен — кеш ответов включён", cfg.redis_url)
     except CACHE_ERRORS as exc:
-        await cache.aclose()
-        app.state.cache = None
-        logger.warning("Redis %s недоступен (%s) — работаем без кеша до перезапуска", cfg.redis_url, exc)
+        logger.warning("Redis %s недоступен (%s) — запросы идут без кеша, /ready отвечает 503, "
+                       "пока Redis не поднимется", cfg.redis_url, exc)
 
     logger.info("Модель по умолчанию: %s, провайдер: %s", cfg.llm.default_model,
                 cfg.llm.base_url or "https://api.openai.com/v1")
     yield
 
     await app.state.openai.close()
-    if app.state.cache is not None:
-        await app.state.cache.aclose()
+    await app.state.cache.aclose()
 
 
 app = FastAPI(
     title=settings.app_name,
-    version="3.4.0",
+    version="3.5.0",
     description=(
         "Чат-ядро ассистента техподдержки: ответ целиком (`POST /chat`) и потоком "
         "(`POST /chat/stream`), кеш в Redis, каталог моделей. Каждый ответ содержит "
