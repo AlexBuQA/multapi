@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 from redis.asyncio import Redis
 
 from app.core.config import Settings, get_settings
+from app.observability.pii_presidio import NameRedactor
 from app.services.llm import LLMService
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -36,7 +37,13 @@ def get_limiter(request: Request) -> asyncio.Semaphore:
 
 OpenAIDep = Annotated[AsyncOpenAI, Depends(get_openai)]
 CacheDep = Annotated[Redis | None, Depends(get_cache)]
+def get_redactor(request: Request) -> NameRedactor | None:
+    """Presidio для prompt_preview; None — маскирование только regex (по умолчанию)."""
+    return getattr(request.app.state, "pii_redactor", None)
+
+
 LimiterDep = Annotated[asyncio.Semaphore, Depends(get_limiter)]
+RedactorDep = Annotated[NameRedactor | None, Depends(get_redactor)]
 
 
 def get_llm_service(
@@ -44,8 +51,9 @@ def get_llm_service(
     cache: CacheDep,
     settings: SettingsDep,
     limiter: LimiterDep,
+    redactor: RedactorDep,
 ) -> LLMService:
-    return LLMService(openai_client, cache, settings, limiter=limiter)
+    return LLMService(openai_client, cache, settings, limiter=limiter, redactor=redactor)
 
 
 LLMServiceDep = Annotated[LLMService, Depends(get_llm_service)]

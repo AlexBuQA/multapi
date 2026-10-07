@@ -1,5 +1,5 @@
 """
-HTTP-сервис ассистента техподдержки на FastAPI (блоки 3.4–3.5).
+HTTP-сервис ассистента техподдержки на FastAPI (блоки 3.4–3.6).
 
 Запуск из корня проекта:
     uvicorn app.main:app --reload --port 8000
@@ -11,8 +11,12 @@ Swagger: http://localhost:8000/docs
   их при остановке. Если Redis не отвечает, сервис всё равно стартует: кеш
   пропускается, /ready отвечает 503, а когда Redis поднимется, клиент
   переподключится сам;
-- middleware присваивает запросу request_id (или берёт из X-Request-ID), пишет одну
-  строку лога на запрос и возвращает X-Request-ID в ответе;
+- lifespan до создания клиента OpenAI включает трейсинг в Phoenix (блок 3.6), если
+  задан PHOENIX_COLLECTOR_ENDPOINT;
+- RequestContextMiddleware (app/observability/middleware.py) присваивает запросу
+  request_id (или берёт из X-Request-ID), привязывает его к contextvars structlog — он
+  попадает во все JSON-строки лога этого запроса, — пишет строку http_request и
+  возвращает X-Request-ID в ответе;
 - CORS — только для адресов из CORS_ORIGINS;
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
@@ -23,10 +27,6 @@ ValidationError — так и задумано.
 from __future__ import annotations
 
 import asyncio
-import logging
-import re
-import time
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -40,26 +40,23 @@ from redis.asyncio import Redis
 
 from app.core.config import get_settings
 from app.core.exceptions import LLMError, LLMRateLimitError
+from app.observability.logging import get_logger, setup_logging
+from app.observability.middleware import REQUEST_ID_HEADER, USER_ID_HEADER, RequestContextMiddleware
+from app.observability.pii_presidio import load_redactor
+from app.observability.tracing import fastapi_telemetry, setup_tracing, shutdown_tracing
 from app.routers import chat, health, models
 from app.services.llm import CACHE_ERRORS
 
 settings = get_settings()   # без ключа здесь ValidationError — uvicorn не стартует
-
-logger = logging.getLogger("llm-service")
-if not logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logger.addHandler(_handler)
-    logger.propagate = False
-logger.setLevel(settings.log_level)   # LOG_LEVEL из .env
-
-REQUEST_ID_HEADER = "X-Request-ID"
-_VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")   # чужой ID не должен ломать строку лога
+setup_logging(settings.log_level)   # JSON-логи; LOG_LEVEL из .env
+log = get_logger()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = get_settings()
+    # Трейсинг — до создания клиента OpenAI, чтобы инструментация точно применилась.
+    app.state.tracer_provider = setup_tracing(cfg.phoenix_project_name, cfg.phoenix_collector_endpoint)
     app.state.openai = AsyncOpenAI(
         api_key=cfg.llm.openai_api_key.get_secret_value(),
         base_url=cfg.llm.base_url,
@@ -67,6 +64,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_retries=cfg.llm.max_retries,
     )
     app.state.llm_limiter = asyncio.Semaphore(cfg.llm.max_concurrency)
+    # Presidio (опционально): модель грузится несколько секунд — один раз здесь, в потоке.
+    app.state.pii_redactor = await asyncio.to_thread(load_redactor) if cfg.pii_presidio else None
 
     # Клиент создаётся всегда: подключение ленивое, после падения Redis клиент
     # переподключается сам. Недоступный Redis замедляет запрос не больше чем на
@@ -75,22 +74,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                                      socket_connect_timeout=1.0, socket_timeout=1.0)
     try:
         await app.state.cache.ping()
-        logger.info("Redis %s доступен — кеш ответов включён", cfg.redis_url)
+        log.info("redis_connected", redis_url=cfg.redis_url)
     except CACHE_ERRORS as exc:
-        logger.warning("Redis %s недоступен (%s) — запросы идут без кеша, /ready отвечает 503, "
-                       "пока Redis не поднимется", cfg.redis_url, exc)
+        log.warning("redis_unavailable", redis_url=cfg.redis_url, error=repr(exc),
+                    note="запросы идут без кеша, /ready отвечает 503, пока Redis не поднимется")
 
-    logger.info("Модель по умолчанию: %s, провайдер: %s", cfg.llm.default_model,
-                cfg.llm.base_url or "https://api.openai.com/v1")
+    log.info("service_started", default_model=cfg.llm.default_model,
+             provider=cfg.llm.base_url or "https://api.openai.com/v1")
     yield
 
     await app.state.openai.close()
     await app.state.cache.aclose()
+    if app.state.pii_redactor is not None:
+        app.state.pii_redactor.close()
+    shutdown_tracing(app.state.tracer_provider)
 
 
 app = FastAPI(
     title=settings.app_name,
-    version="3.5.0",
+    version="3.6.0",
     description=(
         "Чат-ядро ассистента техподдержки: ответ целиком (`POST /chat`) и потоком "
         "(`POST /chat/stream`), кеш в Redis, каталог моделей. Каждый ответ содержит "
@@ -98,6 +100,7 @@ app = FastAPI(
         "`{\"error\": {\"code\": ..., \"message\": ...}}`."
     ),
     lifespan=lifespan,
+    telemetry=fastapi_telemetry(),   # span на HTTP-запрос — корень трейса в Phoenix
     openapi_tags=[
         {"name": "chat", "description": "Запросы к модели"},
         {"name": "models", "description": "Каталог моделей и цен"},
@@ -112,34 +115,13 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", REQUEST_ID_HEADER],
+    allow_headers=["Content-Type", "Authorization", REQUEST_ID_HEADER, USER_ID_HEADER],
     expose_headers=[REQUEST_ID_HEADER],
 )
 
 
-@app.middleware("http")
-async def request_context(request: Request, call_next):
-    """Добавлен последним, поэтому внешний: видит все запросы, включая CORS preflight."""
-    incoming = request.headers.get(REQUEST_ID_HEADER, "")
-    request_id = incoming if _VALID_REQUEST_ID.match(incoming) else uuid.uuid4().hex
-    request.state.request_id = request_id
-
-    started = time.perf_counter()
-    status = 500
-    try:
-        response = await call_next(request)
-        status = response.status_code
-    finally:
-        # Для /chat/stream это время до первого фрагмента: тело потока идёт после.
-        duration_ms = round((time.perf_counter() - started) * 1000, 1)
-        logger.info(
-            "request_id=%s method=%s path=%s status=%s duration_ms=%s",
-            request_id, request.method, request.url.path, status, duration_ms,
-            extra={"request_id": request_id, "method": request.method, "path": request.url.path,
-                   "status": status, "duration_ms": duration_ms},
-        )
-    response.headers[REQUEST_ID_HEADER] = request_id
-    return response
+# Добавлен последним, поэтому внешний: видит все запросы, включая CORS preflight.
+app.add_middleware(RequestContextMiddleware)
 
 
 def _request_id(request: Request) -> str | None:
@@ -159,7 +141,7 @@ def _error(request: Request, status_code: int, code: str, message: str,
 @app.exception_handler(LLMError)
 async def handle_llm_error(request: Request, exc: LLMError) -> JSONResponse:
     # 429 -> 429, таймаут -> 504, остальное (ключ, нет соединения, ошибка провайдера) -> 502.
-    logger.warning("request_id=%s llm_error=%s cause=%r", _request_id(request), exc.code, exc.__cause__)
+    # Причина уже записана в лог строкой llm_request_failed (LLMService).
     headers = None
     if isinstance(exc, LLMRateLimitError) and exc.retry_after:
         headers = {"Retry-After": str(exc.retry_after)}
@@ -183,7 +165,7 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
 
 @app.exception_handler(Exception)
 async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("request_id=%s необработанная ошибка", _request_id(request))
+    log.exception("unhandled_error", request_id=_request_id(request))
     return _error(request, 500, "internal_error", "Внутренняя ошибка сервиса.")
 
 

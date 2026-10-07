@@ -61,7 +61,8 @@ flowchart LR
         PG[("Postgres 🔜 М4<br/>история, лимиты, метрики")]
         KB[("База знаний ✅<br/>data/knowledge_base.json<br/>→ Qdrant 🔜 М5")]
         STATUS[("Статус сервиса ✅<br/>data/service_status.json")]
-        LOGS[("Лог шагов ✅<br/>logs/tool_calls.jsonl<br/>→ observability 🔜 Б3.6")]
+        LOGS[("JSON-логи ✅ Б3.6<br/>structlog, request_id в каждой строке<br/>PII маскируется")]
+        PHX[("Phoenix ✅ Б3.6<br/>трейсы OTLP<br/>HTTP → llm.chat → модель")]
     end
 
     EXT["☁️ Внешние сервисы<br/>OpenRouter API<br/>аудио-эндпоинт OpenAI"]
@@ -86,6 +87,7 @@ flowchart LR
     CACHE --- REDIS
     API --- PG
     ASSIST -.-> LOGS
+    ASSIST -.->|"спаны"| PHX
     API -.->|"6 · ответ потоком SSE через nginx"| USER
 ```
 
@@ -152,6 +154,7 @@ flowchart LR
 | 3 · LLM | недоступны обе модели | 500 | Circuit Breaker 2 → шаблон | найденная статья руководства без генерации и пометка «Сервис временно недоступен»; заглушка не кешируется ✅ |
 | 4 · Data | Redis недоступен | ошибка на каждом запросе | Cache-Aside: недоступный кеш = промах ✅ Б3.4 | дороже и медленнее, но всё работает |
 | 4 · Data | Postgres недоступен | нельзя сохранить историю и метрики | запись истории — best effort, ошибки только логируются | ответы без контекста прошлых сообщений |
+| 4 · Data | Phoenix недоступен | — | спаны отправляются фоновым потоком пачками (`batch=True`), ошибки экспорта только пишутся в лог ✅ Б3.6 | сервис отвечает как обычно, трейсы за это время теряются; JSON-логи остаются. Проверено на Windows: при 1 ГБ памяти в WSL Phoenix запускался 5,5 минуты, сервис всё это время отвечал |
 | 4 · Data | база знаний или статус недоступны | исключение в инструменте | `tool_failed` вместо исключения ✅ | модель сообщает, что не нашла информацию, и предлагает обратиться в поддержку; второй инструмент продолжает работать |
 
 ## 6. LiteLLM как готовый LLM Gateway
@@ -209,4 +212,4 @@ Windows, LiteLLM 1.104.0, `OPENROUTER_API_KEY=sk-or-invalid`, резервная
 | LLM | `RobustLLMClient`: retry и fallback ✅, Ollama ✅; `AsyncLLMClient`: семафор, таймаут, батч, стриминг ✅ Б3.3; `LLMService`: повторы SDK, доменные ошибки 429/502/504 ✅ Б3.4 | Circuit Breaker и fallback между провайдерами в сервисе, OpenRouter |
 | Cache | in-memory `LLMCache` с TTL ✅; Redis для ответов сервиса ✅ Б3.4, в compose с именованным томом ✅ Б3.5 | короткий TTL для ответов со статусом сервиса |
 | Data | JSON-файлы базы знаний и статуса ✅, JSON-лог ✅ | Postgres — М4, Qdrant и RAG — М5 |
-| Observability | `logs/tool_calls.jsonl` ✅, `logs/llm_calls.jsonl` (время и токены каждого вызова) ✅ Б3.3 | structlog, трассировка — Б3.6 |
+| Observability | `logs/tool_calls.jsonl` ✅, `logs/llm_calls.jsonl` (время и токены каждого вызова) ✅ Б3.3; JSON-логи structlog с `request_id`, трейсы OpenTelemetry в Phoenix (сервис в compose), маскирование PII в логах (regex, опционально Presidio) ✅ Б3.6 | метрики и алерты, оценка качества ответов (evals в Phoenix) |

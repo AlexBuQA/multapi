@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
-import re
 import sys
 import unittest
 import warnings
@@ -23,8 +21,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+for path in (ROOT, ROOT / "tests"):          # tests — для общего помощника log_capture
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 # До импорта app.main: настройки читаются при импорте. Переменные окружения важнее .env,
 # поэтому тесты не зависят от локального .env.
@@ -43,9 +42,10 @@ from app.main import app  # noqa: E402
 from app.schemas.chat import ChatRequest  # noqa: E402
 from app.schemas.models import MODEL_CATALOG  # noqa: E402
 from app.services.llm import LLMService  # noqa: E402
+from log_capture import captured_logs, events, quiet_logs  # noqa: E402
 
-# Строка лога на каждый запрос в выводе тестов — шум; проверки логов идут через assertLogs.
-logging.getLogger("llm-service").setLevel(logging.WARNING)
+# Строка лога на каждый запрос в выводе тестов — шум; проверки логов идут через captured_logs.
+quiet_logs()
 
 API = "http://test/v1/chat/completions"
 
@@ -302,9 +302,10 @@ class TestChat(ServiceTestCase):
 
     async def test_redis_down_does_not_break_chat(self):
         self.use(self.completions, FakeRedis(down=True))
-        with self.assertLogs("llm-service", "WARNING"):
+        with captured_logs("WARNING") as logs:
             response = await self.post("/chat", HI)
         self.assertEqual((response.status_code, response.json()["cached"]), (200, False))
+        self.assertEqual({r["op"] for r in events(logs, "cache_unavailable")}, {"get", "setex"})
 
     async def test_provider_errors_mapped(self):
         cases = [
@@ -317,12 +318,15 @@ class TestChat(ServiceTestCase):
         for error, status, code in cases:
             with self.subTest(code=code):
                 self.use(FakeCompletions(error=error), FakeRedis())
-                with self.assertLogs("llm-service", "WARNING"):
+                with captured_logs("WARNING") as logs:
                     response = await self.post("/chat", HI)
                 self.assertEqual(response.status_code, status)
                 body = response.json()
                 self.assertEqual(body["error"]["code"], code)
                 self.assertEqual(body["error"]["request_id"], response.headers["X-Request-ID"])
+                failed = events(logs, "llm_request_failed")[0]
+                self.assertEqual((failed["error"], failed["request_id"]),
+                                 (code, response.headers["X-Request-ID"]))
                 self.assertNotIn("Traceback", response.text)
                 if code == "llm_rate_limit":
                     self.assertEqual(response.headers["Retry-After"], "7")
@@ -331,9 +335,10 @@ class TestChat(ServiceTestCase):
 
     async def test_unexpected_error_is_json_500(self):
         self.use(FakeCompletions(error=RuntimeError("boom")), FakeRedis())
-        with self.assertLogs("llm-service", "ERROR"):
+        with captured_logs("ERROR") as logs:
             async with self.client(raise_app_exceptions=False) as http:
                 response = await http.post("/chat", json=HI)
+        self.assertEqual(events(logs, "unhandled_error")[0]["request_id"], response.headers["X-Request-ID"])
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["error"]["code"], "internal_error")
         self.assertNotIn("boom", response.text)
@@ -380,8 +385,9 @@ class TestStream(ServiceTestCase):
 
     async def test_error_before_first_token_is_json(self):
         self.use(FakeCompletions(error=auth_error()), FakeRedis())
-        with self.assertLogs("llm-service", "WARNING"):
+        with captured_logs("WARNING") as logs:
             response = await self.post("/chat/stream", HI)
+        self.assertEqual(events(logs, "llm_request_failed")[0]["error"], "llm_auth")
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["error"]["code"], "llm_auth")
 
@@ -399,15 +405,16 @@ class TestStream(ServiceTestCase):
 
 class TestMiddlewareAndCors(ServiceTestCase):
     async def test_request_id_generated_propagated_and_logged(self):
-        with self.assertLogs("llm-service", "INFO") as logs:
+        with captured_logs("INFO") as logs:
             generated = await self.post("/chat", HI)
             own = await self.post("/chat", HI, headers={"X-Request-ID": "rid-abc-123"})
             hostile = await self.post("/chat", HI, headers={"X-Request-ID": "bad id\r\nstatus=200"})
-        self.assertRegex(generated.headers["X-Request-ID"], r"^[0-9a-f]{32}$")
+        self.assertRegex(generated.headers["X-Request-ID"], r"^[0-9a-f]{12}$")
         self.assertEqual(own.headers["X-Request-ID"], "rid-abc-123")
-        self.assertRegex(hostile.headers["X-Request-ID"], r"^[0-9a-f]{32}$")
-        line = next(m for m in logs.output if "rid-abc-123" in m)
-        self.assertRegex(line, r"request_id=rid-abc-123 method=POST path=/chat status=200 duration_ms=[\d.]+")
+        self.assertRegex(hostile.headers["X-Request-ID"], r"^[0-9a-f]{12}$")
+        line = next(r for r in events(logs, "http_request") if r["request_id"] == "rid-abc-123")
+        self.assertEqual((line["method"], line["path"], line["status"]), ("POST", "/chat", 200))
+        self.assertIsInstance(line["latency_ms"], float)
 
     async def test_cors_allows_only_configured_origin(self):
         preflight = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}
@@ -457,13 +464,13 @@ class TestLifespan(unittest.TestCase):
             from fastapi.testclient import TestClient
         get_settings.cache_clear()
         self.addCleanup(get_settings.cache_clear)
-        with self.assertLogs("llm-service", "WARNING") as logs, TestClient(app) as http:
+        with captured_logs("WARNING") as logs, TestClient(app) as http:
             # Клиент Redis создан, хотя Redis не отвечает: поднимется — переподключится сам.
             self.assertIsNotNone(app.state.cache)
             self.assertIsInstance(app.state.openai, openai.AsyncOpenAI)
             self.assertEqual(http.get("/health").status_code, 200)
             self.assertEqual(http.get("/ready").status_code, 503)
-        self.assertTrue(any(re.search("Redis .* недоступен", m) for m in logs.output))
+        self.assertEqual(events(logs, "redis_unavailable")[0]["redis_url"], "redis://127.0.0.1:1/0")
 
 
 if __name__ == "__main__":

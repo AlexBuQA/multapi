@@ -10,6 +10,13 @@ jsonschema>=4.18,<5.0
 pydantic-settings>=2.2,<3.0
 
 # Блоки 3.3–3.4: асинхронный клиент и HTTP-сервис на FastAPI, кеш в Redis
-fastapi>=0.115,<1.0
+fastapi>=0.142,<1.0          # 0.142+ — встроенная трассировка HTTP-запросов (блок 3.6)
 uvicorn>=0.30,<1.0
 redis>=5.0.1,<9.0
+
+# Блок 3.6: JSON-логи, трейсинг в Phoenix (OpenTelemetry + OpenInference), тесты
+structlog>=24.1,<27.0
+arize-phoenix-otel>=0.13,<1.0
+openinference-instrumentation-openai>=0.1.30,<1.0
+opentelemetry-sdk>=1.30,<2.0
+pytest>=8.0,<10.0

@@ -1,9 +1,9 @@
 """
-Статические проверки файлов блока 3.5: Dockerfile, .dockerignore, compose.yaml, .env.example.
+Статические проверки файлов блоков 3.5–3.6: Dockerfile, .dockerignore, compose.yaml, .env.example.
 
 Docker для этих тестов не нужен: они читают файлы как текст и следят, чтобы правки не
-сломали требования задания (multi-stage, non-root, exec-форма CMD, healthcheck-и,
-Redis без портов наружу, .env вне образа и вне git).
+сломали требования заданий (multi-stage, non-root, exec-форма CMD, healthcheck-и,
+Redis без портов наружу, .env вне образа и вне git, Phoenix для трейсов).
 
 Запуск из корня проекта:
     python -m unittest discover -s tests -v
@@ -117,6 +117,7 @@ class TestCompose(unittest.TestCase):
         self.text = _read("compose.yaml")
         self.app = _service_block(self.text, "app")
         self.redis = _service_block(self.text, "redis")
+        self.phoenix = _service_block(self.text, "phoenix")
 
     def test_app_service(self):
         self.assertRegex(self.app, r"build:\n\s+context: \.")
@@ -137,11 +138,31 @@ class TestCompose(unittest.TestCase):
             self.assertIn(param, self.redis)
         self.assertRegex(self.text, r"(?m)^volumes:\n  redis_data:")
 
+    def test_phoenix_service(self):
+        self.assertIn("image: arizephoenix/phoenix:latest", self.phoenix)
+        self.assertRegex(self.phoenix, r'ports:\n\s+- "6006:6006".*\n\s+- "4317:4317"')
+        self.assertIn("PHOENIX_WORKING_DIR: /data", self.phoenix)
+        self.assertRegex(self.phoenix, r"volumes:\n(\s+#.*\n)*\s+- phoenix-data:/data")
+        self.assertRegex(self.text, r"(?m)^volumes:\n(  .*\n)*  phoenix-data:")
+
+    def test_phoenix_healthcheck(self):
+        # без healthcheck docker compose up --wait не ждёт Phoenix
+        self.assertIn('test: ["CMD", "/usr/bin/python3.13", "-c"', self.phoenix)
+        self.assertIn("http://127.0.0.1:6006/healthz", self.phoenix)
+        for param in ("start_period: 300s", "start_interval: 2s", "retries: 3"):
+            self.assertIn(param, self.phoenix)
+
+    def test_app_sends_traces_to_phoenix(self):
+        self.assertIn("PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006", self.app)
+        depends = self.app.split("depends_on:", 1)[1].split("healthcheck:", 1)[0]
+        self.assertRegex(depends, r"\n\s+phoenix:\n(\s+#.*\n)*\s+condition: service_started")
+
 
 class TestSecrets(unittest.TestCase):
     def test_env_example_lists_variables(self):
         example = _read(".env.example")
-        for name in ("LLM__OPENAI_API_KEY", "REDIS_URL", "LOG_LEVEL", "DOCKER_LLM_BASE_URL"):
+        for name in ("LLM__OPENAI_API_KEY", "REDIS_URL", "LOG_LEVEL", "DOCKER_LLM_BASE_URL",
+                     "PHOENIX_COLLECTOR_ENDPOINT", "PHOENIX_PROJECT_NAME", "PII_PRESIDIO"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_not_tracked_by_git(self):

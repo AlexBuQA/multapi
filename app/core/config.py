@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     app_name: str = "multapi — LLM-сервис техподдержки"
     # Уровень лога сервиса (логгер llm-service): DEBUG, INFO, WARNING, ERROR.
     log_level: str = "INFO"
+    # Трейсинг в Phoenix (блок 3.6). Не задан — трейсинг выключен; в compose:
+    # http://phoenix:6006, для локального uvicorn с Phoenix из compose: http://127.0.0.1:6006.
+    phoenix_collector_endpoint: str | None = None
+    phoenix_project_name: str = "diploma-fastapi"
+    # Опционально: имена и адреса в prompt_preview маскирует Presidio (поверх regex).
+    # Нужны пакеты presidio-* и модель ru_core_news_md — см. app/observability/pii_presidio.py.
+    pii_presidio: bool = False
     redis_url: str = "redis://localhost:6379/0"
     cache_ttl_seconds: int = Field(default=3600, ge=1)
     # Адреса фронтенда, которым браузер разрешит обращаться к API. В .env — JSON-список.
