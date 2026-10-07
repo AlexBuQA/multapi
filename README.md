@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.5
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.6
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -14,6 +14,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 3.3 — Асинхронная обработка запросов к ИИ:** `AsyncLLMClient` (семафор, таймауты, батч, стриминг), бенчмарк sync vs async и первый SSE-эндпоинт `/chat/stream` — см. раздел [«Блок 3.3»](#блок-33--асинхронная-обработка-запросов-к-ии).
 - **Блок 3.4 — FastAPI-сервис для LLM:** `POST /chat` с кешем в Redis, `POST /chat/stream`, `GET /health`, `GET /models`; DI, middleware с `X-Request-ID`, CORS, единый формат ошибок, Swagger с примерами — см. раздел [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
 - **Блок 3.5 — Docker и контейнеризация:** multi-stage `Dockerfile` на `python:3.13-slim-bookworm` с uv и non-root пользователем, `compose.yaml` с сервисом и Redis, healthcheck-и, `/health` и `/ready` — см. раздел [«Блок 3.5»](#блок-35--docker-и-контейнеризация).
+- **Блок 3.6 — Observability:** трейсы в Phoenix (сервис в `compose.yaml`, автоинструментация OpenAI SDK, атрибуты `gen_ai.*`), JSON-логи structlog с `request_id` в каждой строке, маскирование PII в логах, опционально Presidio с замером времени — см. раздел [«Блок 3.6»](#блок-36--observability-ии-приложений).
 
 ## Важно про Ollama и модальности
 
@@ -59,7 +60,7 @@ multapi/
 ├── uv.lock                  # блок 3.5: закреплённые версии для образа
 ├── Dockerfile               # блок 3.5: multi-stage образ сервиса, non-root
 ├── .dockerignore            # блок 3.5: что не уходит в контекст сборки
-├── compose.yaml             # блок 3.5: app + redis, healthcheck-и
+├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix
 ├── .env.example
 ├── .gitignore
 ├── src/
@@ -71,14 +72,16 @@ multapi/
 │   ├── vision.py            # вариант А: base64 + Vision (vision-модель)
 │   ├── voice.py             # вариант Б: Whisper -> classify -> LLM -> TTS
 │   └── utils.py             # логирование, base64, валидация файлов, UsageTracker
-├── app/                     # блоки 3.1, 3.3 и 3.4
+├── app/                     # блоки 3.1, 3.3–3.6
 │   ├── main.py              # блок 3.4: FastAPI — lifespan, middleware, CORS, обработчики ошибок
+│   ├── observability/       # блок 3.6: tracing.py (Phoenix), logging.py (structlog), middleware.py
+│   │                        #   (request_id), pii.py (маскирование), pii_presidio.py (опционально)
 │   ├── core/                # блок 3.4: config.py (Settings), exceptions.py (ошибки LLM)
 │   ├── deps/providers.py    # блок 3.4: внедрение зависимостей
 │   ├── routers/             # блок 3.4: chat.py, models.py, health.py
 │   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py
 │   ├── services/
-│   │   ├── llm.py           # блок 3.4: LLMService — кеш в Redis, поток, перевод ошибок
+│   │   ├── llm.py           # блок 3.4: LLMService — кеш в Redis, поток, перевод ошибок; 3.6: span и лог вызова
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
 │   ├── config.py            # настройки ассистента с tools и асинхронного клиента (pydantic-settings)
 │   ├── logging_utils.py     # JSON-лог шагов -> logs/tool_calls.jsonl, logs/llm_calls.jsonl
@@ -102,9 +105,11 @@ multapi/
 │   ├── benchmark_results.md # результаты локального прогона (мок и Ollama)
 │   ├── stream_demo.py       # демо stream_chat: TTFT и общее время
 │   ├── mock_llm_server.py   # мок OpenAI API с задержкой (модель облачного провайдера)
+│   ├── bench_pii.py         # блок 3.6: время маскирования — regex против Presidio
 │   └── _target.py           # выбор цели: мок или локальный Ollama
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
+│   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
 ├── tools/
 │   └── check_proxy.py       # проверка HTTP-прокси (egress-IP)
@@ -113,7 +118,11 @@ multapi/
 │   ├── test_tool_call.py    # блок 3.1: схемы, обработчики, цикл tool_call, лог
 │   ├── test_async_client.py # блок 3.3: семафор, батчи, таймаут, стриминг
 │   ├── test_service.py      # блок 3.4: настройки, ручки, кеш, ошибки, поток, CORS, Swagger
-│   └── test_docker_files.py # блок 3.5: Dockerfile, .dockerignore, compose.yaml, .env.example
+│   ├── test_docker_files.py # блок 3.5: Dockerfile, .dockerignore, compose.yaml, .env.example
+│   ├── test_pii.py          # блок 3.6: redact_pii, prompt_hash, prompt_preview
+│   ├── test_observability.py# блок 3.6: JSON-логи, request_id, спаны и атрибуты gen_ai.*
+│   ├── test_pii_presidio.py # блок 3.6: Presidio (фон, откат на regex, настоящая модель)
+│   └── log_capture.py       # перехват JSON-лога в тестах
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
@@ -471,6 +480,7 @@ Swagger открывается на http://localhost:8000/docs. У `POST /chat` 
    ```
    2026-10-06 21:11:04,839 INFO llm-service: request_id=rid-abc-123 method=GET path=/health status=200 duration_ms=0.5
    ```
+   С блока 3.6 middleware перенесено в `app/observability/middleware.py`, лог стал JSON (structlog), поле называется `latency_ms`, а для `/chat/stream` строка пишется после конца потока — с полным временем. См. [«Блок 3.6»](#блок-36--observability-ии-приложений).
 2. **Внедрение зависимостей.** Ручка получает `LLMServiceDep`. `get_llm_service` собирает `LLMService(openai, cache, settings)` из объектов, которые `lifespan` создал один раз и положил в `app.state`. Глобальных клиентов на уровне модулей нет, поэтому тесты подменяют их через `app.dependency_overrides` и `app.state`.
 3. **Кеш.** `complete()` строит ключ `chat:` + sha256 от запроса без `user_id`, `session_id` и `stream`; модель по умолчанию подставляется до расчёта ключа. Чтение — `await cache.get`, запись — `await cache.setex` с TTL `CACHE_TTL_SECONDS`. Попадание в кеш возвращается через `ChatResponse.model_validate_json(...)` с `cached: true`. Ответы кешируются при любой `temperature`, а `temperature` входит в ключ: ассистент техподдержки на одинаковый вопрос с теми же параметрами отвечает одинаково и не тратит токены. В эталоне курса кеш работает только при `temperature == 0`.
 4. **Ошибки провайдера** `LLMService` переводит в доменные исключения, а обработчик в `app/main.py` — в JSON `{"error": {"code": ..., "message": ..., "request_id": ...}}`:
@@ -619,7 +629,7 @@ uvicorn app.main:app --port 8000
 | Сломанный ключ → 502 `llm_auth`, а не 500 с трейсбеком | `provider_errors()` + обработчик `LLMError`; тест `test_provider_errors_mapped`; живая проверка — мок с `--api-key` |
 | Swagger: примеры запроса, `summary`, `responses` 200/422/429/502/504; «Try it out» не даёт 422 | `json_schema_extra` и `openapi_examples`; тест `test_swagger_examples_summaries_and_responses` |
 | DI без глобальных клиентов, `Annotated`-алиасы | `app/deps/providers.py` |
-| Middleware: `request_id`, `duration_ms`, лог, `X-Request-ID` | `request_context` в `app/main.py`; тест `test_request_id_generated_propagated_and_logged` |
+| Middleware: `request_id`, `duration_ms`, лог, `X-Request-ID` | `request_context` в `app/main.py` (с блока 3.6 — `RequestContextMiddleware` в `app/observability/middleware.py`); тест `test_request_id_generated_propagated_and_logged` |
 | CORS без `["*"]` вместе с `allow_credentials=True` | `Settings._check_cors`; тесты `test_cors_wildcard_with_credentials_rejected`, `test_cors_allows_only_configured_origin` |
 
 ## Блок 3.5 — Docker и контейнеризация
@@ -757,7 +767,7 @@ app-1  | 2026-10-07 06:26:38,444 INFO llm-service: request_id=2440eeb399a2421bae
 
 - **Первые запросы сразу после `up -d`** вернули пустой ответ и `000`: `docker compose ps` показывал `health: starting`, uvicorn ещё не слушал порт. Отсюда `--wait` в инструкции — команда возвращается, когда оба сервиса healthy.
 - **`localhost` против `127.0.0.1`.** Сервис отвечал по `127.0.0.1`, а запросы на `localhost` зависали: `[::1]:8000` занимал `wslrelay.exe` (см. пункт 4 в «Docker Desktop на Windows»). Поэтому `/health`, `/ready`, `/docs` и `/chat` проверены по `http://127.0.0.1:8000`.
-- **Healthcheck виден в логе** строкой каждые 15 с. Для наблюдаемости (блок 3.6) такие строки стоит понизить до DEBUG или отфильтровать.
+- **Healthcheck виден в логе** строкой каждые 15 с. Для наблюдаемости такие строки стоит понизить до DEBUG или отфильтровать — сделано в блоке 3.6.
 
 ### Соответствие критериям блока 3.5
 
@@ -771,6 +781,217 @@ app-1  | 2026-10-07 06:26:38,444 INFO llm-service: request_id=2440eeb399a2421bae
 | В образе нет `.env`, `.git`, `tests/`, `__pycache__`; `.env` нет в git | `.dockerignore`, `COPY app/`; тесты `test_secrets_and_tests_stay_out_of_context`, `test_env_not_tracked_by_git` |
 | `depends_on: { redis: { condition: service_healthy } }`, healthcheck у обоих сервисов | `compose.yaml`; тест `test_app_service` |
 | У Redis нет `ports`, данные в именованном томе | `compose.yaml`; тест `test_redis_service` |
+
+## Блок 3.6 — Observability ИИ-приложений
+
+К сервису из блоков 3.4–3.5 добавлен слой наблюдаемости:
+- **трейсы в Phoenix** — запущен сервисом в `compose.yaml`, интерфейс на порту 6006: каждый запрос к `/chat` и `/chat/stream` даёт трейс с входом, ответом, токенами и временем;
+- **JSON-логи через structlog** — `request_id` в каждой строке запроса;
+- **маскирование персональных данных** — сырой промпт в лог не попадает никогда. Опционально имена и адреса маскирует Presidio.
+
+### Файлы
+
+| Файл | Что в нём |
+|------|-----------|
+| `app/observability/tracing.py` | `setup_tracing()` — `phoenix.otel.register` и автоинструментация OpenAI SDK (OpenInference); `fastapi_telemetry()` — настройки встроенной трассировки FastAPI |
+| `app/observability/logging.py` | `setup_logging(level)` — structlog: `merge_contextvars`, уровень, время ISO UTC, `JSONRenderer(ensure_ascii=False)`; сообщения стандартного `logging` (uvicorn, OpenTelemetry) в том же JSON |
+| `app/observability/middleware.py` | `RequestContextMiddleware`: `request_id` из `X-Request-ID` или `uuid4().hex[:12]`, `bind_contextvars` / `clear_contextvars`, строка `http_request`, заголовок `X-Request-ID` в ответе |
+| `app/observability/pii.py` | `redact_pii` (EMAIL, PHONE_RU, CARD, INN, PASSPORT), `prompt_hash`, `prompt_preview` |
+| `app/observability/pii_presidio.py` | Опционально: имена и места через Presidio, в фоне, параллельно с вызовом модели |
+| `app/services/llm.py` | Span `llm.chat` с атрибутами `gen_ai.*`; строки `llm_request_completed`, `llm_cache_hit`, `llm_request_failed`, `llm_stream_cancelled` |
+| `compose.yaml` | Сервис `phoenix` (`arizephoenix/phoenix:latest`, порты 6006 и 4317, том `phoenix-data:/data`, healthcheck `/healthz`); у `app` — `PHOENIX_COLLECTOR_ENDPOINT` и `depends_on: phoenix` |
+| `tests/test_pii.py` | Маскирование: пример из задания, пример из критериев, форматы телефонов, карт, ИНН, паспорта |
+| `tests/test_observability.py` | JSON-логи и `request_id`, отсутствие PII в логе, спаны и их атрибуты, связь трейса и лога |
+| `tests/test_pii_presidio.py` | Presidio: фоновая обработка, откат на regex; с настоящей моделью — если она установлена |
+| `scripts/bench_pii.py` | Замер времени: regex против Presidio |
+| `examples/requests/chat_pii.json`, `chat_followup.json` | Запрос с email, телефоном и картой и продолжение диалога в той же сессии `s-demo` |
+| `docs/observability/` | Скриншоты трейса из прогона на Windows с подписью «что видно» |
+
+Новые зависимости — `structlog`, `arize-phoenix-otel`, `openinference-instrumentation-openai`, `opentelemetry-sdk` — добавлены и в `requirements.txt`, и в `pyproject.toml` / `uv.lock` (образ). FastAPI поднят до 0.142+: в этой версии появилась встроенная трассировка HTTP-запросов, и она настроена явно (см. ниже). `pip install -r requirements.txt` обновит FastAPI в локальном окружении сам.
+
+### Трейсы
+
+Трейс одного запроса к `/chat`:
+
+```
+POST /chat                 span HTTP-запроса (FastAPI): метод, путь, статус, длительность,
+│                          request.id; input/output — маскированные, как в логе
+└── llm.chat               наш span (CHAIN): gen_ai.request.model, gen_ai.usage.input_tokens,
+    │                      gen_ai.usage.output_tokens, gen_ai.response.finish_reasons,
+    │                      cache.hit, prompt.hash, request.id, user.id, session.id
+    └── ChatCompletion     span OpenAI SDK (OpenInference, LLM): сообщения, ответ, токены
+```
+
+При попадании в кеш дочернего `ChatCompletion` нет, а у `llm.chat` — `cache.hit: true`. `user.id` и `session.id` — атрибуты OpenInference: по `session.id` Phoenix собирает трейсы диалога на вкладке **Sessions**.
+
+Отличия от стартер-кода `tracing.py` и почему:
+
+1. **Адрес с `/v1/traces`.** `register(endpoint="http://phoenix:6006")` отправляет спаны на корень сервера, и Phoenix их не принимает: путь `/v1/traces` библиотека дописывает сама, только когда адрес берётся из переменной окружения. `traces_endpoint()` дописывает его явно.
+2. **`batch=True`.** По умолчанию `register()` отправляет каждый span синхронно, прямо в обработчике запроса. Пачками в фоновом потоке — запрос не ждёт Phoenix, а если Phoenix лежит, сервис отвечает как обычно.
+3. **Без `PHOENIX_COLLECTOR_ENDPOINT` трейсинг выключен** — вместо адреса по умолчанию `http://localhost:6006`. Локальный uvicorn и тесты не шлют спаны в несуществующий Phoenix. В `compose.yaml` переменная задана.
+4. **Собственный span `llm.chat` с `gen_ai.*`.** Автоинструментация OpenInference пишет токены и модель в свои атрибуты: `llm.model_name`, `llm.token_count.prompt`, `llm.token_count.completion`. Атрибутов `gen_ai.*`, которые названы в критериях, она по умолчанию не создаёт. Наш span добавляет их по семантическим конвенциям OpenTelemetry GenAI, а заодно `request.id` и факт попадания в кеш. Phoenix при приёме переводит `gen_ai.*` в свои `llm.*`, но токены по трейсу не удваивает: суммируются только LLM-спаны (проверено: у `llm.chat` своих токенов 0, по трейсу 59 = 28 + 31).
+5. **Встроенная трассировка FastAPI 0.142.** Новая FastAPI сама пишет span на каждый HTTP-запрос, как только настроен `TracerProvider`. Без настройки в Phoenix каждые 15 с появлялся бы трейс `GET /ready` от healthcheck, а в каждом трейсе — служебные `fastapi.dependencies`, `fastapi.endpoint`, `fastapi.serialization`. В `fastapi_telemetry()` `/health` и `/ready` исключены, служебные спаны и метрики выключены, экспорт настраивает только `setup_tracing()`.
+6. **Вход и выход на корневом span.** Колонки input/output в списках трейсов и сессий Phoenix берёт у корневого span, то есть у HTTP-span FastAPI. Сервис кладёт туда `prompt_preview` и начало ответа — маскированные, по 120 символов. Список трейсов читается без открытия каждого.
+
+`setup_tracing()` вызывается в `lifespan` до создания `AsyncOpenAI`; тест `test_lifespan_sets_up_tracing_before_openai_client` проверяет порядок.
+
+**Персональные данные в трейсах.** Span `ChatCompletion` хранит полный текст запроса и ответа — для отладки именно это и нужно, а Phoenix работает внутри стека. Если хранить их и там нельзя, в `.env` достаточно раскомментировать `OPENINFERENCE_HIDE_INPUTS=true` / `OPENINFERENCE_HIDE_OUTPUTS=true`: значения заменятся на `__REDACTED__` (тест `test_hide_inputs_env`).
+
+### JSON-логи
+
+Каждая строка — один JSON-объект. Пример — запрос с email, телефоном и картой (`X-Request-ID: demo-001`) и его HTTP-строка:
+
+```json
+{"model": "llama3.2", "stream": false, "prompt_hash": "sha256:b3b3416930bd86b5", "prompt_preview": "Мой email [EMAIL], тел [PHONE_RU], карта [CARD]. Не приходит письмо для сброса пароля.", "response_model": "llama3.2", "input_tokens": 28, "output_tokens": 31, "latency_ms": 715.9, "finish_reason": "stop", "cached": false, "trace_id": "771842274df5d87a8a045f41de7e49a3", "event": "llm_request_completed", "path": "/chat", "session_id": "s-7", "user_id": "u-42", "request_id": "demo-001", "method": "POST", "level": "info", "timestamp": "2026-10-07T08:56:50.931272Z"}
+{"status": 200, "latency_ms": 741.8, "event": "http_request", "trace_id": "771842274df5d87a8a045f41de7e49a3", "path": "/chat", "session_id": "s-7", "user_id": "u-42", "request_id": "demo-001", "method": "POST", "level": "info", "timestamp": "2026-10-07T08:56:50.932524Z"}
+```
+
+| Событие | Когда | Поля, кроме контекста запроса |
+|---------|-------|-------------------------------|
+| `http_request` | на каждый запрос, когда ответ отправлен целиком | `status`, `latency_ms` |
+| `llm_request_completed` | ответ модели получен (для потока — после последнего фрагмента) | `model`, `input_tokens`, `output_tokens`, `latency_ms`, `finish_reason`, `prompt_hash`, `prompt_preview`, `cached: false`, `trace_id`; у потока ещё `ttft_ms` |
+| `llm_cache_hit` | ответ взят из Redis | `model`, `prompt_hash`, `prompt_preview`, `latency_ms`, `cached: true`, `trace_id` |
+| `llm_request_failed` | ошибка провайдера (429, таймаут, ключ, недоступность) | `error`, `cause`, `latency_ms`, `trace_id` |
+| `llm_stream_cancelled` | клиент закрыл поток до конца | `latency_ms`, `trace_id` |
+
+Контекст запроса — `request_id`, `method`, `path`, `user_id` (заголовок `X-User-ID` или поле тела), `session_id`, `trace_id` — middleware привязывает к `contextvars` в начале запроса и очищает перед следующим. Так он попадает во все строки, записанные во время запроса, в том числе в сообщения сторонних библиотек. Строки, не относящиеся к запросу (старт сервиса, фоновый экспорт спанов), `request_id` не имеют.
+
+`trace_id` связывает лог и Phoenix: по строке лога трейс находится поиском по ID, а у span запроса есть атрибут `request.id`.
+
+Отличия от стартер-кода и что пришлось поправить:
+
+- **Middleware на уровне ASGI, а не `@app.middleware("http")`.** Тот вариант выполняет эндпоинт в отдельной задаче. Поэтому `user_id` и `session_id`, привязанные в эндпоинте из тела запроса, не попадали в строку `http_request`, а у `/chat/stream` строка `http_request` писалась раньше `llm_request_completed` и показывала время до первого фрагмента, а не всего потока. Сейчас обе строки одного запроса согласованы (тесты `test_request_id_shared_by_http_and_llm_lines`, `test_cache_hit_and_stream_lines`).
+- **`request_id` из заголовка проверяется** (`[A-Za-z0-9._-]{1,128}`): чужая строка с переводом строки или JSON не попадёт ни в лог, ни в заголовок ответа — вместо неё генерируется своя.
+- **Healthcheck не шумит.** `/health` и `/ready` с кодом ниже 400 пишутся только на уровне DEBUG, строки доступа uvicorn выключены — их заменяет `http_request`.
+- **Логгеры `httpx` и `openai` — не ниже WARNING.** Тест `test_no_raw_pii_in_logs` нашёл утечку: при `LOG_LEVEL=DEBUG` OpenAI SDK печатает тело запроса целиком (`Request options: ... messages`), то есть сырой промпт.
+
+### Маскирование PII
+
+`redact_pii()` — шаблоны из задания с одной правкой. `PHONE_RU` начинается с `(?<!\w)`, а не с `\b`: `\b` перед `+` срабатывает, только если перед ним буква или цифра. Со стартовым шаблоном «тел +7 (999) 123-45-67» и пример из критериев «email@example.com, +7 999 123 45 67» остаются в логе как есть — проверено. В лог идут только `prompt_hash` (первые 16 символов SHA-256) и `prompt_preview` — первые 120 символов уже замаскированного текста.
+
+Тесты в `tests/test_pii.py` запускаются и `unittest`, и `pytest`. Пример из задания проверяется так: в превью нет ни одного фрагмента исходных данных и ни одной цифры, есть `[EMAIL]`, `[PHONE_RU]`, `[CARD]`. Если маскирование снять, тест падает. Пример из критериев превращается ровно в `[EMAIL], [PHONE_RU]`.
+
+### Presidio (опциональная часть)
+
+Regex ловит то, у чего есть формат. Имя или город формата не имеют: без Presidio в превью остаётся «меня зовут Иван Петров, живу в Казани», с Presidio — «меня зовут [PERSON], живу в [LOCATION]». Его находит NER-модель spaCy `ru_core_news_md`, а Presidio заменяет найденное на `[PERSON]` и `[LOCATION]`.
+
+Цена — время. Замер `scripts/bench_pii.py` (песочница, Intel Xeon 2,1 ГГц, 2 ядра), медиана:
+
+| Длина текста | regex | Presidio, весь текст | превью с Presidio (как в сервисе) |
+|---:|---:|---:|---:|
+| 120 | 0,01 мс | 7,5 мс | 6,9 мс |
+| 1 000 | 0,08 мс | 50,2 мс | 10,8 мс |
+| 5 000 | 0,40 мс | 185,5 мс | 11,2 мс |
+| 20 000 | 1,93 мс | 852,7 мс | 16,5 мс |
+
+Загрузка модели — 4 с. Presidio по всему тексту медленнее regex в сотни раз, и время растёт линейно: на длинном промпте это почти секунда. Отсюда устройство:
+
+- **Только начало текста.** В лог идут 120 символов, поэтому Presidio смотрит на первые 200 (с запасом на имя на границе). Regex по-прежнему проходит весь текст. Стоимость перестаёт зависеть от длины промпта: 7–17 мс вместо 850.
+- **В фоне.** Маскирование запускается фоновой задачей в отдельном потоке до вызова модели и идёт параллельно с ним. Строка лога ждёт результат, а ответ — нет. На сервисе с mock-моделью (5 запросов, без кеша) медиана ответа — 309 мс без Presidio и 315 мс с ним.
+- **Модель грузится на старте** (`presidio_ready`, `load_ms`), а не на первом запросе.
+- **Один рабочий поток:** потокобезопасность spaCy при параллельных вызовах не гарантируется.
+- **Ошибка Presidio не роняет запрос.** Превью тогда не пишется вовсе: текст только после regex мог бы оставить в логе имя.
+
+Включается `PII_PRESIDIO=true`. Пакеты ставятся отдельно и в Docker-образ не входят: spaCy с моделью — около 500 МБ, образ перестал бы укладываться в 500 МБ из блока 3.5. Без пакетов сервис пишет `presidio_unavailable` и работает на regex.
+
+```powershell
+pip install presidio-analyzer presidio-anonymizer
+python -m spacy download ru_core_news_md
+python scripts/bench_pii.py
+```
+
+### Phoenix в compose
+
+- **`phoenix`** — `arizephoenix/phoenix:latest`, порты `6006:6006` (интерфейс и приём трейсов по OTLP/HTTP) и `4317:4317` (OTLP/gRPC), `PHOENIX_WORKING_DIR: /data`, том `phoenix-data:/data`: трейсы хранятся в SQLite и переживают `down` / `up`. Тег `latest` — вариант образа, работающий от root, поэтому в новый том можно писать. У варианта `latest-nonroot` (uid 65532) каталог тома пришлось бы отдать этому пользователю.
+- **Healthcheck у `phoenix`** — запрос к `/healthz`. Образ distroless: shell и curl в нём нет, поэтому проверку выполняет тот же Python, которым запущен Phoenix (`/usr/bin/python3.13`, виден в колонке COMMAND `docker compose ps`). `start_period: 300s`: пока он идёт, неудачные проверки не считаются, а первая удачная сразу даёт `healthy`. На машине с достаточной памятью это секунды, а в WSL с 1 ГБ первый запуск Phoenix занял 5,5 минуты. Без healthcheck `docker compose up --wait` не ждал Phoenix: в прогоне на Windows `/healthz` сразу после `up` ответил `000`.
+- **`app`** получает `PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006` и `depends_on: phoenix` с `condition: service_started`. Phoenix нужен только для трейсов: если он недоступен, сервис отвечает как обычно, а экспортёр пишет в лог `Failed to export spans batch` (проверено). Поэтому запуск сервиса от готовности Phoenix не зависит — её ждёт `--wait`.
+- Образ сервиса вырос примерно на 50 МБ (OpenTelemetry, protobuf, gRPC).
+
+На Windows:
+
+- **Интерфейс — по `http://127.0.0.1:6006`.** Если `localhostForwarding=false` из блока 3.5 не задан, `localhost:6006` может зависать так же, как `localhost:8000`.
+- **Кириллица в выводе `docker compose logs`.** PowerShell 5.1 читает вывод программ в кодировке консоли (CP866), и UTF-8 из лога превращается в `╨Ь╨╛╨╣`. Перед просмотром лога: `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`.
+- **Память: для стека с Phoenix нужно 2 ГБ в WSL.** Phoenix занимает около 0,5–0,6 ГБ. С пределом 1 ГБ из блока 3.4 (в `docker stats` — 895 МБ на все контейнеры) он не падает, но память уходит в своп. В прогоне контейнер phoenix стартовал в 10:27:57, а первая строка его лога появилась в 10:33:30; за это время с диска прочитано 16,3 ГБ. В `%USERPROFILE%\.wslconfig` укажите `memory=2GB`, затем выполните `wsl --shutdown` и перезапустите Docker Desktop. Проверка: в `docker stats --no-stream` предел в колонке `MEM USAGE / LIMIT` — около 1,9 ГиБ вместо 895 МиБ. Если предел не изменился, проверьте содержимое файла (`Get-Content $env:USERPROFILE\.wslconfig`) и что Блокнот не сохранил его как `.wslconfig.txt`. Если после этого Ollama снова пишет `failed to allocate compute pp buffers`, памяти на компьютере не хватает на всё сразу: попробуйте `memory=1536MB` или останавливайте Phoenix, когда трейсы не нужны (`docker compose stop phoenix`) — сервис работает и без него.
+
+### Проверка
+
+```powershell
+# зависимости (FastAPI обновится до 0.142+) и тесты
+pip install -r requirements.txt
+python -m unittest discover -s tests
+python -m pytest tests/test_pii.py -v
+
+# стек: app + redis + phoenix; --wait — пока все три не станут healthy
+docker compose up -d --build --wait
+docker compose ps
+curl.exe -s -w " [%{http_code}]\n" http://127.0.0.1:6006/healthz
+
+# запросы: с персональными данными, продолжение диалога, поток
+curl.exe -s -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -H "X-Request-ID: demo-001" -d "@examples/requests/chat_pii.json"
+curl.exe -s -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -H "X-Request-ID: demo-002" -d "@examples/requests/chat_followup.json"
+curl.exe -s -N -X POST http://127.0.0.1:8000/chat/stream -H "Content-Type: application/json" -H "X-Request-ID: demo-003" -d "@examples/requests/chat_stream.json"
+
+# лог: request_id одинаковый в строке HTTP и строке модели; исходных PII нет
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+docker compose logs app --no-log-prefix | Select-String "demo-00"
+docker compose logs app --no-log-prefix | Select-String "ivan@mail.ru|4111|123-45-67"
+```
+
+Последняя команда должна ничего не вывести. Затем в браузере `http://127.0.0.1:6006` → проект `diploma-fastapi` → **Traces**: трейсы `POST /chat` с маскированным входом. В трейсе `demo-001` выбрать `llm.chat` → **Attributes** — там `gen_ai.request.model` и `gen_ai.usage.*`. На вкладке **Sessions** — сессия `s-demo` из двух трейсов. Если в списке нет трейса запроса, отправленного сразу после `up`, Phoenix ещё запускался: см. «Память» выше. Скриншот трейса — в `docs/observability/` (см. [README](docs/observability/README.md) там).
+
+### Результаты
+
+**Песочница** (Linux, Phoenix 20.19 как процесс, mock-модель вместо Ollama, сервис через uvicorn и в собранном образе):
+
+| Проверка | Результат |
+|----------|-----------|
+| `python -m unittest discover -s tests` | 122 теста, `OK`; без пакетов Presidio — `OK (skipped=3)` |
+| `pytest tests` | все тесты проходят и под pytest |
+| `docker build` с новым `uv.lock` | собирается; образ +47 МБ |
+| Контейнер сервиса → Phoenix | трейс `POST /chat → llm.chat → ChatCompletion`, `request.id`, `session.id`; за 40 с healthcheck-ов — ни одного трейса `GET /ready` и ни одной строки `/ready` в логе INFO; `uid=1000(appuser)` |
+| Атрибуты `llm.chat` | `gen_ai.request.model: llama3.2`, `gen_ai.usage.input_tokens: 28`, `gen_ai.usage.output_tokens: 31`, `gen_ai.response.finish_reasons: ["stop"]` |
+| `request_id` в логе | одинаковый в `llm_request_completed` и `http_request`; `trace_id` в строках совпадает с трейсом в Phoenix |
+| PII | в логе нет `ivan@mail.ru`, `4111`, `123-45-67`; превью — `Мой email [EMAIL], тел [PHONE_RU], карта [CARD]…` |
+| Phoenix остановлен | `/chat` — 200 за обычные ~0,3 с, в логе `Failed to export spans batch` |
+| Presidio | см. таблицу замеров выше |
+
+**Windows** (7 октября 2026 года, Docker Desktop, WSL с пределом 1 ГБ, зеркало `mirror.gcr.io`, Ollama `llama3.2` на хосте):
+
+| Проверка | Результат |
+|----------|-----------|
+| `python -m unittest discover -s tests` | 121 тест, `OK (skipped=3)` — пропущены тесты с настоящим Presidio; итоговая версия добавляет тест healthcheck Phoenix — 122 |
+| `python -m pytest tests/test_pii.py -v` | 10 passed, 13 subtests passed |
+| `pip install -r requirements.txt` | structlog 26.1, arize-phoenix-otel 0.17.2, openinference-instrumentation-openai 0.1.63, opentelemetry-sdk 1.45.1; FastAPI 0.142.2 уже стояла |
+| `docker compose up -d --build --wait` | `arizephoenix/phoenix:latest` скачан через зеркало за 89 с; образ сервиса собран за 34,5 с (`uv sync` — 48 пакетов за 11 с, из них grpcio 6,8 МБ); app и redis healthy |
+| `POST /chat`, `demo-001` (`chat_pii.json`) | 200 за 90,4 с; 76 → 562 токена |
+| `POST /chat`, `demo-002` (`chat_followup.json`, та же сессия) | 200 за 28,5 с; 50 → 236 токенов |
+| `POST /chat/stream`, `demo-003` | кадры `4`, `.`, usage, `[DONE]`; 6,1 с, `ttft_ms` 5935 |
+| Строки лога `demo-001`…`demo-003` | у каждого запроса `llm_request_completed` и `http_request` с одинаковыми `request_id` и `trace_id`; у `/chat` — `user_id: u-42`, `session_id: s-demo`; `prompt_preview` — `Мой email [EMAIL], тел [PHONE_RU], карта [CARD]…` |
+| `Select-String "ivan@mail.ru\|4111\|123-45-67"` по логу | пусто. Модель повторила email в тексте ответа, но ответ в лог не пишется |
+| Трейс `demo-003` в Phoenix | `POST /chat/stream → llm.chat → ChatCompletion`; ID трейса совпадает с `trace_id` в логе; `gen_ai.request.model: llama3.2`, `gen_ai.usage.input_tokens: 31`, `gen_ai.usage.output_tokens: 3` |
+| Трейсы `demo-001`, `demo-002` | в Phoenix их нет: он ещё запускался (см. ниже); в логе сервиса — `Connection refused` к `phoenix:6006` и `Failed to export spans batch`; сервис при этом отвечал |
+| Healthcheck Phoenix | после запуска — `healthy`, все проверки `ExitCode 0` |
+| `POST /chat`, `demo-005` после `redis-cli flushall` | 200 за 56,6 с; трейс `POST /chat → llm.chat → ChatCompletion`: вход в списке — `Мой email [EMAIL], тел [PHONE_RU], карта [CARD]…`, `gen_ai.usage` 76 → 550, `session.id: s-demo`, `user.id: u-42`, `cache.hit: false` |
+
+Скриншоты и подпись «что видно» — в [`docs/observability/`](docs/observability/README.md).
+
+Наблюдения:
+
+- **Phoenix при 1 ГБ памяти в WSL запускается минутами.** Контейнер стартовал в 10:27:57, первая строка его лога («Running migrations») — в 10:33:30. В `docker stats` у phoenix 16,3 ГБ чтения с диска при пределе 895 МБ на все контейнеры: память уходит в своп. Запросы `demo-001` и `demo-002` закончились в 10:30:32 и 10:31:01 — экспортёр трижды повторил отправку и отбросил спаны. Сервис всё это время отвечал (`healthy`, 200): потеря трейсов не мешает обслуживанию. Отсюда два изменения: healthcheck у phoenix со `start_period: 300s` и требование 2 ГБ памяти для WSL (раздел «Phoenix в compose»).
+- **`/healthz` сразу после `up --wait` — `000`.** До healthcheck `--wait` считал phoenix готовым, как только контейнер запущен. С healthcheck и 1 ГБ памяти `--wait` в повторных запусках завершался с `container multapi-phoenix-1 is unhealthy` через 3 минуты — тогда `start_period` был 90 с. Позже проверки прошли (`healthy`, `ExitCode 0`).
+- **Кириллица в `docker compose logs`** без `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` выглядит как `╨Ь╨╛╨╣` — кодировка консоли PowerShell 5.1; с ней строки читаются нормально.
+
+### Соответствие критериям блока 3.6
+
+| Критерий | Реализация |
+|----------|------------|
+| `docker compose up` поднимает app и Phoenix одной командой, UI на порту 6006 | сервис `phoenix` в `compose.yaml`, `depends_on`; тесты `test_phoenix_service`, `test_app_sends_traces_to_phoenix` |
+| В Phoenix есть трейс LLM-запроса с `gen_ai.request.model` и `gen_ai.usage.*` | span `llm.chat` (`app/services/llm.py`), автоинструментация OpenAI SDK в `setup_tracing()`; тест `test_chat_span_has_gen_ai_attributes_and_child_llm_span` |
+| `request_id` в каждой строке лога и совпадает в строках HTTP и LLM одной цепочки | `RequestContextMiddleware` + `merge_contextvars`; тесты `test_request_id_shared_by_http_and_llm_lines`, `test_cache_hit_and_stream_lines` |
+| В строке LLM — `model`, токены, `latency_ms`, `finish_reason`, без сырых PII | `llm_request_completed`; тест `test_no_raw_pii_in_logs` |
+| «email@example.com, +7 999 123 45 67» → `[EMAIL]`, `[PHONE_RU]` | тест `test_criterion_example` |
+| Unit-тесты `redact_pii` зелёные в pytest | `tests/test_pii.py`: `python -m pytest tests/test_pii.py -v` |
+| Опционально: Presidio и оценка времени | `app/observability/pii_presidio.py`, `scripts/bench_pii.py`, `tests/test_pii_presidio.py` |
 
 ## Конфигурация (.env)
 
@@ -808,6 +1029,8 @@ LLM__MAX_RETRIES=2
 Остальные (`REDIS_URL`, `CACHE_TTL_SECONDS`, `CORS_ORIGINS` …) — в таблице раздела [«Блок 3.4»](#блок-34--fastapi-сервис-для-llm).
 
 Для Docker (блок 3.5) добавлены `LOG_LEVEL` — уровень лога сервиса (`INFO` по умолчанию) — и `DOCKER_LLM_BASE_URL` — адрес провайдера для контейнера (по умолчанию Ollama на хосте, `http://host.docker.internal:11434/v1`). `REDIS_URL` в контейнере задаёт `compose.yaml`: `redis://redis:6379/0`.
+
+Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 
 ## Прокси
 

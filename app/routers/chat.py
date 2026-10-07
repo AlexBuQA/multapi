@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import structlog
 from fastapi import APIRouter, Body
 from fastapi.responses import StreamingResponse
 
@@ -54,7 +55,14 @@ SSE_EXAMPLE = (
     responses={200: {"description": "Ответ модели"}, **LLM_ERROR_RESPONSES},
 )
 async def chat(service: LLMServiceDep, req: ChatRequest = ChatBody) -> ChatResponse:
+    _bind_ids(req)
     return await service.complete(req)
+
+
+def _bind_ids(req: ChatRequest) -> None:
+    """user_id и session_id из тела запроса — в контекст лога (кроме пустых)."""
+    ids = {"user_id": req.user_id, "session_id": req.session_id}
+    structlog.contextvars.bind_contextvars(**{key: value for key, value in ids.items() if value})
 
 
 def _frame(payload: str) -> str:
@@ -98,6 +106,7 @@ async def _sse(first: ChatDelta | None, deltas: AsyncIterator[ChatDelta]) -> Asy
     },
 )
 async def chat_stream(service: LLMServiceDep, req: ChatRequest = ChatBody) -> StreamingResponse:
+    _bind_ids(req)
     deltas = service.stream(req)
     # Первый фрагмент получаем до ответа клиенту: ошибка подключения к провайдеру,
     # неверный ключ или 429 превращаются в обычный JSON с нужным HTTP-кодом.

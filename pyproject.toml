@@ -6,15 +6,20 @@
 # После изменения списка зависимостей обновите lock-файл: uv lock
 [project]
 name = "multapi-llm-service"
-version = "3.5.0"
-description = "HTTP-сервис ассистента техподдержки на FastAPI: чат, поток SSE, кеш в Redis"
+version = "3.6.0"
+description = "HTTP-сервис ассистента техподдержки на FastAPI: чат, поток SSE, кеш в Redis, логи и трейсы"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115,<1.0",
+    "fastapi>=0.142,<1.0",   # 0.142 — встроенная трассировка HTTP-запросов (блок 3.6)
     "uvicorn>=0.30,<1.0",
     "openai>=2.0,<3.0",
     "redis>=5.0.1,<9.0",
     "pydantic-settings>=2.2,<3.0",
+    # блок 3.6: JSON-логи и трейсинг вызовов модели в Phoenix
+    "structlog>=24.1,<27.0",
+    "arize-phoenix-otel>=0.13,<1.0",
+    "openinference-instrumentation-openai>=0.1.30,<1.0",
+    "opentelemetry-sdk>=1.30,<2.0",
 ]
 
 [tool.uv]

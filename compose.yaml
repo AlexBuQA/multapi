@@ -1,8 +1,10 @@
-# Стек сервиса (блок 3.5): HTTP-сервис app + Redis для кеша.
+# Стек сервиса: HTTP-сервис app + Redis для кеша (блок 3.5) + Phoenix для трейсов (блок 3.6).
 #
 #   cp .env.example .env           # вписать LLM__OPENAI_API_KEY (для Ollama — любое значение)
-#   docker compose up -d --build
-#   docker compose ps              # через 15–20 с оба сервиса healthy
+#   docker compose up -d --build --wait   # ждёт, пока все три сервиса станут healthy
+#   docker compose ps
+#
+# Интерфейс Phoenix: http://127.0.0.1:6006 (проект diploma-fastapi).
 #
 # Модель (Ollama) работает на хосте, а не в контейнере: из контейнера она доступна
 # по адресу host.docker.internal.
@@ -24,12 +26,19 @@ services:
       # localhost внутри контейнера — сам контейнер. По умолчанию — Ollama на хосте;
       # для облачного провайдера задайте DOCKER_LLM_BASE_URL в .env.
       LLM__BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      # Куда отправлять трейсы: Phoenix по имени сервиса, OTLP по HTTP (/v1/traces
+      # дописывает app/observability/tracing.py). Без этой переменной трейсинг выключен.
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
     extra_hosts:
       # Docker Desktop знает host.docker.internal сам; строка нужна для Docker на Linux.
       - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
+      phoenix:
+        # Phoenix нужен только для трейсов: сервис отвечает и без него, а спаны,
+        # которые не удалось отправить, экспортёр отбрасывает. Ждём лишь запуска.
+        condition: service_started
     healthcheck:
       # Готовность: /ready отвечает 200, только когда доступен Redis.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
@@ -53,5 +62,37 @@ services:
       start_period: 10s
       start_interval: 1s
 
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    restart: unless-stopped
+    ports:
+      - "6006:6006"    # интерфейс и приём трейсов по OTLP/HTTP (/v1/traces)
+      - "4317:4317"    # приём трейсов по OTLP/gRPC — для клиентов, которые шлют по gRPC
+    environment:
+      # Здесь Phoenix хранит базу SQLite с трейсами — на томе, чтобы трейсы
+      # переживали docker compose down / up.
+      PHOENIX_WORKING_DIR: /data
+    volumes:
+      # Тег latest — вариант образа, работающий от root, поэтому в новый том можно
+      # писать. У тега latest-nonroot (uid 65532) каталог тома пришлось бы отдать
+      # этому пользователю.
+      - phoenix-data:/data
+    healthcheck:
+      # Готов принимать трейсы — /healthz отвечает 200. Образ distroless: shell и curl
+      # нет, есть только Python, которым запущен сам Phoenix (/usr/bin/python3.13 —
+      # колонка COMMAND в docker compose ps). Если новая версия образа сменит Python,
+      # путь нужно поправить. Без healthcheck docker compose up --wait не ждёт Phoenix,
+      # а он запускается дольше сервиса: первые трейсы уходили в никуда.
+      test: ["CMD", "/usr/bin/python3.13", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6006/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Пока идёт start_period, неудачные проверки не считаются, а первая удачная сразу
+      # даёт healthy — на быстрой машине это секунды. 5 минут — с запасом для WSL
+      # с 1 ГБ памяти: там первый запуск Phoenix занял 5,5 минуты.
+      start_period: 300s
+      start_interval: 2s
+
 volumes:
   redis_data: {}
+  phoenix-data: {}
