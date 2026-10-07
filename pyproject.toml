@@ -25,3 +25,14 @@ dependencies = [
 [tool.uv]
 # Сервис — не устанавливаемый пакет: uv ставит только зависимости, код копируется в образ.
 package = false
+
+[tool.pytest.ini_options]
+# Блок 3.7. Быстрые тесты — на каждое сохранение: pytest tests/unit/ -m "not llm".
+# Тесты с настоящей моделью помечены llm и по умолчанию не запускаются: pytest -m llm.
+testpaths = ["tests"]
+addopts = "-m 'not llm'"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "llm: обращается к настоящей модели (Ollama или API) — медленно, нужна запущенная модель",
+]

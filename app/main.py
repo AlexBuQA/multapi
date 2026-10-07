@@ -13,6 +13,8 @@ Swagger: http://localhost:8000/docs
   переподключится сам;
 - lifespan до создания клиента OpenAI включает трейсинг в Phoenix (блок 3.6), если
   задан PHOENIX_COLLECTOR_ENDPOINT;
+- если задан LLM__PROXY_URL, а base_url внешний (OpenAI), клиент ходит через прокси
+  (блок 3.7); к локальному Ollama прокси не применяется;
 - RequestContextMiddleware (app/observability/middleware.py) присваивает запросу
   request_id (или берёт из X-Request-ID), привязывает его к contextvars structlog — он
   попадает во все JSON-строки лога этого запроса, — пишет строку http_request и
@@ -35,10 +37,17 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from redis.asyncio import Redis
 
-from app.core.config import get_settings
+from app.core.config import (
+    get_settings,
+    http_client_options,
+    is_local_url,
+    provider_headers,
+    proxy_display,
+    proxy_for,
+)
 from app.core.exceptions import LLMError, LLMRateLimitError
 from app.observability.logging import get_logger, setup_logging
 from app.observability.middleware import REQUEST_ID_HEADER, USER_ID_HEADER, RequestContextMiddleware
@@ -57,11 +66,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = get_settings()
     # Трейсинг — до создания клиента OpenAI, чтобы инструментация точно применилась.
     app.state.tracer_provider = setup_tracing(cfg.phoenix_project_name, cfg.phoenix_collector_endpoint)
+    proxy = proxy_for(cfg.llm.base_url, cfg.llm.proxy_url)
+    if proxy:
+        log.info("llm_proxy_enabled", proxy=proxy_display(proxy), base_url=cfg.llm.base_url or "https://api.openai.com/v1")
+    http_options = http_client_options(proxy, cfg.llm.use_system_certs and not is_local_url(cfg.llm.base_url))
     app.state.openai = AsyncOpenAI(
         api_key=cfg.llm.openai_api_key.get_secret_value(),
         base_url=cfg.llm.base_url,
         timeout=cfg.llm.request_timeout,
         max_retries=cfg.llm.max_retries,
+        # DefaultAsyncHttpxClient — httpx-клиент с настройками SDK по умолчанию плюс прокси
+        # и, если LLM__USE_SYSTEM_CERTS=true, проверка HTTPS по хранилищу сертификатов ОС.
+        http_client=DefaultAsyncHttpxClient(**http_options) if http_options else None,
+        default_headers=provider_headers(cfg.llm.base_url, "multapi"),   # только для OpenRouter
     )
     app.state.llm_limiter = asyncio.Semaphore(cfg.llm.max_concurrency)
     # Presidio (опционально): модель грузится несколько секунд — один раз здесь, в потоке.

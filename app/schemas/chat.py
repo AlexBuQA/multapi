@@ -3,12 +3,19 @@
 
 ChatResponse не повторяет структуру ответа SDK: from_openai() переводит её в единую
 модель сервиса. Её же сервис кладёт в кеш и отдаёт фронтенду.
+
+repr и str сообщения (блок 3.7) маскируют персональные данные: модель запроса попадает
+в отладчик, трейсбеки и сообщения об ошибках, а сырой текст пользователя туда попадать
+не должен. model_dump() возвращает текст как есть — он нужен модели.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.observability.pii import redact_pii
 
 Role = Literal["system", "user", "assistant"]
 
@@ -16,6 +23,11 @@ Role = Literal["system", "user", "assistant"]
 class Message(BaseModel):
     role: Role = Field(description="Автор сообщения: system — инструкция модели, user — пользователь, assistant — прошлый ответ модели")
     content: str = Field(min_length=1, max_length=32_000, description="Текст сообщения")
+
+    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
+        # repr/str: email, телефон, карта, ИНН и паспорт — плейсхолдерами
+        for name, value in super().__repr_args__():
+            yield name, redact_pii(value) if name == "content" and isinstance(value, str) else value
 
 
 class ChatRequest(BaseModel):

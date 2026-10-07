@@ -29,7 +29,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-dev --no-install-project
 
-# Код приложения — последним слоем. В образ попадает только пакет app/.
+# Код приложения — последним слоем. В образ попадает пакет app/ и руководство
+# пользователя: по нему /chat отвечает как ассистент техподдержки (блок 3.7).
+COPY data/knowledge_base.json ./data/knowledge_base.json
 COPY app/ ./app/
 
 # ========== Стадия 2: runtime ==========

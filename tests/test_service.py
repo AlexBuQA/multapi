@@ -151,9 +151,9 @@ class FakeRedis:
         self._check()
         return self.data.get(key)
 
-    async def setex(self, key: str, ttl: int, value: str) -> bool:
+    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
         self._check()
-        self.data[key], self.ttl[key] = value, ttl
+        self.data[key], self.ttl[key] = value, ex
         return True
 
     async def ping(self) -> bool:
@@ -305,7 +305,7 @@ class TestChat(ServiceTestCase):
         with captured_logs("WARNING") as logs:
             response = await self.post("/chat", HI)
         self.assertEqual((response.status_code, response.json()["cached"]), (200, False))
-        self.assertEqual({r["op"] for r in events(logs, "cache_unavailable")}, {"get", "setex"})
+        self.assertEqual({r["op"] for r in events(logs, "cache_unavailable")}, {"get", "set"})
 
     async def test_provider_errors_mapped(self):
         cases = [

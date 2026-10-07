@@ -22,6 +22,18 @@ request_id добавляется из contextvars. Сырого текста в
 prompt_hash и prompt_preview после маскирования PII. С PII_PRESIDIO=true имена и
 адреса в prompt_preview маскирует Presidio — фоновой задачей параллельно с вызовом
 модели (app/observability/pii_presidio.py).
+
+Ассистент техподдержки (блок 3.7): если в запросе нет system, сообщения для модели
+собирает app/services/prompts.py — промпт ассистента со статьями руководства, найденными
+по вопросу. Ключ кеша считается по итоговым сообщениям, поэтому правка промпта или
+статьи сама «сбрасывает» старые ответы. В строке лога — версия промпта, найденные
+статьи (kb_articles) и стоимость вызова по каталогу цен (cost_usd).
+
+Проверки вокруг модели (app/services/guardrails.py, блок 3.7): просьба показать или
+отменить инструкции получает готовый отказ без вызова модели (model="guardrail",
+finish_reason="content_filter"); в /chat ответ, где дословно есть правила системного
+промпта, заменяется тем же отказом. Оба случая — строка лога llm_guard_blocked с
+причиной и атрибут guard.blocked на span.
 """
 from __future__ import annotations
 
@@ -52,6 +64,9 @@ from app.observability.logging import get_logger
 from app.observability.pii import PREVIEW_CHARS, prompt_hash, prompt_preview, redact_pii
 from app.observability.pii_presidio import NameRedactor
 from app.schemas.chat import ChatDelta, ChatRequest, ChatResponse, Usage
+from app.schemas.models import estimate_cost
+from app.services.guardrails import leaks_instructions
+from app.services.prompts import PreparedPrompt, build_messages
 
 log = get_logger()
 tracer = trace.get_tracer("multapi.llm")
@@ -59,6 +74,8 @@ tracer = trace.get_tracer("multapi.llm")
 # Поля, которые не влияют на ответ модели и не должны дробить кеш.
 CACHE_KEY_EXCLUDE = {"user_id", "session_id", "stream"}
 CACHE_ERRORS = (RedisError, OSError, asyncio.TimeoutError)
+GUARD_MODEL = "guardrail"         # «модель» ответа, который дала проверка, а не LLM
+GUARD_FINISH = "content_filter"   # как у OpenAI, когда ответ отфильтрован
 
 
 def _retry_after(exc: openai.APIStatusError) -> int | None:
@@ -128,15 +145,19 @@ class LLMService:
         return req if req.model else req.model_copy(update={"model": self.settings.llm.default_model})
 
     @staticmethod
-    def cache_key(req: ChatRequest) -> str:
+    def cache_key(req: ChatRequest, messages: list[dict[str, str]] | None = None) -> str:
+        """messages — итоговые сообщения для модели (с промптом ассистента и статьями)."""
         payload = req.model_dump(mode="json", exclude=CACHE_KEY_EXCLUDE)
+        if messages is not None:
+            payload["messages"] = messages
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return "chat:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-    def _params(self, req: ChatRequest) -> dict[str, Any]:
+    @staticmethod
+    def _params(req: ChatRequest, prompt: PreparedPrompt) -> dict[str, Any]:
         return {
             "model": req.model,
-            "messages": [m.model_dump() for m in req.messages],
+            "messages": prompt.messages,
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         }
@@ -154,17 +175,20 @@ class LLMService:
         if self.cache is None:
             return
         try:
-            await self.cache.setex(key, self.settings.cache_ttl_seconds, value)
+            # SET с EX, а не SETEX: в redis-py 8 setex() объявлен устаревшим (блок 3.7).
+            await self.cache.set(key, value, ex=self.settings.cache_ttl_seconds)
         except CACHE_ERRORS as exc:
-            log.warning("cache_unavailable", op="setex", error=repr(exc))
+            log.warning("cache_unavailable", op="set", error=repr(exc))
 
     # ------------------------------------------------------------------ #
     # Наблюдаемость
-    def _log_fields(self, req: ChatRequest, *, stream: bool) -> tuple[dict[str, Any], asyncio.Task | None]:
+    def _log_fields(self, req: ChatRequest, prompt: PreparedPrompt, *,
+                    stream: bool) -> tuple[dict[str, Any], asyncio.Task | None]:
         """Поля строки лога о вызове модели. С Presidio prompt_preview считается фоновой
         задачей (её возвращаем вторым значением) и подставляется в _apply_preview."""
         raw = _user_text(req)
-        fields = {"model": req.model, "stream": stream, "prompt_hash": prompt_hash(raw), "prompt_preview": None}
+        fields = {"model": req.model, "stream": stream, "prompt_hash": prompt_hash(raw), "prompt_preview": None,
+                  "prompt_version": prompt.version, "kb_articles": list(prompt.article_ids)}
         if self.redactor is None:
             fields["prompt_preview"] = prompt_preview(raw)
             return fields, None
@@ -209,6 +233,8 @@ class LLMService:
             "gen_ai.request.temperature": req.temperature,
             "gen_ai.request.max_tokens": req.max_tokens,
             "prompt.hash": fields["prompt_hash"],
+            "prompt.version": fields["prompt_version"],
+            "kb.articles": fields["kb_articles"] or None,
             "request.id": structlog.contextvars.get_contextvars().get("request_id"),
             # Атрибуты OpenInference: по session.id Phoenix собирает трейсы диалога на
             # вкладке Sessions.
@@ -229,6 +255,7 @@ class LLMService:
         log.info(
             "llm_request_completed", **fields,
             response_model=model, input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens,
+            cost_usd=estimate_cost(fields["model"], usage),
             latency_ms=_elapsed_ms(started), finish_reason=finish_reason, cached=False,
             trace_id=_trace_id(span), **extra,
         )
@@ -242,14 +269,42 @@ class LLMService:
             latency_ms=_elapsed_ms(started), trace_id=_trace_id(span),
         )
 
+    async def _blocked_response(self, span: Span, root: Span, fields: dict[str, Any],
+                                preview_task: asyncio.Task | None, prompt: PreparedPrompt,
+                                started: float) -> ChatResponse:
+        """Запрос остановлен проверкой до модели: готовый отказ, токены не тратятся."""
+        response = ChatResponse(content=prompt.refusal or "", model=GUARD_MODEL, usage=Usage(),
+                                finish_reason=GUARD_FINISH)
+        span.set_attribute("guard.blocked", prompt.blocked or "")
+        await self._apply_preview(fields, preview_task)
+        self._describe_root(root, fields, response.content)
+        log.warning("llm_guard_blocked", **fields, reason=prompt.blocked,
+                    latency_ms=_elapsed_ms(started), trace_id=_trace_id(span))
+        return response
+
+    @staticmethod
+    def _guard_output(span: Span, fields: dict[str, Any], prompt: PreparedPrompt,
+                      response: ChatResponse) -> ChatResponse:
+        """Ответ модели с дословными правилами системного промпта заменяется отказом."""
+        if not prompt.refusal or not prompt.messages:
+            return response
+        if not leaks_instructions(response.content, prompt.messages[0]["content"]):
+            return response
+        span.set_attribute("guard.blocked", "prompt_leak")
+        log.warning("llm_guard_blocked", **fields, reason="prompt_leak", trace_id=_trace_id(span))
+        return response.model_copy(update={"content": prompt.refusal, "finish_reason": GUARD_FINISH})
+
     # ------------------------------------------------------------------ #
     async def complete(self, req: ChatRequest) -> ChatResponse:
         req = self._resolve(req)
-        fields, preview_task = self._log_fields(req, stream=False)
+        prompt = build_messages(req, self.settings.support)
+        fields, preview_task = self._log_fields(req, prompt, stream=False)
         started = time.perf_counter()
         root = trace.get_current_span()   # span HTTP-запроса, если трейсинг включён
         with tracer.start_as_current_span("llm.chat", attributes=self._span_attributes(req, fields)) as span:
-            key = self.cache_key(req)
+            if prompt.blocked:
+                return await self._blocked_response(span, root, fields, preview_task, prompt, started)
+            key = self.cache_key(req, prompt.messages)
             cached = await self._cache_get(key)
             if cached is not None:
                 try:
@@ -268,13 +323,14 @@ class LLMService:
             try:
                 async with self.limiter:
                     with provider_errors(req.model or ""):
-                        raw = await self.openai.chat.completions.create(**self._params(req))
+                        raw = await self.openai.chat.completions.create(**self._params(req, prompt))
             except LLMError as exc:
                 await self._apply_preview(fields, preview_task)
                 self._record_failure(span, fields, exc, started)
                 raise
             response = ChatResponse.from_openai(raw)
             await self._apply_preview(fields, preview_task)
+            response = self._guard_output(span, fields, prompt, response)
             self._describe_root(root, fields, response.content)
             self._record_completion(span, fields, model=response.model, usage=response.usage,
                                     finish_reason=response.finish_reason, started=started)
@@ -287,9 +343,16 @@ class LLMService:
     async def stream(self, req: ChatRequest) -> AsyncIterator[ChatDelta]:
         """Фрагменты ответа по мере генерации; последний кадр — usage. Без кеша."""
         req = self._resolve(req)
-        fields, preview_task = self._log_fields(req, stream=True)
+        prompt = build_messages(req, self.settings.support)
+        fields, preview_task = self._log_fields(req, prompt, stream=True)
         started = time.perf_counter()
         root = trace.get_current_span()   # первый шаг генератора выполняется в обработчике запроса
+        if prompt.blocked:
+            with tracer.start_as_current_span("llm.chat", attributes=self._span_attributes(req, fields)) as span:
+                response = await self._blocked_response(span, root, fields, preview_task, prompt, started)
+            yield ChatDelta(content=response.content)
+            yield ChatDelta(usage=response.usage)
+            return
         # Span не делаем «текущим» на всё время генератора: между yield код идёт в другом
         # контексте. Текущим он становится только на вызов create(), чтобы span
         # OpenInference стал дочерним.
@@ -303,7 +366,7 @@ class LLMService:
                     token = otel_context.attach(trace.set_span_in_context(span))
                     try:
                         stream = await self.openai.chat.completions.create(
-                            **self._params(req), stream=True, stream_options={"include_usage": True}
+                            **self._params(req, prompt), stream=True, stream_options={"include_usage": True}
                         )
                     finally:
                         otel_context.detach(token)

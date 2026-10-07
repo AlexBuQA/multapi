@@ -40,8 +40,11 @@ htmlcov/
 
 # Не нужно сервису: тесты, данные, документация, CLI-часть проекта и её файлы
 tests/
+eval/
 notebooks/
 data/
+# ...кроме руководства пользователя: по нему /chat отвечает как ассистент (блок 3.7)
+!data/knowledge_base.json
 docs/
 *.md
 !README.md
