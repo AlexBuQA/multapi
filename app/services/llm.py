@@ -34,6 +34,20 @@ prompt_hash и prompt_preview после маскирования PII. С PII_PR
 finish_reason="content_filter"); в /chat ответ, где дословно есть правила системного
 промпта, заменяется тем же отказом. Оба случая — строка лога llm_guard_blocked с
 причиной и атрибут guard.blocked на span.
+
+Защитный слой (app/services/security/, блок 3.8), если SECURITY__ENABLED не false:
+- до модели — screen_messages: каждое сообщение проверяет validate_input (длина,
+  скрытые символы, закодированные вставки, шаблоны инъекции). Последний вопрос или
+  system не прошли — готовый отказ без вызова модели, как в блоке 3.7
+  (_blocked_response); прежние сообщения истории, не прошедшие проверку, выбрасываются.
+  Проверка идёт первой, до сборки промпта и маскирования;
+- в сообщения для модели добавляется системное сообщение с канарейкой (app.state.canary);
+- после модели — filter_output: метка, начало или правила системного промпта, роль
+  джейлбрейка -> ответ заменяется отказом (_filter_output); персональные данные в ответе
+  маскируются. В потоке то же делает StreamGuard, придерживая последние 80 символов;
+- в строке лога llm_request_completed — answer_preview: начало ответа после маскирования.
+С SECURITY__ENABLED=false ничего из этого нет (прогон garak baseline), а ключ кеша
+получает пометку guard=off — ответы «голого» сервиса не попадут к защищённому.
 """
 from __future__ import annotations
 
@@ -55,6 +69,7 @@ from redis.exceptions import RedisError
 from app.core.config import Settings
 from app.core.exceptions import (
     LLMAuthError,
+    LLMContentFiltered,
     LLMError,
     LLMRateLimitError,
     LLMTimeoutError,
@@ -63,10 +78,13 @@ from app.core.exceptions import (
 from app.observability.logging import get_logger
 from app.observability.pii import PREVIEW_CHARS, prompt_hash, prompt_preview, redact_pii
 from app.observability.pii_presidio import NameRedactor
-from app.schemas.chat import ChatDelta, ChatRequest, ChatResponse, Usage
+from app.schemas.chat import ChatDelta, ChatRequest, ChatResponse, Message, Usage
 from app.schemas.models import estimate_cost
-from app.services.guardrails import leaks_instructions
-from app.services.prompts import PreparedPrompt, build_messages
+from app.services.prompts import PROMPT_VERSION, PreparedPrompt, build_messages
+from app.services.security import refusal_for, screen_messages
+from app.services.security.canary import with_canary
+from app.services.security.input_validator import ValidationResult
+from app.services.security.output_filter import OutputBlocked, StreamGuard, filter_output
 
 log = get_logger()
 tracer = trace.get_tracer("multapi.llm")
@@ -122,6 +140,10 @@ def _user_text(req: ChatRequest) -> str:
     return next((m.content for m in reversed(req.messages) if m.role == "user"), req.messages[-1].content)
 
 
+def _preview(text: str | None) -> str | None:
+    return redact_pii(text)[:PREVIEW_CHARS] if text else None
+
+
 class LLMService:
     def __init__(
         self,
@@ -131,12 +153,15 @@ class LLMService:
         *,
         limiter: asyncio.Semaphore | None = None,
         redactor: NameRedactor | None = None,
+        canary: str | None = None,
     ) -> None:
         self.openai = openai_client
         self.cache = cache
         self.settings = settings
         self.limiter = limiter or asyncio.Semaphore(settings.llm.max_concurrency)
         self.redactor = redactor
+        self.guarded = settings.security.enabled
+        self.canary = canary if self.guarded else None
 
     # ------------------------------------------------------------------ #
     def _resolve(self, req: ChatRequest) -> ChatRequest:
@@ -145,22 +170,58 @@ class LLMService:
         return req if req.model else req.model_copy(update={"model": self.settings.llm.default_model})
 
     @staticmethod
-    def cache_key(req: ChatRequest, messages: list[dict[str, str]] | None = None) -> str:
-        """messages — итоговые сообщения для модели (с промптом ассистента и статьями)."""
+    def cache_key(req: ChatRequest, messages: list[dict[str, str]] | None = None, *, guarded: bool = True) -> str:
+        """messages — итоговые сообщения для модели (с промптом ассистента и статьями), но
+        без канарейки: она меняется при каждом запуске. guarded=False (SECURITY__ENABLED=false)
+        — отдельный ключ: ответ без проверки не должен попасть к защищённому сервису."""
         payload = req.model_dump(mode="json", exclude=CACHE_KEY_EXCLUDE)
         if messages is not None:
             payload["messages"] = messages
+        if not guarded:
+            payload["guard"] = "off"
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return "chat:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _params(req: ChatRequest, prompt: PreparedPrompt) -> dict[str, Any]:
+    def _params(self, req: ChatRequest, prompt: PreparedPrompt) -> dict[str, Any]:
         return {
             "model": req.model,
-            "messages": prompt.messages,
+            "messages": with_canary(prompt.messages, self.canary),
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         }
+
+    # ------------------------------------------------------------------ #
+    # Защитный слой (блок 3.8)
+    def _screen(self, req: ChatRequest) -> tuple[ChatRequest, ValidationResult | None]:
+        """Запрос после проверки истории и причина отказа (или None)."""
+        if not self.guarded:
+            return req, None
+        screened = screen_messages([m.model_dump() for m in req.messages], self.settings.security.max_input_chars)
+        if not screened.verdict.ok:
+            return req, screened.verdict
+        if screened.dropped:
+            log.warning("llm_history_screened", dropped=len(screened.dropped), rules=list(screened.dropped))
+            req = req.model_copy(update={"messages": [Message(**m) for m in screened.messages]})
+        return req, None
+
+    def _prepare(self, req: ChatRequest) -> tuple[ChatRequest, ValidationResult | None, PreparedPrompt]:
+        """Проверка входа — до сборки промпта: отклонённый запрос не тратит время на поиск
+        статей и маскирование. Для отказа нужен только признак режима ассистента."""
+        req, verdict = self._screen(req)
+        if verdict is None:
+            return req, None, build_messages(req, self.settings.support)
+        assistant = self.settings.support.enabled and not any(m.role == "system" for m in req.messages)
+        return req, verdict, PreparedPrompt([], PROMPT_VERSION if assistant else None)
+
+    def _refusal(self, rule: str, req: ChatRequest) -> str:
+        return refusal_for(rule, self.settings.support.product_name,
+                           length=max(len(m.content) for m in req.messages if m.role == "user") if rule == "length" else 0,
+                           max_chars=self.settings.security.max_input_chars)
+
+    @staticmethod
+    def _system_prompt(prompt: PreparedPrompt) -> str | None:
+        """Промпт ассистента, утечку которого проверяет фильтр; свой system клиента — не секрет."""
+        return prompt.messages[0]["content"] if prompt.version is not None and prompt.messages else None
 
     async def _cache_get(self, key: str) -> str | None:
         if self.cache is None:
@@ -245,7 +306,8 @@ class LLMService:
 
     @staticmethod
     def _record_completion(span: Span, fields: dict[str, Any], *, model: str | None, usage: Usage,
-                           finish_reason: str | None, started: float, **extra: Any) -> None:
+                           finish_reason: str | None, started: float, answer: str | None = None,
+                           **extra: Any) -> None:
         span.set_attribute("gen_ai.usage.input_tokens", usage.prompt_tokens)
         span.set_attribute("gen_ai.usage.output_tokens", usage.completion_tokens)
         if model:
@@ -257,7 +319,7 @@ class LLMService:
             response_model=model, input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens,
             cost_usd=estimate_cost(fields["model"], usage),
             latency_ms=_elapsed_ms(started), finish_reason=finish_reason, cached=False,
-            trace_id=_trace_id(span), **extra,
+            answer_preview=_preview(answer), trace_id=_trace_id(span), **extra,
         )
 
     @staticmethod
@@ -270,41 +332,63 @@ class LLMService:
         )
 
     async def _blocked_response(self, span: Span, root: Span, fields: dict[str, Any],
-                                preview_task: asyncio.Task | None, prompt: PreparedPrompt,
-                                started: float) -> ChatResponse:
-        """Запрос остановлен проверкой до модели: готовый отказ, токены не тратятся."""
-        response = ChatResponse(content=prompt.refusal or "", model=GUARD_MODEL, usage=Usage(),
-                                finish_reason=GUARD_FINISH)
-        span.set_attribute("guard.blocked", prompt.blocked or "")
+                                preview_task: asyncio.Task | None, req: ChatRequest,
+                                verdict: ValidationResult, started: float) -> ChatResponse:
+        """Запрос остановлен проверкой до модели: готовый отказ, токены не тратятся.
+        Не HTTP 400, а ответ 200 с отказом (см. app/services/security/input_validator.py):
+        клиент — чат поддержки, model="guardrail" и finish_reason="content_filter"
+        отличают отказ от ответа модели."""
+        response = ChatResponse(content=self._refusal(verdict.rule or "injection", req), model=GUARD_MODEL,
+                                usage=Usage(), finish_reason=GUARD_FINISH)
+        span.set_attribute("guard.blocked", verdict.rule or "")
         await self._apply_preview(fields, preview_task)
         self._describe_root(root, fields, response.content)
-        log.warning("llm_guard_blocked", **fields, reason=prompt.blocked,
-                    latency_ms=_elapsed_ms(started), trace_id=_trace_id(span))
+        log.warning("llm_guard_blocked", **fields, reason=verdict.rule, detail=verdict.reason,
+                    answer_preview=_preview(response.content), latency_ms=_elapsed_ms(started),
+                    trace_id=_trace_id(span))
         return response
 
+    def _filter_output(self, span: Span, fields: dict[str, Any], prompt: PreparedPrompt,
+                       req: ChatRequest, response: ChatResponse) -> ChatResponse:
+        """Ответ модели с меткой, промптом или ролью джейлбрейка заменяется отказом;
+        в остальных персональные данные маскируются."""
+        if not self.guarded:
+            return response
+        try:
+            content = filter_output(response.content, self._system_prompt(prompt), self.canary)
+        except OutputBlocked as exc:
+            span.set_attribute("guard.blocked", exc.rule)
+            log.warning("llm_guard_blocked", **fields, reason=exc.rule, detail=exc.reason,
+                        trace_id=_trace_id(span))
+            return response.model_copy(update={"content": self._refusal(exc.rule, req),
+                                               "finish_reason": GUARD_FINISH})
+        if content != response.content:
+            span.set_attribute("guard.pii_masked", True)
+        return response.model_copy(update={"content": content})
+
     @staticmethod
-    def _guard_output(span: Span, fields: dict[str, Any], prompt: PreparedPrompt,
-                      response: ChatResponse) -> ChatResponse:
-        """Ответ модели с дословными правилами системного промпта заменяется отказом."""
-        if not prompt.refusal or not prompt.messages:
-            return response
-        if not leaks_instructions(response.content, prompt.messages[0]["content"]):
-            return response
-        span.set_attribute("guard.blocked", "prompt_leak")
-        log.warning("llm_guard_blocked", **fields, reason="prompt_leak", trace_id=_trace_id(span))
-        return response.model_copy(update={"content": prompt.refusal, "finish_reason": GUARD_FINISH})
+    def _guard_chunk(span: Span, fields: dict[str, Any], guard: StreamGuard, text: str | None) -> str:
+        """Фрагмент потока через StreamGuard; text=None — конец ответа. Утечка — поток
+        обрывается ошибкой content_filter (кадр error в /chat/stream)."""
+        try:
+            return guard.feed(text) if text is not None else guard.finish()
+        except OutputBlocked as exc:
+            span.set_attribute("guard.blocked", exc.rule)
+            log.warning("llm_guard_blocked", **fields, reason=exc.rule, detail=exc.reason,
+                        trace_id=_trace_id(span))
+            raise LLMContentFiltered() from exc
 
     # ------------------------------------------------------------------ #
     async def complete(self, req: ChatRequest) -> ChatResponse:
         req = self._resolve(req)
-        prompt = build_messages(req, self.settings.support)
+        req, verdict, prompt = self._prepare(req)          # защитный слой: до модели
         fields, preview_task = self._log_fields(req, prompt, stream=False)
         started = time.perf_counter()
         root = trace.get_current_span()   # span HTTP-запроса, если трейсинг включён
         with tracer.start_as_current_span("llm.chat", attributes=self._span_attributes(req, fields)) as span:
-            if prompt.blocked:
-                return await self._blocked_response(span, root, fields, preview_task, prompt, started)
-            key = self.cache_key(req, prompt.messages)
+            if verdict is not None:
+                return await self._blocked_response(span, root, fields, preview_task, req, verdict, started)
+            key = self.cache_key(req, prompt.messages, guarded=self.guarded)
             cached = await self._cache_get(key)
             if cached is not None:
                 try:
@@ -330,10 +414,11 @@ class LLMService:
                 raise
             response = ChatResponse.from_openai(raw)
             await self._apply_preview(fields, preview_task)
-            response = self._guard_output(span, fields, prompt, response)
+            response = self._filter_output(span, fields, prompt, req, response)   # защитный слой: после модели
             self._describe_root(root, fields, response.content)
             self._record_completion(span, fields, model=response.model, usage=response.usage,
-                                    finish_reason=response.finish_reason, started=started)
+                                    finish_reason=response.finish_reason, started=started,
+                                    answer=response.content)
 
         # Пустой ответ (например, модель сразу упёрлась в лимит) не кешируем.
         if response.content:
@@ -343,16 +428,17 @@ class LLMService:
     async def stream(self, req: ChatRequest) -> AsyncIterator[ChatDelta]:
         """Фрагменты ответа по мере генерации; последний кадр — usage. Без кеша."""
         req = self._resolve(req)
-        prompt = build_messages(req, self.settings.support)
+        req, verdict, prompt = self._prepare(req)
         fields, preview_task = self._log_fields(req, prompt, stream=True)
         started = time.perf_counter()
         root = trace.get_current_span()   # первый шаг генератора выполняется в обработчике запроса
-        if prompt.blocked:
+        if verdict is not None:
             with tracer.start_as_current_span("llm.chat", attributes=self._span_attributes(req, fields)) as span:
-                response = await self._blocked_response(span, root, fields, preview_task, prompt, started)
+                response = await self._blocked_response(span, root, fields, preview_task, req, verdict, started)
             yield ChatDelta(content=response.content)
             yield ChatDelta(usage=response.usage)
             return
+        guard = StreamGuard(self._system_prompt(prompt), self.canary) if self.guarded else None
         # Span не делаем «текущим» на всё время генератора: между yield код идёт в другом
         # контексте. Текущим он становится только на вызов create(), чтобы span
         # OpenInference стал дочерним.
@@ -370,11 +456,14 @@ class LLMService:
                         )
                     finally:
                         otel_context.detach(token)
+                    got_usage = False
                     try:
                         async for chunk in stream:
                             if chunk.choices:
                                 choice = chunk.choices[0]
                                 text = choice.delta.content
+                                if text and guard is not None:
+                                    text = self._guard_chunk(span, fields, guard, text)
                                 if text:
                                     ttft_ms = ttft_ms or _elapsed_ms(started)
                                     if len(head) < 2 * PREVIEW_CHARS:
@@ -382,8 +471,17 @@ class LLMService:
                                     yield ChatDelta(content=text)
                                 finish_reason = getattr(choice, "finish_reason", None) or finish_reason
                             if getattr(chunk, "usage", None):
-                                usage = Usage.from_openai(chunk.usage)
-                                yield ChatDelta(usage=usage)
+                                # Кадр usage — после всего текста: часть провайдеров шлёт usage
+                                # в каждом фрагменте, и отдать придержанный хвост здесь было бы рано.
+                                usage, got_usage = Usage.from_openai(chunk.usage), True
+                        if guard is not None:                   # придержанный хвост ответа
+                            tail = self._guard_chunk(span, fields, guard, None)
+                            if tail:
+                                ttft_ms = ttft_ms or _elapsed_ms(started)
+                                head += tail if len(head) < 2 * PREVIEW_CHARS else ""
+                                yield ChatDelta(content=tail)
+                        if got_usage:
+                            yield ChatDelta(usage=usage)
                     finally:
                         # Клиент ушёл или поток оборвался — закрываем соединение с провайдером,
                         # чтобы модель не генерировала ответ впустую.
@@ -393,7 +491,8 @@ class LLMService:
             await self._apply_preview(fields, preview_task)
             self._describe_root(root, fields, head)
             self._record_completion(span, fields, model=req.model, usage=usage,
-                                    finish_reason=finish_reason, started=started, ttft_ms=ttft_ms)
+                                    finish_reason=finish_reason, started=started, ttft_ms=ttft_ms,
+                                    answer=head)
         except LLMError as exc:
             await self._apply_preview(fields, preview_task)
             self._record_failure(span, fields, exc, started)

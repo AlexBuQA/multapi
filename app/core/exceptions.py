@@ -54,3 +54,13 @@ class LLMUnavailableError(LLMError):
     code = "llm_unavailable"
     status_code = 502
     default_message = "Провайдер LLM недоступен. Попробуйте позже."
+
+
+class LLMContentFiltered(LLMError):
+    """Блок 3.8: поток остановлен — в ответе модели метка, начало системного промпта или
+    роль джейлбрейка (StreamGuard). В /chat такой ответ заменяется отказом без ошибки, а
+    в /chat/stream часть ответа уже у клиента: поток заканчивается кадром error."""
+
+    code = "content_filter"
+    status_code = 502
+    default_message = "Ответ остановлен фильтром безопасности."

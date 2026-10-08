@@ -42,8 +42,14 @@ def get_redactor(request: Request) -> NameRedactor | None:
     return getattr(request.app.state, "pii_redactor", None)
 
 
+def get_canary(request: Request) -> str | None:
+    """Секретная метка процесса (блок 3.8); создаётся в lifespan, в тестах может не быть."""
+    return getattr(request.app.state, "canary", None)
+
+
 LimiterDep = Annotated[asyncio.Semaphore, Depends(get_limiter)]
 RedactorDep = Annotated[NameRedactor | None, Depends(get_redactor)]
+CanaryDep = Annotated[str | None, Depends(get_canary)]
 
 
 def get_llm_service(
@@ -52,8 +58,9 @@ def get_llm_service(
     settings: SettingsDep,
     limiter: LimiterDep,
     redactor: RedactorDep,
+    canary: CanaryDep,
 ) -> LLMService:
-    return LLMService(openai_client, cache, settings, limiter=limiter, redactor=redactor)
+    return LLMService(openai_client, cache, settings, limiter=limiter, redactor=redactor, canary=canary)
 
 
 LLMServiceDep = Annotated[LLMService, Depends(get_llm_service)]

@@ -30,6 +30,11 @@ os.environ["LLM__OPENAI_API_KEY"] = "test-key"
 os.environ["LLM__DEFAULT_MODEL"] = "test-model"
 os.environ["CORS_ORIGINS"] = '["http://localhost:3000"]'
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"
+# Блок 3.8: .env разработчика не меняет поведение тестов — ни выключенный на время
+# garak baseline защитный слой, ни лимит запросов, ни файл лога.
+os.environ["SECURITY__ENABLED"] = "true"
+os.environ["RATE_LIMIT_PER_MIN"] = "0"
+os.environ["LOG_FILE"] = os.devnull
 
 import httpx  # noqa: E402
 import structlog  # noqa: E402

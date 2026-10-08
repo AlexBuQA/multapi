@@ -20,6 +20,12 @@ Swagger: http://localhost:8000/docs
   попадает во все JSON-строки лога этого запроса, — пишет строку http_request и
   возвращает X-Request-ID в ответе;
 - CORS — только для адресов из CORS_ORIGINS;
+- защитный слой (блок 3.8, app/services/security/): lifespan создаёт канарейку
+  (app.state.canary), LLMService проверяет вход и ответ модели, RateLimitMiddleware
+  ограничивает число запросов к /chat (RATE_LIMIT_PER_MIN) и сообщает его в заголовках
+  X-RateLimit-Limit и X-RateLimit-Remaining;
+- JSONCharsetMiddleware дописывает charset=utf-8 к Content-Type JSON-ответов: без него
+  Windows PowerShell 5.1 показывает кириллицу как «Ð¯…»;
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -40,6 +46,7 @@ from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from redis.asyncio import Redis
 
+from app.core.charset import JSONCharsetMiddleware
 from app.core.config import (
     get_settings,
     http_client_options,
@@ -55,9 +62,11 @@ from app.observability.pii_presidio import load_redactor
 from app.observability.tracing import fastapi_telemetry, setup_tracing, shutdown_tracing
 from app.routers import chat, health, models
 from app.services.llm import CACHE_ERRORS
+from app.services.security.canary import new_canary
+from app.services.security.rate_limit import LIMIT_HEADER, REMAINING_HEADER, RateLimitMiddleware
 
 settings = get_settings()   # без ключа здесь ValidationError — uvicorn не стартует
-setup_logging(settings.log_level)   # JSON-логи; LOG_LEVEL из .env
+setup_logging(settings.log_level, log_file=settings.log_file)   # JSON-логи; LOG_LEVEL и LOG_FILE из .env
 log = get_logger()
 
 
@@ -81,6 +90,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         default_headers=provider_headers(cfg.llm.base_url, "multapi"),   # только для OpenRouter
     )
     app.state.llm_limiter = asyncio.Semaphore(cfg.llm.max_concurrency)
+    # Канарейка (блок 3.8): новая при каждом старте; само значение в лог не пишем.
+    app.state.canary = new_canary() if cfg.security.enabled else None
     # Presidio (опционально): модель грузится несколько секунд — один раз здесь, в потоке.
     app.state.pii_redactor = await asyncio.to_thread(load_redactor) if cfg.pii_presidio else None
 
@@ -97,7 +108,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     note="запросы идут без кеша, /ready отвечает 503, пока Redis не поднимется")
 
     log.info("service_started", default_model=cfg.llm.default_model,
-             provider=cfg.llm.base_url or "https://api.openai.com/v1")
+             provider=cfg.llm.base_url or "https://api.openai.com/v1",
+             security_enabled=cfg.security.enabled, rate_limit_per_min=cfg.rate_limit_per_min)
+    if not cfg.security.enabled:
+        log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
+                                              "(только для прогона garak baseline)")
     yield
 
     await app.state.openai.close()
@@ -109,7 +124,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title=settings.app_name,
-    version="3.6.0",
+    version="3.8.0",
     description=(
         "Чат-ядро ассистента техподдержки: ответ целиком (`POST /chat`) и потоком "
         "(`POST /chat/stream`), кеш в Redis, каталог моделей. Каждый ответ содержит "
@@ -125,6 +140,14 @@ app = FastAPI(
     ],
 )
 
+# Лимит запросов (блок 3.8, RATE_LIMIT_PER_MIN): добавлен первым, поэтому внутренний —
+# ответ 429 проходит через CORS и RequestContextMiddleware (CORS-заголовки, X-Request-ID,
+# строка http_request).
+app.add_middleware(RateLimitMiddleware)
+
+# charset=utf-8 у JSON-ответов — для Windows PowerShell 5.1 (app/core/charset.py).
+app.add_middleware(JSONCharsetMiddleware)
+
 # CORS: явный список адресов фронтенда. ["*"] вместе с allow_credentials=True запрещает
 # Settings._check_cors — браузер такой ответ всё равно отверг бы.
 app.add_middleware(
@@ -133,7 +156,7 @@ app.add_middleware(
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", REQUEST_ID_HEADER, USER_ID_HEADER],
-    expose_headers=[REQUEST_ID_HEADER],
+    expose_headers=[REQUEST_ID_HEADER, "Retry-After", LIMIT_HEADER, REMAINING_HEADER],
 )
 
 
