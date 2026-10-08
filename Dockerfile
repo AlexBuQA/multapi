@@ -5,7 +5,7 @@
 # только /app (venv + код) и запускается под непривилегированным пользователем.
 #
 #   docker build -t llm-service:v1 .
-#   docker compose up -d --build        # сервис + Redis, см. compose.yaml
+#   docker compose up -d --build        # сервис + Redis + Postgres + Phoenix, см. compose.yaml
 
 # ========== Стадия 1: builder ==========
 FROM python:3.13-slim-bookworm AS builder
@@ -31,8 +31,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Код приложения — последним слоем. В образ попадает пакет app/ и руководство
 # пользователя: по нему /chat отвечает как ассистент техподдержки (блок 3.7).
+# Блок 4.1: миграции Alembic (docker compose exec app alembic upgrade head) и папка для
+# истории чатов в JSONL — её владельцем станет appuser, и том chat_data унаследует права.
 COPY data/knowledge_base.json ./data/knowledge_base.json
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 COPY app/ ./app/
+RUN mkdir -p /app/var/chats
 
 # ========== Стадия 2: runtime ==========
 FROM python:3.13-slim-bookworm AS runtime

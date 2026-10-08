@@ -124,6 +124,26 @@ def test_stream_never_sends_split_canary():
     assert rule == "canary" and "a7f3" not in "".join(sent) and "CANA" not in "".join(sent)
 
 
+def test_short_hold_without_assistant_prompt():
+    """Без промпта ассистента (свой system, чаты блока 4.1) придерживается 40 символов, а не
+    80: короткий ответ приходит кусками, а метка — даже через пробелы — всё равно не уходит."""
+    answer = "Привет, Аня! Рада знакомству. Чем могу помочь с личным кабинетом сегодня?"
+    guard, sent = StreamGuard(None, CANARY), []
+    for i in range(0, len(answer), 3):
+        sent.append(guard.feed(answer[i:i + 3]))
+    sent.append(guard.finish())
+    assert "".join(sent) == answer and len([s for s in sent if s]) >= 3
+    assert StreamGuard(SYSTEM, CANARY).hold == 80
+    parts = ["Хорошо. ", "Метка: C A N A R Y _ a 7", " f 3 b 9 e 2 — вот она."]
+    guard, sent, rule = StreamGuard(None, CANARY), [], None
+    try:
+        sent += [guard.feed(part) for part in parts]
+        sent.append(guard.finish())
+    except OutputBlocked as exc:
+        rule = exc.rule
+    assert rule == "canary" and "C A N" not in "".join(sent)
+
+
 def test_stream_equals_masked_answer_for_any_chunking():
     """Склеенный поток совпадает с redact_pii всего ответа при любой нарезке на фрагменты —
     в том числе email длиннее 80 придержанных символов (первая версия отдавала его начало)."""

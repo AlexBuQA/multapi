@@ -93,10 +93,14 @@ def filter_output(answer: str, system_prompt: str | None, canary: str | None) ->
 class StreamGuard:
     """Та же проверка для /chat/stream.
 
-    Последние HOLD_CHARS символов ответа придерживаются: клиент получает текст, только
-    когда за ним пришло ещё 80 символов, и только до последнего пробела. За это время
-    метка (15 символов, через пробелы — 29), начало промпта и роль джейлбрейка видны
-    целиком и не уходят клиенту даже частично. Резать по пробелу нужно для маскирования:
+    Последние символы ответа придерживаются: клиент получает текст, только когда за ним
+    пришло ещё HOLD_CHARS символов, и только до последнего пробела. За это время метка
+    (15 символов, через пробелы — 29), начало промпта и роль джейлбрейка видны целиком и
+    не уходят клиенту даже частично. HOLD_CHARS = 80 — когда есть промпт ассистента: его
+    начало (80 символов) должно быть видно целиком. Без него (свой system клиента, чаты
+    блока 4.1) достаточно SHORT_HOLD_CHARS = 40: метка через пробелы — 29 символов, роль
+    джейлбрейка — до 22, номер с пробелами — до 23. Короткий ответ тогда тоже приходит
+    кусками, а не одним блоком в конце. Резать по пробелу нужно для маскирования:
     email, ключ или номер без пробелов никогда не попадает на границу куска, а номера с
     пробелами (телефон, карта, паспорт, СНИЛС) граница обходит. Поэтому склеенный поток
     совпадает с redact_pii всего ответа. «Слово» без пробелов придерживается целиком,
@@ -106,9 +110,10 @@ class StreamGuard:
     Работа на фрагмент — линейная: метка, начало промпта и роль ищутся в хвосте (ещё не
     отданное плюс CONTEXT_CHARS уже отданного), маскируется только отдаваемый кусок.
     Правила промпта целиком проверяются один раз, в конце ответа. Цена — первый фрагмент
-    приходит позже, на ~80 символов ответа."""
+    приходит позже, на 40–80 символов ответа."""
 
     HOLD_CHARS = 80
+    SHORT_HOLD_CHARS = 40
     CONTEXT_CHARS = 200
     MAX_WORD_CHARS = 1000
     _SPACED_PII = tuple(PII_PATTERNS[name] for name in ("SNILS", "PHONE_RU", "CARD", "PASSPORT"))
@@ -116,6 +121,7 @@ class StreamGuard:
     def __init__(self, system_prompt: str | None, canary: str | None) -> None:
         self.system_prompt = system_prompt
         self.canary = canary
+        self.hold = self.HOLD_CHARS if system_prompt else self.SHORT_HOLD_CHARS
         self.raw = ""
         self.done = 0          # сколько символов ответа модели уже отдано (в маскированном виде)
 
@@ -131,15 +137,15 @@ class StreamGuard:
 
     def _cut(self, tail: str) -> int:
         """Сколько символов хвоста можно отдать: до последнего пробела перед придержанными
-        80 символами и не посреди номера с пробелами."""
-        limit = len(tail) - self.HOLD_CHARS
+        символами и не посреди номера с пробелами."""
+        limit = len(tail) - self.hold
         if limit <= 0:
             return 0
         cut = max(tail.rfind(ch, 0, limit) for ch in " \n\t") + 1
         if cut == 0 and limit > self.MAX_WORD_CHARS:
             return limit
         for pattern in self._SPACED_PII:
-            for match in pattern.finditer(tail, 0, limit + self.HOLD_CHARS):
+            for match in pattern.finditer(tail, 0, limit + self.hold):
                 if match.start() < cut < match.end():
                     cut = match.start()
         return cut

@@ -1,5 +1,5 @@
 """
-HTTP-сервис ассистента техподдержки на FastAPI (блоки 3.4–3.6).
+HTTP-сервис ассистента техподдержки на FastAPI (блоки 3.4–3.8, 4.1).
 
 Запуск из корня проекта:
     uvicorn app.main:app --reload --port 8000
@@ -26,6 +26,9 @@ Swagger: http://localhost:8000/docs
   X-RateLimit-Limit и X-RateLimit-Remaining;
 - JSONCharsetMiddleware дописывает charset=utf-8 к Content-Type JSON-ответов: без него
   Windows PowerShell 5.1 показывает кириллицу как «Ð¯…»;
+- чаты с историей на сервере (блок 4.1, app/chat/): роутер /chats; lifespan проверяет
+  стратегию контекста и для CHAT_REPOSITORY=postgres создаёт движок SQLAlchemy и фабрику
+  сессий (init_chat_storage), а при остановке закрывает их;
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -46,6 +49,10 @@ from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from redis.asyncio import Redis
 
+from app.chat import routes as chat_routes
+from app.chat.context import make_strategy
+from app.chat.deps import close_chat_storage, init_chat_storage
+from app.chat.domain import ChatInputError, ChatNotFoundError, ChatStorageError
 from app.core.charset import JSONCharsetMiddleware
 from app.core.config import (
     get_settings,
@@ -107,9 +114,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.warning("redis_unavailable", redis_url=cfg.redis_url, error=repr(exc),
                     note="запросы идут без кеша, /ready отвечает 503, пока Redis не поднимется")
 
+    # Чаты (блок 4.1): неподдерживаемая стратегия контекста — ошибка старта, а не 500 на запросах.
+    make_strategy(cfg.chat_context_strategy, cfg.chat_context_window)
+    await init_chat_storage(app.state, cfg)
+
     log.info("service_started", default_model=cfg.llm.default_model,
              provider=cfg.llm.base_url or "https://api.openai.com/v1",
-             security_enabled=cfg.security.enabled, rate_limit_per_min=cfg.rate_limit_per_min)
+             security_enabled=cfg.security.enabled, rate_limit_per_min=cfg.rate_limit_per_min,
+             chat_repository=cfg.chat_repository)
     if not cfg.security.enabled:
         log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
                                               "(только для прогона garak baseline)")
@@ -117,6 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await app.state.openai.close()
     await app.state.cache.aclose()
+    await close_chat_storage(app.state)
     if app.state.pii_redactor is not None:
         app.state.pii_redactor.close()
     shutdown_tracing(app.state.tracer_provider)
@@ -124,10 +137,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title=settings.app_name,
-    version="3.8.0",
+    version="4.1.0",
     description=(
         "Чат-ядро ассистента техподдержки: ответ целиком (`POST /chat`) и потоком "
-        "(`POST /chat/stream`), кеш в Redis, каталог моделей. Каждый ответ содержит "
+        "(`POST /chat/stream`), кеш в Redis, каталог моделей; чаты с историей на сервере "
+        "(`/chats`, ответ потоком SSE). Каждый ответ содержит "
         "заголовок `X-Request-ID`; ошибки приходят в формате "
         "`{\"error\": {\"code\": ..., \"message\": ...}}`."
     ),
@@ -135,6 +149,7 @@ app = FastAPI(
     telemetry=fastapi_telemetry(),   # span на HTTP-запрос — корень трейса в Phoenix
     openapi_tags=[
         {"name": "chat", "description": "Запросы к модели"},
+        {"name": "chats", "description": "Чаты с историей на сервере (блок 4.1)"},
         {"name": "models", "description": "Каталог моделей и цен"},
         {"name": "health", "description": "Проверка состояния"},
     ],
@@ -154,7 +169,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_allow_credentials,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],   # DELETE — очистка истории чата (блок 4.1)
     allow_headers=["Content-Type", "Authorization", REQUEST_ID_HEADER, USER_ID_HEADER],
     expose_headers=[REQUEST_ID_HEADER, "Retry-After", LIMIT_HEADER, REMAINING_HEADER],
 )
@@ -188,6 +203,23 @@ async def handle_llm_error(request: Request, exc: LLMError) -> JSONResponse:
     return _error(request, exc.status_code, exc.code, exc.message, headers)
 
 
+@app.exception_handler(ChatNotFoundError)
+async def handle_chat_not_found(request: Request, exc: ChatNotFoundError) -> JSONResponse:
+    return _error(request, 404, exc.code, str(exc))
+
+
+@app.exception_handler(ChatInputError)
+async def handle_chat_input(request: Request, exc: ChatInputError) -> JSONResponse:
+    return _error(request, 422, exc.code, "Запрос не прошёл валидацию.",
+                  fields=[{"field": exc.field, "message": exc.message}])
+
+
+@app.exception_handler(ChatStorageError)
+async def handle_chat_storage(request: Request, exc: ChatStorageError) -> JSONResponse:
+    log.warning("chat_storage_error", error=exc.message, cause=repr(exc.__cause__)[:300])
+    return _error(request, 503, exc.code, exc.message)
+
+
 def _field(loc: tuple[Any, ...]) -> str:
     parts = [str(p) for p in loc[1:]] if loc and loc[0] in {"body", "query", "path", "header"} else [str(p) for p in loc]
     return ".".join(parts) or "body"
@@ -210,5 +242,6 @@ async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
 
 
 app.include_router(chat.router)
+app.include_router(chat_routes.router)
 app.include_router(models.router)
 app.include_router(health.router)

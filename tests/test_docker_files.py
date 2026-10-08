@@ -1,5 +1,5 @@
 """
-Статические проверки файлов блоков 3.5–3.6: Dockerfile, .dockerignore, compose.yaml, .env.example.
+Статические проверки файлов блоков 3.5–3.6 и 4.1: Dockerfile, .dockerignore, compose.yaml, .env.example.
 
 Docker для этих тестов не нужен: они читают файлы как текст и следят, чтобы правки не
 сломали требования заданий (multi-stage, non-root, exec-форма CMD, healthcheck-и,
@@ -112,6 +112,38 @@ class TestDockerignore(unittest.TestCase):
                 self.assertFalse(_ignored(path, self.patterns))
 
 
+class TestChatStorageFiles(unittest.TestCase):
+    """Блок 4.1: миграции в образе, Postgres в compose."""
+
+    def test_image_has_migrations(self):
+        dockerfile = _read("Dockerfile")
+        self.assertIn("COPY alembic.ini ./", dockerfile)
+        self.assertIn("COPY migrations/ ./migrations/", dockerfile)
+        self.assertIn("RUN mkdir -p /app/var/chats", dockerfile)
+        patterns = [line.strip() for line in _read(".dockerignore").splitlines()
+                    if line.strip() and not line.startswith("#")]
+        for path in ("alembic.ini", "migrations/env.py", "migrations/versions/x_chat_tables.py"):
+            with self.subTest(path=path):
+                self.assertFalse(_ignored(path, patterns))
+        self.assertTrue(_ignored("var/chats/chats/x/messages.jsonl", patterns))   # локальная история — не в образ
+
+    def test_postgres_service(self):
+        compose = _read("compose.yaml")
+        postgres = _service_block(compose, "postgres")
+        self.assertIn("image: postgres:16-alpine", postgres)
+        self.assertRegex(postgres, r'ports:\n(\s+#.*\n)*\s+- "127\.0\.0\.1:5433:5432"')   # только loopback
+        self.assertIn('test: ["CMD", "pg_isready", "-U", "multapi", "-d", "multapi"]', postgres)
+        self.assertRegex(postgres, r"volumes:\n\s+- pg_data:/var/lib/postgresql/data")
+        self.assertRegex(compose, r"(?m)^volumes:\n(  .*\n)*  pg_data:")
+
+    def test_app_uses_postgres_by_service_name(self):
+        app = _service_block(_read("compose.yaml"), "app")
+        self.assertIn("DATABASE_URL: postgresql+asyncpg://multapi:${POSTGRES_PASSWORD:-multapi}@postgres:5432/multapi", app)
+        self.assertIn("CHAT_STORAGE_DIR: /app/var/chats", app)
+        self.assertRegex(app, r"volumes:\n\s+- chat_data:/app/var/chats")
+        self.assertRegex(app, r"\n\s+postgres:\n\s+condition: service_healthy")
+
+
 class TestCompose(unittest.TestCase):
     def setUp(self) -> None:
         self.text = _read("compose.yaml")
@@ -167,7 +199,10 @@ class TestSecrets(unittest.TestCase):
                      "SUPPORT__ENABLED", "EVAL_JUDGE_MODEL", "EVAL_JUDGE_BASE_URL", "EVAL_JUDGE_API_KEY",
                      "EVAL_JUDGE_REASONING", "EVAL_JUDGE_MAX_TOKENS", "LLM__PROXY_URL", "LLM__USE_SYSTEM_CERTS",
                      # блок 3.8
-                     "SECURITY__ENABLED", "SECURITY__MAX_INPUT_CHARS", "RATE_LIMIT_PER_MIN", "LOG_FILE"):
+                     "SECURITY__ENABLED", "SECURITY__MAX_INPUT_CHARS", "RATE_LIMIT_PER_MIN", "LOG_FILE",
+                     # блок 4.1
+                     "CHAT_REPOSITORY", "CHAT_STORAGE_DIR", "DATABASE_URL", "CHAT_CONTEXT_STRATEGY",
+                     "CHAT_CONTEXT_WINDOW", "CHAT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "RESPONSE_TOKENS", "SAFETY_MARGIN"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):

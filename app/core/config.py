@@ -22,6 +22,10 @@ proxy_for(): запросы к Ollama на своём компьютере на 
 доверяет, а Python — нет (CERTIFICATE_VERIFY_FAILED: self-signed certificate in
 certificate chain). Проверка при этом не отключается.
 
+Чат с историей на сервере (блок 4.1): CHAT_REPOSITORY (json или postgres),
+CHAT_STORAGE_DIR, DATABASE_URL, стратегия и окно контекста, бюджет токенов
+CONTEXT_WINDOW - RESPONSE_TOKENS - SAFETY_MARGIN — см. app/chat/ и docs/chat.md.
+
 Настройки ассистента с инструментами (блок 3.1) и скриптов блока 3.3 — в app/config.py.
 """
 from __future__ import annotations
@@ -30,7 +34,7 @@ import ipaddress
 import os
 import ssl
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -160,14 +164,51 @@ class SecuritySettings(BaseModel):
     max_input_chars: int = Field(default=4000, ge=100, le=32_000)
 
 
+# Postgres из compose.yaml, опубликованный на 127.0.0.1:5433 (а не localhost: на Windows
+# localhost сначала пробует IPv6 ::1, и каждое новое соединение ждёт отказа по нему).
+DEFAULT_DATABASE_URL = "postgresql+asyncpg://multapi:multapi@127.0.0.1:5433/multapi"
+
+ENV_CONFIG = SettingsConfigDict(
+    env_file=ROOT / ".env",
+    env_file_encoding="utf-8",
+    env_nested_delimiter="__",
+    env_ignore_empty=True,   # «КЛЮЧ=» в .env — то же, что ключа нет: действует значение по умолчанию
+    extra="ignore",          # в .env есть переменные блоков 2–3, сервису они не нужны
+)
+
+
+def async_database_url(raw: str) -> str:
+    """Адрес Postgres для async SQLAlchemy: postgresql://… и postgres://… (как их пишут в
+    примерах и в Docker) -> postgresql+asyncpg://…. Сервис и Alembic работают через asyncpg;
+    с другим драйвером create_async_engine упал бы на импорте psycopg."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(raw)
+    if url.drivername in {"postgres", "postgresql"} or (
+            url.drivername.startswith("postgresql+") and url.drivername != "postgresql+asyncpg"):
+        url = url.set(drivername="postgresql+asyncpg")
+    return url.render_as_string(hide_password=False)
+
+
+class DatabaseSettings(BaseSettings):
+    """Только DATABASE_URL — для Alembic (migrations/env.py): миграциям не нужен ключ
+    провайдера LLM, без которого Settings не создаётся."""
+
+    model_config = ENV_CONFIG
+    database_url: SecretStr = SecretStr(DEFAULT_DATABASE_URL)
+
+
+DEFAULT_CHAT_SYSTEM_PROMPT = (
+    "Ты — ассистент техподдержки продукта «{product_name}». Отвечай по-русски, коротко и по делу. "
+    "Помни, что пользователь сообщил о себе раньше в этом диалоге, — например, как его зовут, — "
+    "и используй это в ответах. Не выдумывай сведений, которых в диалоге не было. "
+    "Email, телефон и номера карт в сообщениях скрыты метками вида [EMAIL], [PHONE_RU], [CARD] — "
+    "не проси прислать их снова."
+)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=ROOT / ".env",
-        env_file_encoding="utf-8",
-        env_nested_delimiter="__",
-        env_ignore_empty=True,   # «КЛЮЧ=» в .env — то же, что ключа нет: действует значение по умолчанию
-        extra="ignore",          # в .env есть переменные блоков 2–3, сервису они не нужны
-    )
+    model_config = ENV_CONFIG
 
     app_name: str = "multapi — LLM-сервис техподдержки"
     # Уровень лога сервиса (логгер llm-service): DEBUG, INFO, WARNING, ERROR.
@@ -196,6 +237,29 @@ class Settings(BaseSettings):
     support: SupportSettings = Field(default_factory=SupportSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
 
+    # --- Чат с историей на сервере (блок 4.1), app/chat/ ---
+    # Где хранить историю: json — файлы в CHAT_STORAGE_DIR, postgres — DATABASE_URL.
+    chat_repository: Literal["json", "postgres"] = "json"
+    # Относительный путь — от корня проекта, как LOG_FILE.
+    chat_storage_dir: Path = Path("./var/chats")
+    # sliding — последние CHAT_CONTEXT_WINDOW сообщений. hybrid (сводка + последние M) в 4.1
+    # не реализована: с ней сервис не стартует (app/chat/context.py).
+    chat_context_strategy: Literal["sliding", "hybrid"] = "sliding"
+    # Сколько последних сообщений чата уходит модели. Не больше 48: в ChatRequest до 50
+    # сообщений, ещё одно — системный промпт.
+    chat_context_window: int = Field(default=10, ge=1, le=48)
+    # Системный промпт чата, если при создании свой не задан; {product_name} — SUPPORT__PRODUCT_NAME.
+    chat_system_prompt: str = DEFAULT_CHAT_SYSTEM_PROMPT
+    # Postgres для CHAT_REPOSITORY=postgres; по умолчанию — сервис postgres из compose.yaml.
+    # SecretStr: в адресе пароль, в лог он не попадает.
+    database_url: SecretStr = SecretStr(DEFAULT_DATABASE_URL)
+    # Бюджет токенов запроса: CONTEXT_WINDOW - RESPONSE_TOKENS - SAFETY_MARGIN. CONTEXT_WINDOW —
+    # окно модели; у Ollama это num_ctx (по умолчанию 4096 в новых версиях), всё сверх него
+    # Ollama молча отрезает с начала — вместе с системным промптом.
+    context_window: int = Field(default=4096, ge=512)
+    response_tokens: int = Field(default=1024, ge=16, le=16_000)   # max_tokens ответа
+    safety_margin: int = Field(default=256, ge=0)                   # запас на неточность подсчёта
+
     @field_validator("log_level")
     @classmethod
     def _check_log_level(cls, value: str) -> str:
@@ -212,6 +276,25 @@ class Settings(BaseSettings):
         if value is None or value.is_absolute() or str(value) == os.devnull:
             return value
         return ROOT / value
+
+    @field_validator("chat_storage_dir")
+    @classmethod
+    def _chat_dir_from_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else ROOT / value
+
+    @property
+    def context_budget(self) -> int:
+        """Сколько токенов может занять запрос к модели (системный промпт + история)."""
+        return self.context_window - self.response_tokens - self.safety_margin
+
+    @model_validator(mode="after")
+    def _check_context_budget(self) -> Settings:
+        if self.context_budget < 256:
+            raise ValueError(
+                f"CONTEXT_WINDOW - RESPONSE_TOKENS - SAFETY_MARGIN = {self.context_budget}: на историю чата "
+                "остаётся меньше 256 токенов — увеличьте CONTEXT_WINDOW или уменьшите RESPONSE_TOKENS"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_cors(self) -> Settings:

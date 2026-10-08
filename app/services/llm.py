@@ -59,6 +59,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import openai
 import structlog
 from opentelemetry import context as otel_context
@@ -107,7 +108,10 @@ def _retry_after(exc: openai.APIStatusError) -> int | None:
 @contextlib.contextmanager
 def provider_errors(model: str) -> Iterator[None]:
     """Переводит исключения OpenAI SDK в доменные. Порядок важен: таймаут —
-    подкласс ошибки соединения, а все HTTP-ошибки — подклассы APIStatusError."""
+    подкласс ошибки соединения, а все HTTP-ошибки — подклассы APIStatusError.
+
+    Ошибки httpx — для потока: обрыв соединения или пауза дольше таймаута, пока ответ
+    читается по частям, SDK не оборачивает в свои исключения (блок 4.1)."""
     try:
         yield
     except openai.RateLimitError as exc:
@@ -124,6 +128,10 @@ def provider_errors(model: str) -> Iterator[None]:
         raise LLMError(f"Провайдер LLM вернул ошибку {exc.status_code}.") from exc
     except openai.OpenAIError as exc:
         raise LLMError() from exc
+    except httpx.TimeoutException as exc:
+        raise LLMTimeoutError() from exc
+    except httpx.HTTPError as exc:
+        raise LLMUnavailableError() from exc
 
 
 def _elapsed_ms(started: float) -> float:

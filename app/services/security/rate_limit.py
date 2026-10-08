@@ -1,8 +1,8 @@
 """
 Лимит запросов к модели (блок 3.8, LLM10 — неограниченное потребление).
 
-RATE_LIMIT_PER_MIN запросов POST /chat и /chat/stream в минуту на клиента; 0 — без
-лимита. Клиент — заголовок X-User-ID, а без него — IP. Сверх лимита — 429
+RATE_LIMIT_PER_MIN запросов POST /chat, /chat/stream и /chats/{id}/messages (блок 4.1)
+в минуту на клиента; 0 — без лимита. Счётчик на клиента общий для всех трёх. Клиент — заголовок X-User-ID, а без него — IP. Сверх лимита — 429
 {"error": {"code": "rate_limited", ...}} и Retry-After: сколько секунд до конца окна.
 
 Счётчики — в том же Redis, что и кеш: у нескольких копий сервиса лимит общий. Окно —
@@ -29,6 +29,7 @@ Middleware стоит внутри CORSMiddleware: ответ 429 браузер
 from __future__ import annotations
 
 import json
+import re
 
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -38,12 +39,18 @@ from app.observability.logging import get_logger
 from app.observability.middleware import USER_ID_HEADER, valid_id
 
 LIMITED_PATHS = frozenset({"/chat", "/chat/stream"})
+CHAT_MESSAGES = re.compile(r"/chats/[^/]+/messages")      # блок 4.1: вопрос в чат — тоже вызов модели
 WINDOW_SECONDS = 60
 KEY_PREFIX = "ratelimit:"
 LIMIT_HEADER = "X-RateLimit-Limit"
 REMAINING_HEADER = "X-RateLimit-Remaining"
 
 log = get_logger()
+
+
+def is_limited(path: str | None) -> bool:
+    """Путь, который вызывает модель: /chat, /chat/stream, /chats/{id}/messages."""
+    return bool(path) and (path in LIMITED_PATHS or CHAT_MESSAGES.fullmatch(path) is not None)
 
 
 def client_key(scope: Scope) -> tuple[str, str]:
@@ -80,8 +87,7 @@ class RateLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         limit = get_settings().rate_limit_per_min
-        if (scope["type"] != "http" or not limit or scope.get("method") != "POST"
-                or scope.get("path") not in LIMITED_PATHS):
+        if scope["type"] != "http" or not limit or scope.get("method") != "POST" or not is_limited(scope.get("path")):
             await self.app(scope, receive, send)
             return
         redis = getattr(scope["app"].state, "cache", None)
