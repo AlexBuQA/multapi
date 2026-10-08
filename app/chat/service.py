@@ -109,17 +109,32 @@ class ChatService:
         self.locks = locks or ChatLocks()
 
     # ------------------------------------------------------------------ #
-    async def create_chat(self, owner_external_id: str, interface: str, system_prompt: str | None = None) -> Chat:
+    def _check_system_prompt(self, system_prompt: str | None) -> None:
         if system_prompt and self.settings.security.enabled:
             # Системный промпт чата проверяется с каждым вопросом (screen_messages, блок 3.8);
             # не прошёл бы — каждый вопрос в этом чате получал бы отказ. Лучше сразу 422.
             verdict = validate_input(system_prompt, self.settings.security.max_input_chars)
             if not verdict.ok:
                 raise ChatInputError("system_prompt", f"системный промпт не прошёл проверку входа: {verdict.reason}")
+
+    async def create_chat(self, owner_external_id: str, interface: str, system_prompt: str | None = None) -> Chat:
+        """Всегда новый чат."""
+        self._check_system_prompt(system_prompt)
         chat = await self.repo.create_chat(owner_external_id, interface, system_prompt)
         log.info("chat_created", chat_id=str(chat.id), interface=interface,
                  own_system_prompt=system_prompt is not None, repository=self.settings.chat_repository)
         return chat
+
+    async def get_or_create_chat(self, owner_external_id: str, interface: str,
+                                 system_prompt: str | None = None) -> tuple[Chat, bool]:
+        """Чат клиента: существующий для пары (owner_external_id, interface) или новый —
+        POST /chats (блок 4.2). Второй элемент — создан ли чат сейчас. У существующего
+        чата системный промпт не меняется."""
+        self._check_system_prompt(system_prompt)
+        chat, created = await self.repo.get_or_create_chat(owner_external_id, interface, system_prompt)
+        log.info("chat_created" if created else "chat_reused", chat_id=str(chat.id), interface=interface,
+                 own_system_prompt=chat.system_prompt is not None, repository=self.settings.chat_repository)
+        return chat, created
 
     async def get_chat(self, chat_id: UUID) -> Chat:
         chat = await self.repo.get_chat(chat_id)

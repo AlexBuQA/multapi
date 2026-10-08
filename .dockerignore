@@ -39,7 +39,7 @@ htmlcov/
 *.swp
 .DS_Store
 
-# Не нужно сервису: тесты, данные, документация, CLI-часть проекта и её файлы
+# Не нужно сервису: тесты, данные, документация, CLI-часть проекта, Telegram-бот (блок 4.2)
 tests/
 eval/
 notebooks/
@@ -57,6 +57,7 @@ examples/
 scripts/
 tools/
 src/
+bot/
 demo_*.py
 main.py
 requirements.txt

@@ -10,12 +10,16 @@ from_attributes=True) в pg_repo.py.
 - chat_messages — сообщения; deleted_at — мягкое удаление (/clear), строки не стираются;
 - частичный индекс ix_chat_messages_chat_created (chat_id, created_at DESC) WHERE
   deleted_at IS NULL — под запрос «последние N живых сообщений чата»;
+- ix_chats_owner_interface (owner_external_id, interface) — блок 4.2: поиск чата
+  клиента в get_or_create_chat (POST /chats идемпотентен). Не уникальный: в базе могут
+  быть дубли, созданные до блока 4.2;
 - seq — добавлен к схеме задания: порядковый номер вставки (IDENTITY). created_at задаёт
   приложение, и у двух сообщений он может совпасть: на Windows до Python 3.13 часы
   datetime.now() идут шагом около 15 мс. Тогда порядок по created_at не определён, а
   ORDER BY created_at DESC, seq DESC сохраняет порядок записи.
 
-Миграция — migrations/versions/*_chat_tables.py (alembic revision --autogenerate).
+Миграции — migrations/versions/ (alembic revision --autogenerate): *_chat_tables.py —
+таблицы блока 4.1, *_chat_owner_index.py — индекс блока 4.2.
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ class Base(DeclarativeBase):
 
 class ChatRow(Base):
     __tablename__ = "chats"
+    __table_args__ = (Index("ix_chats_owner_interface", "owner_external_id", "interface"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     owner_external_id: Mapped[str] = mapped_column(Text, nullable=False)

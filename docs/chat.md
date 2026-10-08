@@ -119,7 +119,7 @@ sequenceDiagram
 
 Оба хранилища проходят один и тот же набор тестов: `tests/chat/test_repository_contract.py`.
 
-**JSONL.** Структура на диске: `chats/<chat_id>/chat.json` (метаданные) и `chats/<chat_id>/messages.jsonl` (одна `ChatMessage` на строку). Файл никогда не переписывается — ни при новом сообщении, ни при очистке:
+**JSONL.** Структура на диске: `chats/<chat_id>/chat.json` (метаданные), `chats/<chat_id>/messages.jsonl` (одна `ChatMessage` на строку) и `owners/<sha256>.json` — какой чат у клиента (блок 4.2). Файл никогда не переписывается — ни при новом сообщении, ни при очистке:
 - **Запись** — `aiofiles.open(path, "a")` и `model_dump_json()`.
 - **Чтение** — `readlines()` всего файла и `model_validate_json` построчно, затем последние N.
 - **Обрыв записи.** Если процесс упал посреди записи, в конце файла остаётся строка без перевода строки. Перед следующей записью он добавляется, иначе новая запись склеилась бы с обрывком и пропала. Для маркера очистки это значило бы, что очищенная история вернулась. Сам обрывок при чтении пропускается с предупреждением `chat_jsonl_line_skipped`.
@@ -152,13 +152,15 @@ alembic upgrade head              # таблицы chats и chat_messages
 
 | Метод и путь | Тело | Ответ |
 |---|---|---|
-| `POST /chats` | `{"owner_external_id": "test-1", "interface": "cli", "system_prompt": null}` | `200 {"chat_id": "..."}` |
+| `POST /chats` | `{"owner_external_id": "test-1", "interface": "cli", "system_prompt": null}` | `200 {"chat_id": "...", "created": true}`; повторно с теми же `owner_external_id` и `interface` — тот же `chat_id` и `"created": false` |
 | `GET /chats/{chat_id}` | — | `Chat` или `404 chat_not_found` |
 | `POST /chats/{chat_id}/messages` | `{"content": "..."}` | поток `text/event-stream` |
 | `GET /chats/{chat_id}/messages?limit=50` | — | `list[ChatMessage]` от старых к новым; `limit` от 1 до 500 |
 | `DELETE /chats/{chat_id}/messages` | — | `200 {"status": "ok"}` — мягкое удаление |
 
 `owner_external_id` — идентификатор клиента во внешней системе: Telegram `chat.id` строкой, email пользователя веб-интерфейса, UUID устройства. `interface` — `telegram`, `web` или `cli` (строчные латинские буквы, цифры, `_` и `-`).
+
+**`POST /chats` идемпотентен** (с блока 4.2: так его вызывает Telegram-бот, [`docs/bot.md`](bot.md)). У клиента в одном интерфейсе — один чат: повторный запрос возвращает его `chat_id` с `"created": false`, а `system_prompt` учитывается только при создании. Одновременные запросы создают один чат: в Postgres — `pg_advisory_xact_lock` по паре «интерфейс + клиент» в той же транзакции, в JSON — замок на эту пару в процессе сервиса. Поиск — индекс `ix_chats_owner_interface` (миграция `e62e277f79f4`) или файл `owners/<sha256>.json`. Если чатов с этой парой несколько (до блока 4.2 каждый `POST /chats` создавал новый), возвращается самый ранний. Поэтому в примерах ниже владелец каждый раз новый — иначе вернулся бы чат прошлой проверки вместе с историей.
 
 Проверки при создании чата и отправке сообщения — ответ `422 validation_error`:
 - **Свой `system_prompt`** проходит проверку входа блока 3.8: длина до `SECURITY__MAX_INPUT_CHARS`, шаблоны инъекции. Он уходит модели с каждым вопросом, и не прошедший проверку промпт давал бы отказ на каждое сообщение чата.
@@ -184,7 +186,7 @@ data: [DONE]
 **curl (bash, как в критериях):**
 
 ```bash
-curl -X POST localhost:8000/chats -H 'Content-Type: application/json' -d '{"owner_external_id":"test-1","interface":"cli"}'
+curl -X POST localhost:8000/chats -H 'Content-Type: application/json' -d "{\"owner_external_id\":\"test-$RANDOM\",\"interface\":\"cli\"}"
 CHAT=<chat_id из ответа>
 curl -N -X POST localhost:8000/chats/$CHAT/messages -H 'Content-Type: application/json' -d '{"content":"Привет, меня зовут Аня"}'
 curl -N -X POST localhost:8000/chats/$CHAT/messages -H 'Content-Type: application/json' -d '{"content":"Как меня зовут?"}'
@@ -198,7 +200,7 @@ curl localhost:8000/chats/$CHAT/messages          # []
 
 ```powershell
 [Console]::OutputEncoding = [Text.Encoding]::UTF8          # кириллица из curl.exe в консоли
-$chat = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chats -ContentType "application/json" -Body '{"owner_external_id":"test-1","interface":"cli"}').chat_id
+$chat = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/chats -ContentType "application/json" -Body (@{owner_external_id = "test-$(Get-Random)"; interface = "cli"} | ConvertTo-Json)).chat_id
 curl.exe -N -X POST "http://127.0.0.1:8000/chats/$chat/messages" -H "Content-Type: application/json" --data-binary "@examples/requests/chats_message_name.json"
 curl.exe -N -X POST "http://127.0.0.1:8000/chats/$chat/messages" -H "Content-Type: application/json" --data-binary "@examples/requests/chats_message_ask.json"
 Invoke-RestMethod "http://127.0.0.1:8000/chats/$chat/messages" | Format-Table role, content

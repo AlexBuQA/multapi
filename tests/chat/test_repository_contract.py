@@ -120,3 +120,42 @@ async def test_equal_timestamps_keep_insertion_order(repo):
     assert [m.content for m in await repo.list_messages(chat.id)] == [f"#{i}" for i in range(6)]
     assert [m.content for m in await repo.list_messages(chat.id, limit=3)] == ["#3", "#4", "#5"]
 
+
+
+# ---------------------------------------------------------------- get_or_create_chat (блок 4.2)
+# Владельцы уникальны в каждом тесте: тестовая база Postgres очищается один раз на прогон.
+def new_owner() -> str:
+    return f"tg-{uuid4().hex[:12]}"
+
+
+async def test_get_or_create_is_idempotent(repo):
+    owner = new_owner()
+    first, created = await repo.get_or_create_chat(owner, "telegram", system_prompt="Отвечай кратко.")
+    again, created_again = await repo.get_or_create_chat(owner, "telegram", system_prompt="Другой промпт")
+    assert created is True and created_again is False
+    assert again.id == first.id
+    assert again.system_prompt == "Отвечай кратко."                # промпт задаётся только при создании
+    assert (await repo.get_chat(first.id)).owner_external_id == owner
+
+
+async def test_get_or_create_separates_owner_and_interface(repo):
+    owner = new_owner()
+    telegram, _ = await repo.get_or_create_chat(owner, "telegram")
+    web, _ = await repo.get_or_create_chat(owner, "web")
+    other, _ = await repo.get_or_create_chat(owner + "-2", "telegram")
+    assert len({telegram.id, web.id, other.id}) == 3
+
+
+async def test_get_or_create_finds_earliest_chat_made_by_create_chat(repo):
+    """Чаты, созданные до блока 4.2 (create_chat не идемпотентен), тоже находятся."""
+    owner = new_owner()
+    earliest = await repo.create_chat(owner, "cli")
+    await repo.create_chat(owner, "cli")
+    found, created = await repo.get_or_create_chat(owner, "cli")
+    assert created is False and found.id == earliest.id
+    assert (await repo.get_or_create_chat(owner, "cli"))[0].id == earliest.id
+
+
+async def test_create_chat_always_makes_a_new_one(repo):
+    owner = new_owner()
+    assert (await repo.create_chat(owner, "cli")).id != (await repo.create_chat(owner, "cli")).id

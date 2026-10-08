@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from uuid import uuid4
 
@@ -61,6 +62,31 @@ async def test_json_torn_write_does_not_swallow_next_record(json_repo: JsonChatR
     assert path.read_text(encoding="utf-8").splitlines()[1] == '{"id": "обрыв записи'
 
 
+async def test_json_owner_file_points_to_chat(json_repo: JsonChatRepository):
+    chat, _ = await json_repo.get_or_create_chat("ivan@example.com/../x", "web")
+    files = list((json_repo.base_dir / "owners").iterdir())
+    assert len(files) == 1 and len(files[0].stem) == 64                 # sha256: любой owner — безопасное имя
+    assert json.loads(files[0].read_text(encoding="utf-8")) == {"chat_id": str(chat.id)}
+
+
+async def test_json_owner_file_to_deleted_chat_makes_new_chat(json_repo: JsonChatRepository):
+    import shutil
+
+    chat, _ = await json_repo.get_or_create_chat("u", "telegram")
+    shutil.rmtree(json_repo.base_dir / "chats" / str(chat.id))
+    again, created = await json_repo.get_or_create_chat("u", "telegram")
+    assert created is True and again.id != chat.id
+
+
+async def test_json_concurrent_get_or_create_makes_one_chat(tmp_path):
+    """Репозиторий создаётся на каждый запрос (deps.py) — замок общий для процесса."""
+    base = tmp_path / "chats"
+    results = await asyncio.gather(*(JsonChatRepository(base).get_or_create_chat("u", "telegram") for _ in range(8)))
+    assert len({chat.id for chat, _ in results}) == 1
+    assert sum(created for _, created in results) == 1
+    assert len(list((base / "chats").iterdir())) == 1
+
+
 async def test_json_unknown_chat_creates_nothing(json_repo: JsonChatRepository):
     await json_repo.soft_delete_messages(uuid4())
     assert not (json_repo.base_dir / "chats").exists()
@@ -86,6 +112,28 @@ async def test_pg_soft_delete_keeps_rows(pg_sessions):
     assert [tuple(row) for row in rows] == [("раз", True), ("два", True), ("три", False)]
 
 
+async def test_pg_concurrent_get_or_create_makes_one_chat(pg_sessions):
+    """Восемь одновременных запросов из разных сессий — как из разных копий сервиса."""
+    from sqlalchemy import func, select
+
+    from app.chat.repositories.pg_models import ChatRow
+    from app.chat.repositories.pg_repo import PostgresChatRepository
+
+    owner = f"tg-{uuid4().hex[:12]}"
+    sessions = [pg_sessions() for _ in range(8)]
+    try:
+        results = await asyncio.gather(*(PostgresChatRepository(s).get_or_create_chat(owner, "telegram")
+                                         for s in sessions))
+    finally:
+        for session in sessions:
+            await session.close()
+    assert len({chat.id for chat, _ in results}) == 1
+    assert sum(created for _, created in results) == 1
+    async with pg_sessions() as session, session.begin():
+        rows = await session.scalar(select(func.count()).select_from(ChatRow).where(ChatRow.owner_external_id == owner))
+    assert rows == 1
+
+
 async def test_pg_partial_index_and_migration_match_models(pg_sessions):
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
@@ -100,6 +148,10 @@ async def test_pg_partial_index_and_migration_match_models(pg_sessions):
             conn = await session.connection()
             diff = await conn.run_sync(lambda sync: compare_metadata(MigrationContext.configure(sync), Base.metadata))
     assert "(chat_id, created_at DESC)" in indexdef and "WHERE (deleted_at IS NULL)" in indexdef
+    async with pg_sessions() as session, session.begin():
+        owner_index = (await session.execute(text(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_chats_owner_interface'"))).scalar_one()
+    assert "(owner_external_id, interface)" in owner_index and "UNIQUE" not in owner_index
     assert diff == []           # alembic revision --autogenerate ничего бы не нашёл
 
 
