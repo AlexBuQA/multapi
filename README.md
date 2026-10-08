@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8 и 4.1
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -16,6 +16,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 3.5 — Docker и контейнеризация:** multi-stage `Dockerfile` на `python:3.13-slim-bookworm` с uv и non-root пользователем, `compose.yaml` с сервисом и Redis, healthcheck-и, `/health` и `/ready` — см. раздел [«Блок 3.5»](#блок-35--docker-и-контейнеризация).
 - **Блок 3.6 — Observability:** трейсы в Phoenix (сервис в `compose.yaml`, автоинструментация OpenAI SDK, атрибуты `gen_ai.*`), JSON-логи structlog с `request_id` в каждой строке, маскирование PII в логах, опционально Presidio с замером времени — см. раздел [«Блок 3.6»](#блок-36--observability-ии-приложений).
 - **Блок 3.7 — Тестирование и оценка качества:** `/chat` отвечает как ассистент по руководству пользователя, unit-тесты на `pytest` с `mocker` и запретом сети, golden dataset на 25 вопросов, eval-прогон с LLM-as-judge (G-Eval) и проверка порогов перед релизом — см. раздел [«Блок 3.7»](#блок-37--тестирование-и-оценка-качества).
+- **Блок 4.1 — Архитектура чата и хранение истории:** модуль `app/chat/` — чат с историей на сервере, хранилище JSONL или Postgres за одним контрактом `ChatRepository`, скользящее окно контекста с бюджетом токенов, ответ потоком SSE, миграция Alembic — см. раздел [«Блок 4.1»](#блок-41--архитектура-чата-и-хранение-истории) и [`docs/chat.md`](docs/chat.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -58,11 +59,14 @@ multapi/
 ├── demo_vision.py           # демо варианта А (3 изображения + кеш)
 ├── demo_voice.py            # демо варианта Б (полный голосовой пайплайн)
 ├── requirements.txt         # зависимости всего проекта для локальной разработки (pip)
+├── requirements-presidio.txt # блок 3.6, опционально: Presidio и модель spaCy ru_core_news_md
 ├── pyproject.toml           # блок 3.5: зависимости Docker-образа сервиса (uv)
 ├── uv.lock                  # блок 3.5: закреплённые версии для образа
 ├── Dockerfile               # блок 3.5: multi-stage образ сервиса, non-root
 ├── .dockerignore            # блок 3.5: что не уходит в контекст сборки
-├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix
+├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix; 4.1: + postgres
+├── alembic.ini              # блок 4.1: настройки Alembic (адрес базы — DATABASE_URL)
+├── migrations/              # блок 4.1: env.py (async), versions/ — миграция chat tables
 ├── eval/                    # блок 3.7: golden_dataset.json, run_evaluation.py, judge.py,
 │   │                        #   thresholds.yaml, check_thresholds.py, runs/ (артефакты прогонов)
 │   └── security/            # блок 3.8: rest_config.json (таргет garak), garak_report.py,
@@ -78,7 +82,9 @@ multapi/
 │   ├── vision.py            # вариант А: base64 + Vision (vision-модель)
 │   ├── voice.py             # вариант Б: Whisper -> classify -> LLM -> TTS
 │   └── utils.py             # логирование, base64, валидация файлов, UsageTracker
-├── app/                     # блоки 3.1, 3.3–3.6
+├── app/                     # блоки 3.1, 3.3–3.8, 4.1
+│   ├── chat/                # блок 4.1: domain.py, repository.py (Protocol), repositories/ (JSONL, Postgres),
+│   │                        #   context.py (окно, токены), service.py, routes.py (/chats, SSE), deps.py
 │   ├── main.py              # блок 3.4: FastAPI — lifespan, middleware, CORS, обработчики ошибок
 │   ├── observability/       # блок 3.6: tracing.py (Phoenix), logging.py (structlog), middleware.py
 │   │                        #   (request_id), pii.py (маскирование), pii_presidio.py (опционально)
@@ -111,7 +117,7 @@ multapi/
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   ├── run_tool_call.py     # прогон трёх тест-запросов
-│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4)
+│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4; chats_*.json — блок 4.1)
 ├── scripts/                 # блок 3.3
 │   ├── benchmark.py         # бенчмарк sync vs async -> benchmark_results.md
 │   ├── benchmark_results.md # результаты локального прогона (мок и Ollama)
@@ -119,9 +125,12 @@ multapi/
 │   ├── mock_llm_server.py   # мок OpenAI API с задержкой (модель облачного провайдера)
 │   ├── bench_pii.py         # блок 3.6: время маскирования — regex против Presidio
 │   ├── _target.py           # выбор цели: мок или локальный Ollama
-│   └── load_test.py         # блок 3.8: N+1 запросов к /chat — последний получает 429
+│   ├── load_test.py         # блок 3.8: N+1 запросов к /chat — последний получает 429
+│   ├── check_tokens.py      # блок 4.1: count_tokens против usage.prompt_tokens провайдера
+│   └── chat_scenario.py     # блок 4.1: сценарий «Аня» против запущенного сервиса, N прогонов
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
+│   ├── chat.md              # блок 4.1: архитектура чата, стратегия контекста, эндпоинты с curl
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -138,9 +147,11 @@ multapi/
 │   ├── test_pii_presidio.py # блок 3.6: Presidio (фон, откат на regex, настоящая модель)
 │   ├── log_capture.py       # перехват JSON-лога в тестах
 │   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval
+│   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm)
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
+├── var/chats/               # блок 4.1: история чатов в JSONL (CHAT_STORAGE_DIR, в git не попадает)
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
                              # app.log, tool_calls.jsonl, llm_calls.jsonl (локальные прогоны, в git не попадают)
 ```
@@ -911,10 +922,14 @@ Regex ловит то, у чего есть формат. Имя или горо
 Включается `PII_PRESIDIO=true`. Пакеты ставятся отдельно и в Docker-образ не входят: spaCy с моделью — около 500 МБ, образ перестал бы укладываться в 500 МБ из блока 3.5. Без пакетов сервис пишет `presidio_unavailable` и работает на regex.
 
 ```powershell
-pip install presidio-analyzer presidio-anonymizer
-python -m spacy download ru_core_news_md
+pip install -r requirements-presidio.txt     # Presidio, spaCy 3.8 и модель ru_core_news_md 3.8.0 с GitHub
+python -m pytest tests/test_pii_presidio.py -v -rs   # 7 passed, без skipped
 python scripts/bench_pii.py
 ```
+
+`requirements-presidio.txt` ставит модель spaCy прямо из релиза на GitHub, той же версии 3.8, что и spaCy, — отдельный шаг `python -m spacy download` не нужен, версия закреплена. Важнее другое: pip проверяет HTTPS по хранилищу сертификатов Windows, а `python -m spacy download` — только по certifi. В сети, которая подменяет сертификаты (как у `LLM__USE_SYSTEM_CERTS`), он падает с `CERTIFICATE_VERIFY_FAILED` на запросе `compatibility.json`, а установка через pip проходит. Если GitHub недоступен вовсе, скачайте `.whl` по ссылке из файла в браузере и выполните `pip install <путь к файлу>`.
+
+Проверено в чистом окружении: `pip install -r requirements.txt -r requirements-presidio.txt`, затем `pytest` — 473 passed без пропусков. На Windows (Python 3.13): `tests/test_pii_presidio.py` — 7 passed за 9 с, `pytest` — 473 passed, 1 deselected (маркер `llm`).
 
 ### Phoenix в compose
 
@@ -1487,7 +1502,7 @@ python eval/run_evaluation.py --model gemma3:4b
    - **Скорость.** Метка и роль ищутся только в хвосте, маскируется только отдаваемый кусок, поэтому работа линейная. Ряд без пробелов длиннее 1000 символов режется принудительно. Правила промпта целиком проверяются один раз, в конце ответа.
    - **Кадр `usage`** отдаётся после всего текста: часть провайдеров шлёт usage в каждом фрагменте.
 
-   Цена — первый фрагмент приходит на ~80 символов позже. В блоке 3.7 ответ в потоке не проверялся.
+   Цена — первый фрагмент приходит на ~80 символов позже. Без промпта ассистента — свой `system` клиента или чат блока 4.1 — начало промпта ловить не нужно, и придерживается 40 символов: этого хватает на метку через пробелы (29), роль джейлбрейка (22) и номер с пробелами (до 23). В блоке 3.7 ответ в потоке не проверялся.
 
 **Блокировка — готовый ответ, а не HTTP 400.** Задание оставляет выбор проекту, решение записано в комментарии `input_validator.py`. Клиент сервиса — чат поддержки, и пользователь должен увидеть понятную фразу, а не ошибку. Ответ помечен `model: "guardrail"` и `finish_reason: "content_filter"`, токены не тратятся. Отказ зависит от причины:
 - инъекция или утечка — «Я не могу показать свои инструкции или действовать в обход них. Могу помочь с вопросами о продукте…»;
@@ -1712,6 +1727,112 @@ python eval/security/garak_report.py after          # с таблицей «бы
 | Маскер ПД работает на исходящих логах ответов LLM | `redact_event` в structlog, `answer_preview`; тесты `test_personal_data_masked_in_answer_and_log`, `test_log_processor_masks_every_line_but_not_ids`; поиск `@` по `logs/service.jsonl` на Windows — 0 |
 | Канарейка в системном промпте, `output_filter` её ловит, есть тест с «утёкшим» ответом | `test_leaked_canary_is_blocked` (4 варианта утечки), `test_leaked_canary_answer_replaced_and_not_cached` |
 | (опционально) лимит запросов, 31-й — 429 | `RATE_LIMIT_PER_MIN`, `scripts/load_test.py`, `test_rate_limit.py`; на Windows — 30 × 200, 31-й — 429 |
+
+## Блок 4.1 — Архитектура чата и хранение истории
+
+Сервис стал stateful-чатом: история диалога хранится на сервере, клиент присылает только новый вопрос. Подробно — [`docs/chat.md`](docs/chat.md): схема Mermaid, выбор стратегии контекста, эндпоинты с примерами curl для bash и PowerShell, переключение хранилища.
+
+Что сделано:
+- **Модуль `app/chat/`.** Доменные `Chat` и `ChatMessage`, контракт `ChatRepository` (`typing.Protocol`) и две реализации:
+  - `JsonChatRepository` — файлы JSONL, только дописывание, мягкое удаление строкой-маркером;
+  - `PostgresChatRepository` — async SQLAlchemy 2.x, `deleted_at` и частичный индекс.
+- **Хранилище** выбирается через `CHAT_REPOSITORY=json|postgres`.
+- **`ChatService`** собирает контекст скользящим окном (`CHAT_CONTEXT_WINDOW`, по умолчанию 10) в пределах бюджета `CONTEXT_WINDOW - RESPONSE_TOKENS - SAFETY_MARGIN`. Токены считает tiktoken (`o200k_base`). Ответ модели идёт потоком SSE и сохраняется одним сообщением. При обрыве потока сохраняется то, что успело прийти.
+- **Модель вызывает `LLMService`** из блоков 3.4–3.8: защитный слой, трейсы в Phoenix (`session.id` = id чата) и логи работают и для чатов. Лимит `RATE_LIMIT_PER_MIN` считает и `POST /chats/{id}/messages`.
+- **Сам `ChatService` ещё:**
+  - маскирует персональные данные до модели;
+  - выбрасывает отклонённые проверкой сообщения до подсчёта бюджета;
+  - учитывает в бюджете системное сообщение с канарейкой, которое добавит `LLMService`;
+  - ставит вопросы одного чата в очередь.
+- **Миграция Alembic** `migrations/versions/1e32bd1b06ce_chat_tables.py`. К схеме задания добавлен столбец `seq` — порядок вставки при равном `created_at`.
+- **Docker.** В `compose.yaml` добавлен сервис `postgres` (Postgres 16, порт `127.0.0.1:5433`), миграции попали в образ.
+- **Тесты.** 98 тестов в `tests/chat/`. Контракт хранилищ — одни и те же функции для JSON и Postgres.
+
+Новые переменные — в `.env.example`, раздел «Чаты с историей на сервере».
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt                 # aiofiles, sqlalchemy[asyncio], asyncpg, alembic
+docker start multapi-redis                      # кеш и лимит (блок 3.8)
+docker compose up -d postgres                   # Postgres 16 на 127.0.0.1:5433
+alembic upgrade head                            # таблицы chats и chat_messages
+python -m pytest tests/chat -v                  # 98 passed: [json] и [postgres]
+python scripts/check_tokens.py                  # count_tokens против usage.prompt_tokens: llama3.2
+python scripts/check_tokens.py --judge --model openai/gpt-4o-mini   # словарь o200k; нужен ключ OpenRouter с кредитами
+uvicorn app.main:app --port 8000                # CHAT_REPOSITORY= (json) или postgres в .env
+python scripts/chat_scenario.py --runs 3        # во втором терминале: сценарий «Аня» три раза подряд
+```
+
+Шаги критериев — в [`docs/chat.md`](docs/chat.md#эндпоинты): создать чат, «Привет, меня зовут Аня», «Как меня зовут?», история, очистка. Что проверить в хранилище:
+
+```powershell
+Get-Content "var\chats\chats\$chat\messages.jsonl" -Encoding UTF8     # JSON: по строке на сообщение и строка soft_delete
+docker compose exec postgres psql -U multapi -d multapi -c "select role, left(content, 30), deleted_at from chat_messages order by seq"
+```
+
+### Результаты
+
+**Песочница (Linux).** uvicorn, настоящий Postgres 16 и поддельная потоковая модель, которая отвечает по истории:
+- **JSON и Postgres** — все шаги критериев проходят:
+  - ответ приходит событиями по мере генерации, а не одним блоком, в конце `data: [DONE]`;
+  - на втором вопросе модель отвечает «Вас зовут Аня»;
+  - история возвращается в порядке `[user, assistant, user, assistant]`;
+  - после `DELETE` история пустая, а модель имени не знает;
+  - в `messages.jsonl` очистка видна строкой `{"type": "soft_delete", ...}`, в Postgres строки остались с `deleted_at`.
+- **Обрыв соединения** (`curl --max-time` посреди ответа) — в историю сохранилось ровно то, что дошло до клиента. В логе — `chat_stream_interrupted` и `llm_stream_cancelled`.
+- **Два вопроса одновременно** в один чат — история `[user, assistant, user, assistant]`: второй вопрос дождался ответа на первый.
+- **Недоступный Postgres** — сервис стартует с `chat_storage_unavailable` в логе, а `/chats` отвечает `503`. **`CHAT_CONTEXT_STRATEGY=hybrid`** — сервис не стартует, ошибка называет причину.
+- **Docker-образ** собран, `alembic upgrade head` выполнен в контейнере, чат с Postgres работает.
+- **Тесты:** `pytest` — 495 passed, `tests/unit` и `tests/chat` с `-W error` — 369 passed, `python -m unittest discover -s tests` — 126 тестов, `OK`.
+- **Ревью кода** отдельным агентом нашло 12 проблем. 11 исправлены, на каждое исправление в коде есть тест:
+  - обрыв соединения с провайдером посреди ответа давал 500 без события `error`;
+  - обрывок строки в JSONL «съедал» следующую запись, в том числе маркер очистки;
+  - персональные данные уходили модели без масок;
+  - лимиты API не были согласованы с проверкой входа блока 3.8: системный промпт чата, не прошедший её, давал отказ на каждый вопрос, а отклонённое длинное сообщение вытесняло историю из бюджета;
+  - короткий ответ приходил одним блоком (`StreamGuard` придерживал 80 символов);
+  - CORS не пускал `DELETE`;
+  - NUL в тексте давал 503 вместо 422;
+  - два одновременных вопроса перемешивали историю;
+  - адрес `postgresql://` ронял старт;
+  - словарь tiktoken мог не скачаться в сети с проверкой HTTPS;
+  - неточности в документации.
+
+  Двенадцатая проблема оставлена как ограничение и описана в `docs/chat.md`: если клиент ушёл раньше первого фрагмента, в историю попадает первый фрагмент, которого он не видел.
+
+**Windows, Ollama `llama3.2` на CPU** (8 октября 2026):
+- **Старт** в обоих режимах: `tiktoken_ready`, затем `chat_storage_ready` с `"repository": "json"` или `"postgres"`.
+- **Тесты:** `tests/chat` — 98 passed, `[json]` и `[postgres]`; с Presidio (`requirements-presidio.txt`) `tests/test_pii_presidio.py` — 7 passed без пропусков.
+- **Шаги критериев вручную** (`curl.exe` и `Invoke-RestMethod` из `docs/chat.md`) и `scripts/chat_scenario.py --runs 3` — в каждом режиме:
+  - ответ приходит событиями `data:` по мере генерации, в конце `data: [DONE]`;
+  - на «Как меня зовут?» модель называет Аню — 6 из 6 прогонов скрипта;
+  - история `[user, assistant, user, assistant]`, после `DELETE` — `ok` и 0 сообщений;
+  - в `messages.jsonl` — четыре строки диалога, `{"type": "soft_delete", ...}`, затем новый вопрос и ответ; в Postgres у четырёх строк заполнен `deleted_at`, у двух новых — пусто.
+- **Что делает сама модель:**
+  - после очистки имени Аня она не знает, но в 6 из 6 прогонов выдумывает другое («Иван», «Олег») — история при этом пустая. Как подбирался промпт — в [`docs/chat.md`](docs/chat.md#стратегия-контекста--скользящее-окно);
+  - в 1 из 6 прогонов модель начала пересказывать системное сообщение с канарейкой. `StreamGuard` блока 3.8 остановил ответ (`llm_guard_blocked`, `reason: canary`), клиент получил отказ, ход записан с `outcome: filtered`.
+- **Токены:** `check_tokens.py` — −22,5 % как есть и −11,4 % без постоянной шапки шаблона; живой чат, 17 ходов — от −15,1 до −14,6 % и от −5,9 до −3,8 %. Разбор — в [`docs/chat.md`](docs/chat.md#стратегия-контекста--скользящее-окно).
+- **Что нашли прогоны и что исправлено:**
+  - оценка `prompt_tokens_est` не учитывала системное сообщение с канарейкой, которое добавляет `LLMService`, — теперь оно в бюджете;
+  - две формулировки системного промпта чата провоцировали выдумки или забывание имени — подобрана третья;
+  - подсказки по установке Presidio советовали `python -m spacy download`, а он не работает в сети с подменой HTTPS-сертификатов — теперь `pip install -r requirements-presidio.txt`;
+  - `check_tokens.py` падал с трассировкой на ответе `402` OpenRouter — теперь пишет причину одной строкой.
+
+### Соответствие критериям блока 4.1
+
+| Критерий | Реализация |
+|---|---|
+| `uvicorn` стартует при `CHAT_REPOSITORY=json` и `postgres` | `init_chat_storage` в lifespan: `chat_storage_ready` или `chat_storage_unavailable` с подсказкой |
+| `POST /chats` → 200 и `chat_id` | `routes.create_chat`; `test_stateful_chat_scenario` |
+| Ответ кусками, в конце `data: [DONE]` | `StreamingResponse` с `data: <фрагмент>`; многострочный фрагмент — несколько строк `data:` |
+| Второй вопрос знает «Аня» | история из хранилища → скользящее окно → модель; `test_history_reaches_the_model`, сценарий в `test_routes.py` |
+| `GET /chats/{id}/messages` — `[user, assistant, …]` | `list_messages`: последние N, от старых к новым |
+| `DELETE` → 200, `GET` → `[]`, новый вопрос без «знания» | `soft_delete_messages`; `test_clear_history_starts_from_scratch` |
+| JSON: по записи на строку, `"type": "soft_delete"` отдельной строкой | `json_repo.py`; `test_json_layout_on_disk`, `test_json_soft_delete_is_appended_marker` |
+| Postgres: строки не удалены, `deleted_at` проставлен | `pg_repo.py`; `test_pg_soft_delete_keeps_rows` |
+| `pytest tests/chat/test_repository_contract.py` зелёный для обеих реализаций | параметризованная фикстура `repo`: 12 сценариев × `[json]`, `[postgres]` = 24 теста |
+| `count_tokens` в пределах ±10 % от `usage.prompt_tokens` | `scripts/check_tokens.py`. На `llama3.2` (Windows) — вне допуска: −22,5 % как есть (124 против 160), −11,4 % без постоянной шапки шаблона (+20 токенов). Причина — токенизатор и разметка llama3, а не ошибка подсчёта; разбор и вывод для `SAFETY_MARGIN` — в [`docs/chat.md`](docs/chat.md#стратегия-контекста--скользящее-окно). Модели со словарём `o200k_base` на OpenRouter платные, учебный ключ получает `402`; по разметке OpenAI ожидаемое расхождение на GPT-4o — около +2 % (расчёт, не замер) |
+| `docs/chat.md`: Mermaid, стратегия с обоснованием, curl для всех эндпоинтов | [`docs/chat.md`](docs/chat.md) |
 
 ## Конфигурация (.env)
 

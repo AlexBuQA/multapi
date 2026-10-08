@@ -112,6 +112,11 @@ class TestBackgroundMasking(ServiceCase):
     llm_delay = 0.3
 
     async def test_masking_runs_in_parallel_with_llm_call(self):
+        # Прогрев: первый запрос процесса платит за разовую работу (импорты, загрузка
+        # руководства, первый поток пула) — в одиночном запуске файла это 0,3–0,5 с, и
+        # замер ниже падал без всякой связи с параллельностью.
+        app.state.pii_redactor = FakeRedactor()
+        await self.chat()
         redactor = FakeRedactor(delay=0.3)
         app.state.pii_redactor = redactor
         started = time.perf_counter()
@@ -155,7 +160,7 @@ class TestLoadRedactor(unittest.TestCase):
     def test_without_model_falls_back_to_regex(self):
         with captured_logs("INFO") as logs:
             self.assertIsNone(load_redactor("ru_core_news_nonexistent"))
-        self.assertIn("python -m spacy download", events(logs, "presidio_unavailable")[0]["error"])
+        self.assertIn("requirements-presidio.txt", events(logs, "presidio_unavailable")[0]["error"])
 
 
 @unittest.skipUnless(presidio_installed(), "Presidio или ru_core_news_md не установлены")

@@ -52,6 +52,7 @@ docs/
 samples/
 outputs/
 logs/
+var/
 examples/
 scripts/
 tools/
@@ -59,6 +60,7 @@ src/
 demo_*.py
 main.py
 requirements.txt
+requirements-presidio.txt
 
 # Файлы самого Docker
 Dockerfile

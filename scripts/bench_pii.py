@@ -2,8 +2,7 @@
 Сколько стоит маскирование PII (блок 3.6, задача 5): regex против Presidio.
 
 Нужны пакеты Presidio и русская модель spaCy (в requirements.txt их нет):
-    pip install presidio-analyzer presidio-anonymizer
-    python -m spacy download ru_core_news_md
+    pip install -r requirements-presidio.txt
     python scripts/bench_pii.py
 
 Колонки таблицы:

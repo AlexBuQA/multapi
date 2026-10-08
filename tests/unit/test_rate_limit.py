@@ -224,3 +224,13 @@ async def test_json_responses_declare_utf8(limited):
 ])
 def test_with_charset(given, expected):
     assert with_charset(given) == expected
+
+
+def test_chat_messages_are_limited_too():
+    """Блок 4.1: вопрос в чат тоже вызывает модель — тот же счётчик, что у /chat."""
+    from app.services.security.rate_limit import is_limited
+
+    assert is_limited("/chat") and is_limited("/chat/stream")
+    assert is_limited("/chats/0b7c6c1e-6f3a-4c55-9a43-0d6c1f6e2b11/messages")
+    for path in ("/chats", "/chats/0b7c6c1e-6f3a-4c55-9a43-0d6c1f6e2b11", "/chats/x/messages/extra", "/health", None):
+        assert not is_limited(path), path

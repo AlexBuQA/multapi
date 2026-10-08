@@ -19,8 +19,7 @@ Regex из pii.py ловит то, что имеет формат: email, тел
 
 Включается переменной PII_PRESIDIO=true. Зависимости ставятся отдельно и в Docker-образ
 не входят (+~500 МБ):
-    pip install presidio-analyzer presidio-anonymizer
-    python -m spacy download ru_core_news_md
+    pip install -r requirements-presidio.txt
 Если пакетов или модели нет, сервис пишет presidio_unavailable и работает на regex.
 """
 from __future__ import annotations
@@ -52,7 +51,7 @@ class NameRedactor:
         # Presidio сам скачивает отсутствующую модель — на старте сервиса это сюрприз,
         # поэтому проверяем заранее и просим поставить её явно.
         if not spacy.util.is_package(model):
-            raise OSError(f"модель spaCy {model} не установлена: python -m spacy download {model}")
+            raise OSError(f"модель spaCy {model} не установлена: pip install -r requirements-presidio.txt")
         provider = NlpEngineProvider(nlp_configuration={
             "nlp_engine_name": "spacy",
             "models": [{"lang_code": "ru", "model_name": model}],
@@ -87,8 +86,7 @@ def load_redactor(model: str = SPACY_MODEL) -> NameRedactor | None:
         redactor.preview_sync("Прогрев модели: Иван Петров, Москва.")   # первый вызов заметно дольше
     except (ImportError, OSError) as exc:
         log.warning("presidio_unavailable", error=repr(exc)[:300],
-                    note="маскирование только regex: pip install presidio-analyzer presidio-anonymizer "
-                         f"&& python -m spacy download {model}")
+                    note="маскирование только regex: pip install -r requirements-presidio.txt")
         return None
     log.info("presidio_ready", model=model, load_ms=round((time.perf_counter() - started) * 1000))
     return redactor

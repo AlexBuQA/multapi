@@ -17,6 +17,9 @@ logs/tool_calls.jsonl
 logs/llm_calls.jsonl
 logs/service.jsonl
 
+# История чатов в JSONL (блок 4.1, CHAT_STORAGE_DIR по умолчанию)
+var/
+
 # Генерируемые аудио-ответы
 outputs/*.mp3
 outputs/*.wav

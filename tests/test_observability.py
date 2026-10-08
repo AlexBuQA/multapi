@@ -60,7 +60,9 @@ PROVIDER.add_span_processor(SimpleSpanProcessor(EXPORTER))
 trace.set_tracer_provider(PROVIDER)
 
 PII_PROMPT = "Мой email ivan@mail.ru, тел +7 (999) 123-45-67, карта 4111 1111 1111 1111. Не приходит письмо."
-PII_FRAGMENTS = ("ivan@mail.ru", "999", "123-45-67", "4111")
+# Фрагменты с разделителями: голые «999» и «4111» встречались в случайных trace_id и
+# временных метках, и тест падал без утечки (например, trace_id …29996d…).
+PII_FRAGMENTS = ("ivan@mail.ru", "(999)", "123-45-67", "4111 1111")
 
 
 def completion_json(model: str) -> dict:

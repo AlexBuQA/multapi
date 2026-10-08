@@ -1,10 +1,16 @@
-# Стек сервиса: HTTP-сервис app + Redis для кеша (блок 3.5) + Phoenix для трейсов (блок 3.6).
+# Стек сервиса: HTTP-сервис app + Redis для кеша (блок 3.5) + Phoenix для трейсов (блок 3.6)
+# + Postgres для истории чатов (блок 4.1).
 #
 #   cp .env.example .env           # вписать LLM__OPENAI_API_KEY (для Ollama — любое значение)
-#   docker compose up -d --build --wait   # ждёт, пока все три сервиса станут healthy
+#   docker compose up -d --build --wait   # ждёт, пока все сервисы станут healthy
 #   docker compose ps
 #
 # Интерфейс Phoenix: http://127.0.0.1:6006 (проект diploma-fastapi).
+#
+# История чатов в Postgres (CHAT_REPOSITORY=postgres в .env): после первого запуска
+# применить миграцию — docker compose exec app alembic upgrade head.
+# Для uvicorn на хосте и тестов достаточно одного Postgres: docker compose up -d postgres,
+# он доступен на 127.0.0.1:5433.
 #
 # Модель (Ollama) работает на хосте, а не в контейнере: из контейнера она доступна
 # по адресу host.docker.internal.
@@ -23,6 +29,10 @@ services:
     environment:
       # Внутри compose-сети Redis — это имя сервиса redis, а не localhost.
       REDIS_URL: redis://redis:6379/0
+      # Блок 4.1: история чатов. Postgres — по имени сервиса; для CHAT_REPOSITORY=json
+      # файлы лежат в томе chat_data и переживают пересоздание контейнера.
+      DATABASE_URL: postgresql+asyncpg://multapi:${POSTGRES_PASSWORD:-multapi}@postgres:5432/multapi
+      CHAT_STORAGE_DIR: /app/var/chats
       # localhost внутри контейнера — сам контейнер. По умолчанию — Ollama на хосте;
       # для облачного провайдера задайте DOCKER_LLM_BASE_URL в .env.
       LLM__BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
@@ -32,8 +42,12 @@ services:
     extra_hosts:
       # Docker Desktop знает host.docker.internal сам; строка нужна для Docker на Linux.
       - "host.docker.internal:host-gateway"
+    volumes:
+      - chat_data:/app/var/chats
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       phoenix:
         # Phoenix нужен только для трейсов: сервис отвечает и без него, а спаны,
@@ -56,6 +70,28 @@ services:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: multapi
+      POSTGRES_DB: multapi
+      # Пароль для учебного стенда; для общего сервера — POSTGRES_PASSWORD в .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-multapi}
+    ports:
+      # Только на 127.0.0.1 и не 5432: uvicorn на хосте, alembic и тесты ходят сюда, а
+      # 5432 часто занят своим Postgres. С других компьютеров база не видна.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "multapi", "-d", "multapi"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -96,3 +132,5 @@ services:
 volumes:
   redis_data: {}
   phoenix-data: {}
+  pg_data: {}
+  chat_data: {}
