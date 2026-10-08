@@ -5,6 +5,14 @@ JsonChatRepository (блок 4.1): история в файлах — для л�
 Структура на диске (base_dir — CHAT_STORAGE_DIR, по умолчанию var/chats):
     chats/<chat_id>/chat.json        метаданные чата (Chat)
     chats/<chat_id>/messages.jsonl   одна ChatMessage на строку
+    owners/<sha256>.json             {"chat_id": ...} — чат клиента для get_or_create_chat
+
+- get_or_create_chat (блок 4.2): ключ — sha256 от interface и owner_external_id (в
+  owner_external_id может быть что угодно, от email до символов, запрещённых в именах
+  файлов). Файл owners/<ключ>.json указывает на чат клиента. Нет файла — один раз
+  просматриваются все chat.json: чаты, созданные до блока 4.2 через create_chat, тоже
+  находятся, берётся самый ранний. Одновременные вызовы с одним ключом в процессе
+  сервиса идут по очереди (asyncio.Lock на ключ).
 
 - Запись — только дописыванием в конец (aiofiles.open(path, "a")), одна строка
   model_dump_json() на сообщение. Файл никогда не переписывается: ни при новом
@@ -25,7 +33,10 @@ JsonChatRepository (блок 4.1): история в файлах — для л�
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import weakref
 from pathlib import Path
 from uuid import UUID
 
@@ -40,6 +51,15 @@ log = get_logger()
 SOFT_DELETE = "soft_delete"
 CHAT_FILE = "chat.json"
 MESSAGES_FILE = "messages.jsonl"
+OWNERS_DIR = "owners"
+
+# Замки get_or_create_chat — на процесс, а не на экземпляр: репозиторий создаётся заново
+# на каждый запрос (app/chat/deps.py). Ключ — путь к файлу owners/<ключ>.json.
+_owner_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+def owner_key(owner_external_id: str, interface: str) -> str:
+    return hashlib.sha256(f"{interface}\x00{owner_external_id}".encode()).hexdigest()
 
 
 def soft_delete_marker() -> str:
@@ -96,6 +116,68 @@ class JsonChatRepository:
         except OSError as exc:
             raise ChatStorageError(f"Не удалось создать чат в {self.base_dir}: {exc.strerror or exc}") from exc
         return chat
+
+    def _owner_file(self, owner_external_id: str, interface: str) -> Path:
+        return self.base_dir / OWNERS_DIR / f"{owner_key(owner_external_id, interface)}.json"
+
+    async def get_or_create_chat(self, owner_external_id: str, interface: str,
+                                 system_prompt: str | None = None) -> tuple[Chat, bool]:
+        path = self._owner_file(owner_external_id, interface)
+        lock = _owner_locks.get(str(path))
+        if lock is None:
+            lock = _owner_locks[str(path)] = asyncio.Lock()
+        async with lock:
+            chat = await self._chat_by_owner_file(path)
+            if chat is not None:
+                return chat, False
+            chat = await self._scan_for_owner(owner_external_id, interface)
+            created = chat is None
+            if chat is None:
+                chat = await self.create_chat(owner_external_id, interface, system_prompt)
+            await self._write_owner_file(path, chat.id)
+            return chat, created
+
+    async def _chat_by_owner_file(self, path: Path) -> Chat | None:
+        try:
+            if not await aiofiles.os.path.isfile(path):
+                return None
+            async with aiofiles.open(path, encoding="utf-8") as fh:
+                chat_id = UUID(json.loads(await fh.read())["chat_id"])
+        except OSError as exc:
+            raise ChatStorageError() from exc
+        except (ValueError, KeyError, TypeError):
+            log.warning("chat_owner_file_skipped", path=path.name)
+            return None
+        return await self.get_chat(chat_id)            # чат удалили с диска — None, создастся новый
+
+    async def _scan_for_owner(self, owner_external_id: str, interface: str) -> Chat | None:
+        """Самый ранний чат клиента среди всех chat.json — для чатов без файла owners/."""
+        found: list[Chat] = []
+        chats_dir = self.base_dir / "chats"
+        try:
+            if not await aiofiles.os.path.isdir(chats_dir):
+                return None
+            names = await aiofiles.os.listdir(chats_dir)
+        except OSError as exc:
+            raise ChatStorageError() from exc
+        for name in names:
+            try:
+                chat = await self.get_chat(UUID(name))
+            except (ValueError, ChatStorageError):
+                continue                               # чужая папка или битый chat.json
+            if chat is not None and chat.owner_external_id == owner_external_id and chat.interface == interface:
+                found.append(chat)
+        return min(found, key=lambda c: (c.created_at, str(c.id))) if found else None
+
+    async def _write_owner_file(self, path: Path, chat_id: UUID) -> None:
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            await aiofiles.os.makedirs(path.parent, exist_ok=True)
+            async with aiofiles.open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+                await fh.write(json.dumps({"chat_id": str(chat_id)}))
+            await aiofiles.os.replace(tmp, path)
+        except OSError as exc:
+            raise ChatStorageError(f"Не удалось сохранить чат клиента в {self.base_dir}: {exc.strerror or exc}") from exc
 
     async def get_chat(self, chat_id: UUID) -> Chat | None:
         path = self._chat_dir(chat_id) / CHAT_FILE

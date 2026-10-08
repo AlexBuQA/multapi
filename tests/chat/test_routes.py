@@ -37,7 +37,10 @@ async def client() -> httpx.AsyncClient:
 
 
 async def create_chat(http: httpx.AsyncClient, **body) -> str:
-    response = await http.post("/chats", json={"owner_external_id": "test-1", "interface": "cli", **body})
+    # Свой владелец на каждый вызов: POST /chats идемпотентен (блок 4.2), а база Postgres
+    # для тестов общая на весь прогон.
+    body = {"owner_external_id": f"test-{uuid4().hex[:12]}", "interface": "cli", **body}
+    response = await http.post("/chats", json=body)
     assert response.status_code == 200, response.text
     return response.json()["chat_id"]
 
@@ -99,6 +102,19 @@ async def test_chat_metadata_and_limit(chat_app):
             await ask(http, chat_id, text)
         last = (await http.get(f"/chats/{chat_id}/messages", params={"limit": 2})).json()
         assert [m["role"] for m in last] == ["user", "assistant"] and last[0]["content"] == "два"
+
+
+async def test_post_chats_is_idempotent(chat_app):
+    """Блок 4.2: Telegram-бот вызывает POST /chats на каждое сообщение — чат один."""
+    async with await client() as http:
+        body = {"owner_external_id": "123456789", "interface": "telegram"}
+        first = (await http.post("/chats", json=body)).json()
+        again = (await http.post("/chats", json={**body, "system_prompt": "Другой"})).json()
+        web = (await http.post("/chats", json={**body, "interface": "web"})).json()
+        chat = (await http.get(f"/chats/{first['chat_id']}")).json()
+    assert first["created"] is True and again == {"chat_id": first["chat_id"], "created": False}
+    assert web["created"] is True and web["chat_id"] != first["chat_id"]
+    assert chat["system_prompt"] is None
 
 
 # ---------------------------------------------------------------- ошибки

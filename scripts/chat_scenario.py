@@ -5,7 +5,7 @@
     python scripts/chat_scenario.py              # 3 прогона
     python scripts/chat_scenario.py --runs 5 --url http://127.0.0.1:8000
 
-Каждый прогон: новый чат -> «Привет, меня зовут Аня» -> «Как меня зовут?» -> история ->
+Каждый прогон: новый чат (свой owner_external_id) -> «Привет, меня зовут Аня» -> «Как меня зовут?» -> история ->
 очистка -> история пуста -> снова «Как меня зовут?». Скрипт печатает ответы и проверяет:
 - каждый ответ приходит потоком SSE и заканчивается [DONE];
 - история — [user, assistant, user, assistant], после очистки — пустая;
@@ -26,8 +26,16 @@ import asyncio
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
+from uuid import uuid4
 
 import httpx
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from bot.services.sse import iter_sse, sse_lines  # noqa: E402
 
 GREETING = "Привет, меня зовут Аня"
 QUESTION = "Как меня зовут?"
@@ -52,44 +60,32 @@ class RunResult:
 
 
 async def ask(http: httpx.AsyncClient, chat_id: str, text: str) -> str:
-    """Ответ модели целиком: события SSE склеены, строки data: одного события — через \\n."""
+    """Ответ модели целиком. Поток SSE разбирает тот же парсер, что у Telegram-бота
+    (bot/services/sse.py): строки data: одного события — через \\n, концы строк — только
+    \\r\\n, \\r и \\n."""
     events: list[str] = []
-    lines: list[str] = []
-    kind = "message"
     done = False
-
-    def finish_event() -> None:
-        nonlocal kind, done
-        data = "\n".join(lines)
-        lines.clear()
-        if kind == "error":
-            raise ScenarioError(f"событие error посреди ответа: {data[:300]}")
-        if data == "[DONE]":
-            done = True
-        else:
-            events.append(data)
-        kind = "message"
-
     async with http.stream("POST", f"/chats/{chat_id}/messages", json={"content": text}) as response:
         if response.status_code != 200:
             body = (await response.aread()).decode("utf-8", "replace")
             raise ScenarioError(f"POST /chats/{chat_id}/messages: {response.status_code} {body[:300]}")
-        async for line in response.aiter_lines():
-            if line.startswith("event:"):
-                kind = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                lines.append(line[len("data:"):].removeprefix(" "))
-            elif not line and lines:
-                finish_event()
-    if lines:
-        finish_event()
+        async for event in iter_sse(sse_lines(response.aiter_text())):
+            if event.event == "error":
+                raise ScenarioError(f"событие error посреди ответа: {event.data[:300]}")
+            if event.data == "[DONE]":
+                done = True
+                break
+            events.append(event.data)
     if not done:
         raise ScenarioError("поток закончился без data: [DONE]")
     return "".join(events)
 
 
 async def run_once(http: httpx.AsyncClient) -> RunResult:
-    created = await http.post("/chats", json={"owner_external_id": "scenario", "interface": "cli"})
+    # Новый владелец на каждый прогон: POST /chats идемпотентен (блок 4.2) и с тем же
+    # owner_external_id вернул бы чат прошлого прогона вместе с его историей.
+    owner = f"scenario-{uuid4().hex[:8]}"
+    created = await http.post("/chats", json={"owner_external_id": owner, "interface": "cli"})
     if created.status_code != 200:
         raise ScenarioError(f"POST /chats: {created.status_code} {created.text[:300]}")
     chat_id = created.json()["chat_id"]

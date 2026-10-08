@@ -7,7 +7,7 @@ httpx>=0.26,<1.0
 # Блок 3.1: промпты в Jinja2, проверка JSON Schema, настройки через pydantic-settings
 jinja2>=3.1,<4.0
 jsonschema>=4.18,<5.0
-pydantic-settings>=2.2,<3.0
+pydantic-settings>=2.7,<3.0   # 2.7+ — NoDecode для BOT_ADMIN_IDS=1,2 (блок 4.2)
 
 # Блоки 3.3–3.4: асинхронный клиент и HTTP-сервис на FastAPI, кеш в Redis
 fastapi>=0.142,<1.0          # 0.142+ — встроенная трассировка HTTP-запросов (блок 3.6)
@@ -34,3 +34,8 @@ aiofiles>=24.1,<26.0
 sqlalchemy[asyncio]>=2.0.30,<3.0
 asyncpg>=0.29,<1.0
 alembic>=1.13,<2.0
+
+# Блок 4.2: Telegram-бот (python -m bot) — тонкий клиент chat-сервиса; в Docker-образ не входит.
+# aiohttp-socks — для BOT_PROXY_URL, если api.telegram.org доступен только через прокси.
+aiogram>=3.20,<4.0
+aiohttp-socks>=0.10,<1.0

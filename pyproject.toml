@@ -6,7 +6,7 @@
 # После изменения списка зависимостей обновите lock-файл: uv lock
 [project]
 name = "multapi-llm-service"
-version = "4.1.0"
+version = "4.2.0"
 description = "HTTP-сервис ассистента техподдержки на FastAPI: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов"
 requires-python = ">=3.12"
 dependencies = [

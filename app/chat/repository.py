@@ -11,6 +11,11 @@
   строки; limit — последние N, а не первые;
 - сообщения до последнего soft_delete_messages в list_messages не попадают, но физически
   остаются в хранилище;
+- get_or_create_chat (блок 4.2) идемпотентен по паре (owner_external_id, interface):
+  повторный вызов возвращает тот же чат и created=False, системный промпт при этом не
+  меняется. Если чатов с этой парой несколько (созданы create_chat до блока 4.2), —
+  самый ранний. Одновременные вызовы с одной парой создают один чат;
+- create_chat всегда создаёт новый чат;
 - get_chat и list_messages для неизвестного чата — None и пустой список, без исключения;
 - append_message в неизвестный чат — ChatNotFoundError: сообщение без чата не сохраняется;
 - soft_delete_messages для неизвестного чата ничего не делает;
@@ -28,6 +33,9 @@ from app.chat.domain import Chat, ChatMessage
 class ChatRepository(Protocol):
     async def create_chat(self, owner_external_id: str, interface: str,
                           system_prompt: str | None = None) -> Chat: ...
+
+    async def get_or_create_chat(self, owner_external_id: str, interface: str,
+                                 system_prompt: str | None = None) -> tuple[Chat, bool]: ...
 
     async def get_chat(self, chat_id: UUID) -> Chat | None: ...
 

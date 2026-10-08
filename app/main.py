@@ -137,7 +137,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title=settings.app_name,
-    version="4.1.0",
+    version="4.2.0",
     description=(
         "Чат-ядро ассистента техподдержки: ответ целиком (`POST /chat`) и потоком "
         "(`POST /chat/stream`), кеш в Redis, каталог моделей; чаты с историей на сервере "

@@ -11,6 +11,12 @@ PostgresChatRepository (блок 4.1): история в Postgres через asy
 - list_messages: SELECT ... WHERE chat_id = ? AND deleted_at IS NULL ORDER BY created_at
   DESC LIMIT N — последние N по частичному индексу — и reversed(): модели нужен
   хронологический порядок. При равном created_at порядок задаёт seq.
+- get_or_create_chat (блок 4.2): в одной транзакции pg_advisory_xact_lock по ключу
+  interface:owner_external_id, SELECT самого раннего чата с этой парой и, если его нет,
+  INSERT. Одновременные запросы с одним ключом — даже из разных копий сервиса — идут по
+  очереди, а уникальный индекс не нужен: в базе уже могут быть чаты-дубли, созданные
+  create_chat до блока 4.2, — из них берётся самый ранний. Поиск — по индексу
+  ix_chats_owner_interface.
 - soft_delete_messages: UPDATE ... SET deleted_at = NOW() WHERE chat_id = ? AND
   deleted_at IS NULL — строки остаются в таблице.
 - Ошибки SQLAlchemy и сети (нет соединения, нет таблиц) -> ChatStorageError; причина — в
@@ -52,6 +58,26 @@ class PostgresChatRepository:
         async with self._transaction():
             self.session.add(ChatRow(**chat.model_dump()))
         return chat
+
+    async def get_or_create_chat(self, owner_external_id: str, interface: str,
+                                 system_prompt: str | None = None) -> tuple[Chat, bool]:
+        lock_key = func.hashtextextended(f"{interface}:{owner_external_id}", 0)
+        stmt = (
+            select(ChatRow)
+            .where(ChatRow.owner_external_id == owner_external_id, ChatRow.interface == interface)
+            .order_by(ChatRow.created_at, ChatRow.id)
+            .limit(1)
+        )
+        async with self._transaction():
+            # Замок до конца транзакции: второй такой же запрос ждёт здесь и после COMMIT
+            # первого уже находит его чат.
+            await self.session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            row = await self.session.scalar(stmt)
+            if row is not None:
+                return Chat.model_validate(row, from_attributes=True), False
+            chat = Chat(owner_external_id=owner_external_id, interface=interface, system_prompt=system_prompt)
+            self.session.add(ChatRow(**chat.model_dump()))
+        return chat, True
 
     async def get_chat(self, chat_id: UUID) -> Chat | None:
         async with self._transaction():

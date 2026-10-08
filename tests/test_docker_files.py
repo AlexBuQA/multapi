@@ -202,7 +202,10 @@ class TestSecrets(unittest.TestCase):
                      "SECURITY__ENABLED", "SECURITY__MAX_INPUT_CHARS", "RATE_LIMIT_PER_MIN", "LOG_FILE",
                      # блок 4.1
                      "CHAT_REPOSITORY", "CHAT_STORAGE_DIR", "DATABASE_URL", "CHAT_CONTEXT_STRATEGY",
-                     "CHAT_CONTEXT_WINDOW", "CHAT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "RESPONSE_TOKENS", "SAFETY_MARGIN"):
+                     "CHAT_CONTEXT_WINDOW", "CHAT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "RESPONSE_TOKENS", "SAFETY_MARGIN",
+                     # блок 4.2
+                     "BOT_TOKEN", "BACKEND_URL", "BOT_ADMIN_IDS", "BACKEND_TIMEOUT", "BOT_USE_SYSTEM_CERTS",
+                     "BOT_PROXY_URL"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -211,7 +214,7 @@ class TestSecrets(unittest.TestCase):
         example = _read(".env.example")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
         for line in example.splitlines():
-            if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY)\s*=", line):
+            if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL)\s*=", line):
                 self.assertRegex(line, r"=\s*(#|$)", line)        # значение пустое
 
     def test_env_not_tracked_by_git(self):
@@ -223,6 +226,12 @@ class TestSecrets(unittest.TestCase):
         except (OSError, subprocess.CalledProcessError):
             self.skipTest("git недоступен")
         self.assertFalse([f for f in files if re.search(r"(^|/)\.env$", f)])
+
+    def test_env_in_gitignore_and_bot_outside_image(self):
+        """Блок 4.2: токен бота живёт в .env — тот в .gitignore; бот в образ сервиса не входит."""
+        self.assertIn(".env", _read(".gitignore").splitlines())
+        self.assertIn("bot/", _read(".dockerignore").splitlines())
+        self.assertNotIn("aiogram", _read("pyproject.toml"))
 
 
 if __name__ == "__main__":

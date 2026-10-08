@@ -2,7 +2,8 @@
 Эндпоинты чатов (блок 4.1). Контракт /chats/{id}/messages стабилен на весь курс: поверх
 него работают Telegram-бот (M4Б2), RAG (M5) и инструменты агентов (M6).
 
-    POST   /chats                       создать чат -> {"chat_id": ...}
+    POST   /chats                       чат клиента: найти или создать -> {"chat_id", "created"}
+                                        (блок 4.2: идемпотентен по owner_external_id + interface)
     GET    /chats/{chat_id}             метаданные чата (404, если нет)
     POST   /chats/{chat_id}/messages    вопрос -> ответ потоком SSE
     GET    /chats/{chat_id}/messages    история, от старых к новым (?limit=50)
@@ -66,6 +67,7 @@ class CreateChatIn(BaseModel):
 
 class CreateChatOut(BaseModel):
     chat_id: UUID
+    created: bool = Field(description="true — чат создан этим запросом, false — вернулся существующий")
 
 
 class MessageIn(BaseModel):
@@ -109,10 +111,13 @@ async def _events(first: str | None, chunks: AsyncIterator[str]) -> AsyncIterato
     yield DONE
 
 
-@router.post("", response_model=CreateChatOut, summary="Создать чат", responses=STORAGE)
+@router.post("", response_model=CreateChatOut, summary="Чат клиента: найти или создать", responses=STORAGE)
 async def create_chat(body: CreateChatIn, service: ChatServiceDep) -> CreateChatOut:
-    chat = await service.create_chat(body.owner_external_id, body.interface, body.system_prompt)
-    return CreateChatOut(chat_id=chat.id)
+    """Идемпотентен (блок 4.2): повторный запрос с теми же owner_external_id и interface
+    возвращает тот же chat_id и created=false. system_prompt учитывается только при
+    создании чата."""
+    chat, created = await service.get_or_create_chat(body.owner_external_id, body.interface, body.system_prompt)
+    return CreateChatOut(chat_id=chat.id, created=created)
 
 
 @router.get("/{chat_id}", response_model=Chat, summary="Метаданные чата", responses={**NOT_FOUND, **STORAGE})
