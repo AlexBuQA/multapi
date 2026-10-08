@@ -40,6 +40,7 @@ async def test_model_with_memory_passes_every_check(use_llm, capsys):
     out = capsys.readouterr().out
     assert "< Вас зовут Аня." in out and "< Вы не называли своего имени." in out
     assert "2/2  второй ответ называет Аню" in out and "2/2  после очистки имени нет" in out
+    assert "2/2  ответы без отказа защитного слоя" in out
 
 
 async def test_model_that_invents_a_name_fails(use_llm, capsys):
@@ -70,6 +71,30 @@ async def test_service_down_is_exit_2(capsys):
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse), base_url="http://test") as http:
         assert await chat_scenario.run(http, runs=3) == 2
     assert "запустите uvicorn" in capsys.readouterr().out
+
+
+async def test_guard_refusal_is_counted(use_llm, capsys):
+    """Как в блоке 4.2: llama3.2 начала пересказывать канарейку, StreamGuard заменил ответ отказом."""
+    from app.services.guardrails import refusal_text
+
+    def reply(req) -> str:
+        asked = [m.content for m in req.messages if m.role == "user"]
+        if asked == [chat_scenario.GREETING]:
+            return "Привет, Аня!"
+        return refusal_text("Личный кабинет") if len(asked) > 1 else "Вы не называли своего имени."
+
+    async with use_llm(FakeLLM(reply=reply)) as http:
+        assert await chat_scenario.run(http, runs=1) == 1
+    out = capsys.readouterr().out
+    assert "[!]  ответы без отказа защитного слоя" in out and "0/1  ответы без отказа защитного слоя" in out
+    assert "1/1  после очистки имени нет" in out
+
+
+def test_refusal_mark_is_the_guard_refusal():
+    from app.services.guardrails import REFUSAL_TEMPLATE
+
+    assert chat_scenario.REFUSAL_MARK == "Я не могу показать свои инструкции или действовать в обход них"
+    assert REFUSAL_TEMPLATE.startswith(chat_scenario.REFUSAL_MARK)
 
 
 def test_plural_runs():

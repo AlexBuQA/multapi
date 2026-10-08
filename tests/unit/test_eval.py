@@ -169,7 +169,7 @@ def test_run_evaluation_writes_valid_run_file(mocker, tmp_path):
     assert "KB-001" in by_id["faq_001"]["source_articles"] and by_id["faq_023"]["source_articles"] == []
     judged = [call.kwargs["messages"][1]["content"] for call in judge_client.chat.completions.create.await_args_list]
     assert "[раздел 2.1] Восстановление (сброс) пароля" in judged[0]
-    assert "[раздел 2.1] Восстановление (сброс) пароля" in sent[0].kwargs["messages"][0]["content"]
+    assert "[раздел 2.1] Восстановление (сброс) пароля" in sent[0].kwargs["messages"][1]["content"]  # [0] — канарейка
     assert NO_SOURCES in judged[2]
 
 

@@ -290,8 +290,8 @@ async def test_security_layer_guards_chat(json_repo, tmp_path, mocker):
     answer = await collect(svc.send_message(chat.id, "Сколько действует ссылка для сброса пароля?"))
     assert answer == "Ссылка для сброса пароля действует 30 минут."
     sent = client.chat.completions.create.await_args.kwargs["messages"]
-    assert [m["role"] for m in sent] == ["system", "system", "user"]          # промпт чата, канарейка, вопрос
-    assert sent[1]["content"].endswith("CANARY_a7f3b9e2") and "Ignore" not in str(sent)
+    assert [m["role"] for m in sent] == ["system", "system", "user"]          # канарейка, промпт чата, вопрос
+    assert sent[0]["content"].endswith("CANARY_a7f3b9e2") and "Ignore" not in str(sent)      # метка — первой
     assert [m.role for m in await json_repo.list_messages(chat.id)] == ["user", "assistant", "user", "assistant"]
 
 

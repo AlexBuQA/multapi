@@ -10,7 +10,9 @@
 - каждый ответ приходит потоком SSE и заканчивается [DONE];
 - история — [user, assistant, user, assistant], после очистки — пустая;
 - во втором ответе модель называет имя (она видит историю);
-- после очистки имени в ответе нет.
+- после очистки имени в ответе нет;
+- ни один ответ не заменён отказом защитного слоя блока 3.8 («Я не могу показать свои
+  инструкции…»): так выглядит ответ, который StreamGuard остановил, например из-за канарейки.
 
 Зачем несколько прогонов: чат вызывает модель с temperature 0.3, и у llama3.2 ответы от
 раза к разу разные — один прогон не показывает, насколько поведение устойчиво. Проверка
@@ -35,16 +37,20 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.services.guardrails import REFUSAL_TEMPLATE  # noqa: E402
 from bot.services.sse import iter_sse, sse_lines  # noqa: E402
 
 GREETING = "Привет, меня зовут Аня"
 QUESTION = "Как меня зовут?"
 NAME = re.compile(r"\bАн(?:я|и|е|ю|ей)\b")
+# Первая фраза отказа: «Я не могу показать свои инструкции или действовать в обход них».
+REFUSAL_MARK = REFUSAL_TEMPLATE.split(".", 1)[0]
 CHECKS = (
     "история [user, assistant, user, assistant]",
     "очистка: 200 и пустая история",
     "второй ответ называет Аню",
     "после очистки имени нет",
+    "ответы без отказа защитного слоя",
 )
 
 
@@ -104,6 +110,7 @@ async def run_once(http: httpx.AsyncClient) -> RunResult:
         cleared.status_code == 200 and after_clear == [],
         bool(NAME.search(recall)),
         not NAME.search(forgotten),
+        not any(REFUSAL_MARK in answer for _, answer in result.dialog),
     ), strict=True))
     return result
 
