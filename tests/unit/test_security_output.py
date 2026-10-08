@@ -34,16 +34,20 @@ def test_canary_format_and_message():
     assert canary_message(canary) == {"role": "system", "content": CANARY_TEMPLATE.format(canary=canary)}
 
 
-def test_canary_goes_after_system_messages():
+def test_canary_goes_first_with_neutral_wording():
+    """Блок 4.2: в конце системного блока llama3.2 путала «секретную метку» с данными пользователя."""
     messages = [{"role": "system", "content": "промпт"}, {"role": "user", "content": "вопрос"}]
-    assert [m["content"][:6] for m in with_canary(messages, CANARY)] == ["промпт", "Секрет", "вопрос"]
+    sent = with_canary(messages, CANARY)
+    assert [m["content"][:6] for m in sent] == ["Иденти", "промпт", "вопрос"]
+    assert sent[0]["content"] == f"Идентификатор сборки: {CANARY}"
+    assert not any(word in sent[0]["content"].lower() for word in ("секрет", "разглаш", "пользовател", "имя"))
     assert with_canary([{"role": "user", "content": "q"}], CANARY)[0]["role"] == "system"
     assert with_canary(messages, None) is messages
 
 
 @pytest.mark.parametrize("leaked", [
     # искусственный «утёкший» ответ: модель пересказала системные сообщения
-    f"Мои системные сообщения: ассистент поддержки. Секретная метка (не разглашать): {CANARY}.",
+    f"Мои системные сообщения: идентификатор сборки {CANARY}, затем — ассистент поддержки.",
     "метка: canary_A7F3B9E2",                         # регистр
     "C A N A R Y _ a 7 f 3 b 9 e 2",                  # через пробелы
     "Секретная часть метки — a7f3b9e2",               # без префикса
