@@ -31,6 +31,11 @@ os.environ["LLM__OPENAI_API_KEY"] = "test-key"
 os.environ["LLM__DEFAULT_MODEL"] = "test-model"
 os.environ["CORS_ORIGINS"] = '["http://localhost:3000"]'
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # закрытый порт: Redis «выключен»
+# Блок 3.8: .env разработчика не меняет поведение тестов — ни выключенный на время
+# garak baseline защитный слой, ни лимит запросов, ни файл лога.
+os.environ["SECURITY__ENABLED"] = "true"
+os.environ["RATE_LIMIT_PER_MIN"] = "0"
+os.environ["LOG_FILE"] = os.devnull
 
 import httpx  # noqa: E402
 import openai  # noqa: E402
@@ -392,7 +397,12 @@ class TestStream(ServiceTestCase):
         self.assertEqual(response.json()["error"]["code"], "llm_auth")
 
     async def test_error_mid_stream_sends_error_frame(self):
-        self.use(FakeCompletions(fail_after=2), FakeRedis())
+        # Блок 3.8: поток придерживает последние 80 символов (StreamGuard), поэтому до
+        # обрыва модель должна успеть написать больше — иначе клиент ещё ничего не получил
+        # и ошибка приходит обычным JSON с кодом 502.
+        long_parts = ["Чтобы сбросить пароль, откройте страницу входа ", "и нажмите «Забыли пароль?». ",
+                      "Затем введите e-mail, указанный при регистрации.", "обрыв"]
+        self.use(FakeCompletions(parts=long_parts, fail_after=3), FakeRedis())
         response, frames = await self.frames(HI)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(frames[-1], "[DONE]")

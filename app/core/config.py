@@ -27,6 +27,7 @@ certificate chain). Проверка при этом не отключается
 from __future__ import annotations
 
 import ipaddress
+import os
 import ssl
 from functools import lru_cache
 from typing import Any
@@ -145,6 +146,20 @@ class SupportSettings(BaseModel):
     max_sentences: int = Field(default=5, ge=1, le=20)  # предел длины ответа в промпте
 
 
+class SecuritySettings(BaseModel):
+    """Защитный слой /chat (блок 3.8): проверка входа, канарейка, проверка ответа.
+
+    Переменные — с префиксом SECURITY__. SECURITY__ENABLED=false выключает слой целиком:
+    так снимается garak baseline на «голом» сервисе. Маскирование персональных данных на
+    входе модели и в логах от него не зависит — оно работает всегда.
+    """
+
+    enabled: bool = True
+    # Длиннее — готовый отказ без вызова модели. Схема запроса пускает до 32 000 символов
+    # (блок 3.4), но вопрос в поддержку — десятки и сотни; длинный текст — обычно джейлбрейк.
+    max_input_chars: int = Field(default=4000, ge=100, le=32_000)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=ROOT / ".env",
@@ -157,6 +172,11 @@ class Settings(BaseSettings):
     app_name: str = "multapi — LLM-сервис техподдержки"
     # Уровень лога сервиса (логгер llm-service): DEBUG, INFO, WARNING, ERROR.
     log_level: str = "INFO"
+    # Копия JSON-лога в файл (блок 3.8), например logs/service.jsonl. Пусто — только консоль.
+    log_file: Path | None = None
+    # Лимит запросов к /chat и /chat/stream в минуту на X-User-ID или IP (блок 3.8).
+    # 0 — без лимита. Счётчики — в Redis; Redis недоступен — запрос пропускается.
+    rate_limit_per_min: int = Field(default=0, ge=0)
     # Трейсинг в Phoenix (блок 3.6). Не задан — трейсинг выключен; в compose:
     # http://phoenix:6006, для локального uvicorn с Phoenix из compose: http://127.0.0.1:6006.
     phoenix_collector_endpoint: str | None = None
@@ -174,6 +194,7 @@ class Settings(BaseSettings):
     # точное поле: llm.openai_api_key — Field required.
     llm: LLMSettings = Field(default_factory=dict, validate_default=True)  # type: ignore[arg-type]
     support: SupportSettings = Field(default_factory=SupportSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
 
     @field_validator("log_level")
     @classmethod
@@ -182,6 +203,15 @@ class Settings(BaseSettings):
         if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("LOG_LEVEL: ожидается DEBUG, INFO, WARNING, ERROR или CRITICAL")
         return value
+
+    @field_validator("log_file")
+    @classmethod
+    def _log_file_from_root(cls, value: Path | None) -> Path | None:
+        """Относительный путь — от корня проекта, как и .env: лог не зависит от того, из
+        какой папки запущен uvicorn. os.devnull (тесты) не трогаем."""
+        if value is None or value.is_absolute() or str(value) == os.devnull:
+            return value
+        return ROOT / value
 
     @model_validator(mode="after")
     def _check_cors(self) -> Settings:

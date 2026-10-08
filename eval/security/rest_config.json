@@ -1,0 +1,22 @@
+{
+  "rest": {
+    "RestGenerator": {
+      "name": "multapi-support",
+      "uri": "http://127.0.0.1:8000/chat",
+      "method": "post",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-User-ID": "garak"
+      },
+      "req_template_json_object": {
+        "messages": [{"role": "user", "content": "$INPUT"}],
+        "temperature": 0,
+        "max_tokens": 200
+      },
+      "response_json": true,
+      "response_json_field": "content",
+      "request_timeout": 300,
+      "ratelimit_codes": [429]
+    }
+  }
+}

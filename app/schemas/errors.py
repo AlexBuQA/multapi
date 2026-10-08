@@ -46,10 +46,14 @@ LLM_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     429: {
         "model": ErrorResponse,
-        "description": "Провайдер ограничил частоту запросов; если он передал Retry-After, заголовок есть и в ответе",
-        "content": {"application/json": {"example": _example(
-            "llm_rate_limit", "Провайдер LLM ограничил частоту запросов. Повторите попытку позже.",
-        )}},
+        "description": ("Лимит запросов сервиса (RATE_LIMIT_PER_MIN, блок 3.8) или провайдера; "
+                        "заголовок Retry-After — через сколько секунд повторить"),
+        "content": {"application/json": {"examples": {
+            "rate_limited": {"summary": "Лимит запросов сервиса", "value": _example(
+                "rate_limited", "Слишком много запросов: не больше 30 в минуту. Повторите через 42 с.")},
+            "llm_rate_limit": {"summary": "Лимит провайдера LLM", "value": _example(
+                "llm_rate_limit", "Провайдер LLM ограничил частоту запросов. Повторите попытку позже.")},
+        }}},
     },
     502: {
         "model": ErrorResponse,

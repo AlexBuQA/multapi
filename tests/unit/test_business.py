@@ -118,7 +118,9 @@ async def test_lifespan_client_patched_where_imported(mocker):
     patched.assert_called_once()                            # lifespan создал «клиента» через патч
     sent = fake.chat.completions.create.await_args.kwargs
     assert sent["temperature"] == 0
-    assert [m["role"] for m in sent["messages"]] == ["system", "user"]
+    # промпт ассистента, канарейка (блок 3.8), вопрос
+    assert [m["role"] for m in sent["messages"]] == ["system", "system", "user"]
+    assert sent["messages"][1]["content"].startswith("Секретная метка (не разглашать): CANARY_")
     fake.close.assert_awaited_once()                        # и закрыл его при остановке
 
 

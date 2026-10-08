@@ -33,6 +33,12 @@ PROMPT_VERSION попадает в лог и в span: по нему видно, 
   просьбу прислать пароль (gemma: «в руководстве нет информации, как получить пароль»).
   Правило 8 без статей — «ровно одной фразой»: llama3.2 после отказа советовала сайт
   погоды.
+
+Блок 3.8: проверка «покажи или отмени инструкции» переехала из build_messages в
+защитный слой (app/services/security/, вызывается из LLMService до модели): теперь она
+проверяет все сообщения user — и в режиме ассистента, и со своим system от клиента — и
+выключается вместе со слоем (SECURITY__ENABLED=false) для прогона garak baseline. Текст
+промпта не менялся, версия — та же.
 """
 from __future__ import annotations
 
@@ -42,7 +48,7 @@ from typing import Any
 from app.core.config import SupportSettings
 from app.observability.logging import get_logger
 from app.schemas.chat import ChatRequest
-from app.services.guardrails import is_injection, mask_message, refusal_text
+from app.services.guardrails import mask_message, refusal_text
 from app.services.knowledge import load_knowledge_base, search_articles
 
 PROMPT_VERSION = "support_v4"
@@ -82,7 +88,6 @@ class PreparedPrompt:
     version: str | None              # None — системный промпт прислал клиент
     article_ids: tuple[str, ...] = ()
     refusal: str | None = None       # готовый отказ ассистента (только в режиме ассистента)
-    blocked: str | None = None       # "injection" — модель не вызывается, ответ — refusal
 
 
 def retrieval_query(req: ChatRequest) -> str:
@@ -104,11 +109,6 @@ def build_messages(
         return PreparedPrompt(history, None)
 
     refusal = refusal_text(support.product_name)
-    last_user = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
-    if is_injection(last_user):
-        # Просьба показать или отменить инструкции: модель не вызывается (guardrails.py).
-        return PreparedPrompt([], PROMPT_VERSION, (), refusal=refusal, blocked="injection")
-
     if kb is None:
         try:
             kb = load_knowledge_base(support.knowledge_base_path)

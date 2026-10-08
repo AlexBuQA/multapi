@@ -165,7 +165,9 @@ class TestSecrets(unittest.TestCase):
                      "PHOENIX_COLLECTOR_ENDPOINT", "PHOENIX_PROJECT_NAME", "PII_PRESIDIO",
                      # блок 3.7
                      "SUPPORT__ENABLED", "EVAL_JUDGE_MODEL", "EVAL_JUDGE_BASE_URL", "EVAL_JUDGE_API_KEY",
-                     "EVAL_JUDGE_REASONING", "EVAL_JUDGE_MAX_TOKENS", "LLM__PROXY_URL", "LLM__USE_SYSTEM_CERTS"):
+                     "EVAL_JUDGE_REASONING", "EVAL_JUDGE_MAX_TOKENS", "LLM__PROXY_URL", "LLM__USE_SYSTEM_CERTS",
+                     # блок 3.8
+                     "SECURITY__ENABLED", "SECURITY__MAX_INPUT_CHARS", "RATE_LIMIT_PER_MIN", "LOG_FILE"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):

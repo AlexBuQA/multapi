@@ -45,6 +45,11 @@ os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = ""
 os.environ["CORS_ORIGINS"] = '["http://localhost:3000"]'
 os.environ["LOG_LEVEL"] = "CRITICAL"
 os.environ["LLM__USE_SYSTEM_CERTS"] = "false"   # .env разработчика (true на рабочем ноутбуке) тестам не мешает
+# Блок 3.8: .env разработчика не меняет поведение тестов — ни выключенный на время
+# garak baseline защитный слой, ни лимит запросов, ни файл лога.
+os.environ["SECURITY__ENABLED"] = "true"
+os.environ["RATE_LIMIT_PER_MIN"] = "0"
+os.environ["LOG_FILE"] = os.devnull
 
 from log_capture import quiet_logs  # noqa: E402
 
