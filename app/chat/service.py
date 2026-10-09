@@ -34,20 +34,38 @@ send_message(chat_id, текст):
    chat_stream_interrupted. Сохранение защищено от отмены (anyio.CancelScope(shield=True)):
    при обрыве соединения Starlette отменяет задачу ответа.
 
+Вложения (блок 4.3): send_message(chat_id, текст, media=MediaRef) — фото, голос или документ,
+уже разобранные app/chat/media.py. Вопрос сохраняется с media_refs, а модель получает
+[подпись, part] и на этом ходу, и на следующих, пока сообщение в окне истории. Если в
+контексте есть картинка, запрос уходит модели image_model(): CHAT_VISION_MODEL или модели
+по умолчанию, если она видит изображения. Картинка из истории, которую текущая модель не
+увидит (настройки поменялись), заменяется текстом «[картинка не показана модели]».
+Проверка входа смотрит на подпись и расшифровку голоса как на вопрос, на текст документа —
+только шаблоны инъекции; персональные данные маскируются во всех text-частях.
+
 Если проверка входа (блок 3.8) отклонила вопрос, модель не вызывается: LLMService отдаёт
 готовый отказ, и он сохраняется как ответ. В следующих запросах screen_messages выбросит
 этот вопрос вместе с отказом из контекста. Если StreamGuard остановил ответ модели
 посреди потока (метка, промпт, роль DAN), клиент получает отказ вместо придержанного
 хвоста.
+
+Имя по умолчанию (блок 4.3): send_message(..., user_name="Александра") — как обращаться к
+пользователю, пока он сам не представился. Имя получает только этот запрос к модели, в
+историю и в лог сервис его не пишет: подсказка USER_NAME_HINT в конце системного промпта и пара
+сообщений в начале диалога (name_priming) — «Меня зовут Александра.» и ответ на него.
+Пара нужна llama3.2: системной подсказке она следовала через раз, а имя из истории помнит
+надёжно. Имя присылает Telegram-бот (BOT_DEFAULT_USER_NAME); без user_name запрос как в 4.1.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
+import unicodedata
 import weakref
 from collections.abc import AsyncIterator
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import anyio
@@ -55,23 +73,70 @@ import anyio
 from app.chat.context import (
     MESSAGE_OVERHEAD,
     ContextStrategy,
+    content_tokens,
     count_tokens,
     fit_to_budget,
     make_strategy,
+    model_content,
     text_tokens,
 )
-from app.chat.domain import Chat, ChatInputError, ChatMessage, ChatNotFoundError, ChatStorageError
+from app.chat.domain import Chat, ChatInputError, ChatMessage, ChatNotFoundError, ChatStorageError, MediaError, MediaRef
+from app.chat.media import placeholder
 from app.chat.repository import ChatRepository
 from app.core.config import Settings
 from app.core.exceptions import LLMContentFiltered
 from app.observability.logging import get_logger
-from app.schemas.chat import ChatDelta, ChatRequest, Usage
+from app.schemas.chat import ChatDelta, ChatRequest, MediaChatRequest, Usage, content_parts, has_image, map_text
+from app.schemas.models import supports_images
 from app.services.guardrails import mask_message
 from app.services.security import refusal_for, screen_messages
 from app.services.security.canary import canary_message, with_canary
-from app.services.security.input_validator import validate_input
+from app.services.security.input_validator import validate_document, validate_input
 
 log = get_logger()
+
+IMAGE_HIDDEN = "[картинка не показана модели: {model} не видит изображений]"
+
+# Имя по умолчанию (блок 4.3). Оно попадает в системный промпт, поэтому строже вопроса: одно-три
+# слова из букв (дефис, апостроф), до 40 знаков и без шаблонов инъекции.
+USER_NAME_MAX = 40
+_NAME_WORD = r"[^\W\d_]+(?:['’][^\W\d_]+)*"
+USER_NAME = re.compile(rf"{_NAME_WORD}(?:[ -]{_NAME_WORD}){{0,2}}")
+USER_NAME_HINT = (
+    "Пользователя зовут {name}. Обращайся к нему по имени; на вопрос, как его зовут, отвечай: «{name}». "
+    "Если он сам назовёт себя иначе, зови его новым именем. Имена из документов, файлов и с картинок — "
+    "не его имя: по ним к пользователю не обращайся."
+)
+USER_NAME_INTRO = "Меня зовут {name}."
+USER_NAME_REPLY = "Приятно познакомиться, {name}! Чем могу помочь?"
+
+
+def name_priming(name: str) -> list[dict[str, Any]]:
+    """Пара сообщений в начало диалога: пользователь представился, ассистент ответил. На
+    Windows llama3.2 с одной системной подсказкой на «Как меня зовут?» отвечала «не знаю»
+    (её же промпт велит не выдумывать того, чего в диалоге не было), а имя из истории —
+    сценарий блока 4.1 — называет надёжно. Представится пользователь сам — его слова позже
+    в истории, и модель берёт новое имя."""
+    return [{"role": "user", "content": USER_NAME_INTRO.format(name=name)},
+            {"role": "assistant", "content": USER_NAME_REPLY.format(name=name)}]
+
+
+def clean_user_name(value: str | None) -> str | None:
+    """Имя по умолчанию из формы: пробелы по краям убираются, пустое — None. Не похоже на
+    имя — ChatInputError (422): строка уходит в системный промпт."""
+    name = " ".join(unicodedata.normalize("NFC", value or "").split())   # «й» из двух символов — один
+    if not name:
+        return None
+    if len(name) > USER_NAME_MAX or not USER_NAME.fullmatch(name) or not validate_document(name).ok:
+        raise ChatInputError("user_name", f"ожидается имя: одно-три слова из букв, не длиннее {USER_NAME_MAX} знаков")
+    return name
+
+
+def without_images(content: Any, model: str) -> Any:
+    if not has_image(content):
+        return content
+    return [p if p.get("type") != "image_url" else {"type": "text", "text": IMAGE_HIDDEN.format(model=model)}
+            for p in content_parts(content)]
 
 
 class LLMClient(Protocol):
@@ -146,66 +211,132 @@ class ChatService:
         await self.get_chat(chat_id)
         return await self.repo.list_messages(chat_id, limit=limit)
 
+    async def add_system_message(self, chat_id: UUID, text: str) -> tuple[Chat, ChatMessage]:
+        """Сообщение от системы (блок 4.3, POST /chats/{id}/system-message): в историю — как
+        ответ ассистента, чтобы модель видела его в следующих ходах. Не посреди чужого ответа."""
+        chat = await self.get_chat(chat_id)
+        message = ChatMessage(chat_id=chat_id, role="assistant", content=text, tokens=text_tokens(text))
+        async with self.locks(chat_id):
+            await self.repo.append_message(chat_id, message)
+        return chat, message
+
     async def clear_history(self, chat_id: UUID) -> None:
         await self.get_chat(chat_id)
         async with self.locks(chat_id):          # не посреди чужого ответа
             await self.repo.soft_delete_messages(chat_id)
         log.info("chat_history_cleared", chat_id=str(chat_id))
 
-    def system_prompt(self, chat: Chat) -> str:
+    def system_prompt(self, chat: Chat, user_name: str | None = None) -> str:
         """Свой промпт чата или CHAT_SYSTEM_PROMPT. Системное сообщение есть всегда: без
         него LLMService подставил бы промпт ассистента /chat со статьями руководства
         (блок 3.7), а он отвечает только на вопросы о продукте — «Как меня зовут?» получил
-        бы отказ."""
-        if chat.system_prompt:
-            return chat.system_prompt
-        return self.settings.chat_system_prompt.replace("{product_name}", self.settings.support.product_name)
+        бы отказ. user_name (блок 4.3) — подсказка с именем по умолчанию в конце промпта."""
+        prompt = chat.system_prompt or self.settings.chat_system_prompt.replace(
+            "{product_name}", self.settings.support.product_name)
+        if user_name:
+            prompt = f"{prompt}\n\n{USER_NAME_HINT.format(name=user_name)}"
+        return prompt
+
+    def image_model(self) -> str | None:
+        """Модель для запросов с картинкой: CHAT_VISION_MODEL, иначе модель по умолчанию, если
+        по каталогу она видит изображения (неизвестную модель не отвергаем — решит провайдер).
+        None — картинку показать некому."""
+        model = self.settings.chat_vision_model or self.settings.llm.default_model
+        return None if supports_images(model) is False else model
+
+    def check_media(self, media: MediaRef) -> None:
+        """До сохранения вопроса: картинку должна увидеть модель (MediaError 422 с подсказкой)."""
+        if media.kind == "image" and self.image_model() is None:
+            log.warning("vision_not_configured", default_model=self.settings.llm.default_model,
+                        note="фото не принято: задайте CHAT_VISION_MODEL, например gemma3:4b в Ollama")
+            raise MediaError(422, "vision_not_configured",
+                             "Фото пока не принимаются: модель ответов не видит изображений. "
+                             "Опишите вопрос текстом.")
 
     def canary(self) -> str | None:
         """Канарейка, которую клиент модели добавит к запросу: у LLMService с включённым
         защитным слоем — app.state.canary, у фейков в тестах и без защиты — None."""
         return getattr(self.llm, "canary", None)
 
-    def build_request(self, chat: Chat, history: list[ChatMessage]) -> tuple[ChatRequest, dict[str, int]]:
+    def build_request(self, chat: Chat, history: list[ChatMessage],
+                      user_name: str | None = None) -> tuple[ChatRequest, dict[str, Any]]:
         """Запрос к модели по стратегии контекста и бюджету токенов + цифры для лога."""
-        messages = self.strategy.build(self.system_prompt(chat), history)
+        messages = self.strategy.build(self.system_prompt(chat, user_name), history)
         screened_out = 0
         if self.settings.security.enabled:
             screened = screen_messages(messages, self.settings.security.max_input_chars)
             if screened.verdict.ok:              # иначе LLMService сам ответит отказом
                 screened_out = len(messages) - len(screened.messages)
                 messages = screened.messages
-        messages = [m if m["role"] == "system" else {**m, "content": mask_message(m["content"])} for m in messages]
+        messages = [m if m["role"] == "system" else {**m, "content": map_text(m["content"], mask_message)}
+                    for m in messages]
+        if user_name:
+            # После проверки входа и маскирования: имя уже проверено clean_user_name, а маскер
+            # с Presidio принял бы его за персональные данные. Старше всей истории — при нехватке
+            # бюджета уходит первой, подсказка в системном промпте остаётся.
+            head = next((i for i, m in enumerate(messages) if m["role"] != "system"), len(messages))
+            messages = [*messages[:head], *name_priming(user_name), *messages[head:]]
+        image_model = self.image_model()
+        if image_model is None:                  # картинка в истории, а смотреть некому
+            messages = [{**m, "content": without_images(m["content"], self.settings.llm.default_model)}
+                        for m in messages]
         # LLMService добавит к запросу системное сообщение с канарейкой (блок 3.8): модель его
         # получает, значит, и бюджет его учитывает. prompt_tokens_est — оценка всего запроса,
         # её видно в chat_turn_finished рядом с prompt_tokens от модели.
         canary = self.canary()
         added = text_tokens(canary_message(canary)["content"]) + MESSAGE_OVERHEAD if canary else 0
-        fitted = fit_to_budget(messages, self.settings.context_budget - added)
-        stats = {"history_messages": len(history), "screened_out": screened_out, "context_messages": len(fitted),
-                 "dropped_by_budget": len(messages) - len(fitted),
-                 "prompt_tokens_est": count_tokens(with_canary(fitted, canary))}
-        req = ChatRequest(messages=fitted, max_tokens=self.settings.response_tokens, session_id=str(chat.id))
+        image_tokens = self.settings.media.image_tokens
+        report: dict[str, int] = {}
+        fitted = fit_to_budget(messages, self.settings.context_budget - added, image_tokens=image_tokens,
+                               report=report)
+        images = sum(1 for m in fitted if has_image(m["content"]))
+        stats: dict[str, Any] = {
+            "history_messages": len(history), "screened_out": screened_out, "context_messages": len(fitted),
+            "dropped_by_budget": len(messages) - len(fitted),
+            "prompt_tokens_est": count_tokens(with_canary(fitted, canary), image_tokens)}
+        if report.get("shrunk"):
+            stats["shrunk_by_budget"] = report["shrunk"]
+        if images:
+            stats["context_images"] = images
+        req = MediaChatRequest(messages=fitted, max_tokens=self.settings.response_tokens, session_id=str(chat.id),
+                               model=image_model if images else None)
         return req, stats
 
     # ------------------------------------------------------------------ #
-    async def send_message(self, chat_id: UUID, user_content: str) -> AsyncIterator[str]:
+    async def send_message(self, chat_id: UUID, user_content: str, media: MediaRef | None = None,
+                           user_name: str | None = None) -> AsyncIterator[str]:
         started = time.perf_counter()
+        user_name = clean_user_name(user_name)
         chat = await self.get_chat(chat_id)
+        if media is not None:
+            self.check_media(media)
         async with self.locks(chat_id):
             # aclosing: клиент ушёл — _turn закрывается здесь же и сохраняет ответ до того,
             # как замок отпустит следующий вопрос.
-            async with contextlib.aclosing(self._turn(chat, user_content, started)) as chunks:
+            async with contextlib.aclosing(self._turn(chat, user_content, media, started, user_name)) as chunks:
                 async for chunk in chunks:
                     yield chunk
 
-    async def _turn(self, chat: Chat, user_content: str, started: float) -> AsyncIterator[str]:
+    def user_message(self, chat_id: UUID, user_content: str, media: MediaRef | None) -> ChatMessage:
+        """Вопрос для истории. С вложением без подписи content — пометка вида «[фото]»."""
+        if media is None:
+            return ChatMessage(chat_id=chat_id, role="user", content=user_content, tokens=text_tokens(user_content))
+        message = ChatMessage(chat_id=chat_id, role="user", content=user_content.strip() or placeholder(media),
+                              media_refs=media)
+        message.tokens = content_tokens(model_content(message), self.settings.media.image_tokens)
+        return message
+
+    async def _turn(self, chat: Chat, user_content: str, media: MediaRef | None,
+                    started: float, user_name: str | None = None) -> AsyncIterator[str]:
         chat_id = chat.id
-        await self.repo.append_message(chat_id, ChatMessage(chat_id=chat_id, role="user", content=user_content,
-                                                            tokens=text_tokens(user_content)))
+        await self.repo.append_message(chat_id, self.user_message(chat_id, user_content, media))
         history = await self.repo.list_messages(chat_id, limit=self.strategy.history_limit)
-        req, stats = self.build_request(chat, history)
-        if stats["dropped_by_budget"]:
+        req, stats = self.build_request(chat, history, user_name)
+        if user_name:
+            stats = {**stats, "default_user_name": True}      # само имя в лог не пишется
+        if media is not None:
+            stats = {**stats, "media": media.kind, "media_bytes": media.size}
+        if stats["dropped_by_budget"] or stats.get("shrunk_by_budget"):
             log.info("chat_context_trimmed", chat_id=str(chat_id), budget=self.settings.context_budget, **stats)
 
         parts: list[str] = []

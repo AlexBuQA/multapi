@@ -1,11 +1,11 @@
-"""Команды и обычный текст (блок 4.2) через Dispatcher, с FakeBackend вместо сервиса."""
+"""Команды и обычный текст (блоки 4.2–4.3) через Dispatcher, с FakeBackend вместо сервиса."""
 from __future__ import annotations
 
 import asyncio
 
 import httpx
-from aiogram.methods import SendChatAction, SendMessage
-from aiogram.types import PhotoSize
+from aiogram.methods import EditMessageText, SendChatAction, SendMessage
+from aiogram.types import Sticker
 
 from bot import texts
 from bot.services.backend_client import BackendStreamError
@@ -36,9 +36,28 @@ async def test_text_goes_to_backend_and_streams(dp, bot, session):
     chat = new_chat_id()
     await dp.feed_update(bot, message_update("Как меня зовут?", chat))
     assert backend.sent[-1][1] == "Как меня зовут?"
-    assert session.on_screen(chat) == [backend.answer]
+    assert session.on_screen(chat) == [backend.answer]                 # ответ сохранён сообщением
+    assert session.draft_texts(chat)[0] == ""                          # сначала «Thinking…»
+    assert session.draft_texts(chat)[-1] in backend.answer             # черновик рос по мере ответа
     assert session.of(SendChatAction)                              # «печатает…», пока ждём первый фрагмент
+    assert not session.of(EditMessageText)                         # в личном чате — черновик, не правки
     assert backend.closed_streams == 1
+
+
+async def test_group_chat_streams_with_edits(dp, bot, session):
+    """sendMessageDraft — только для личных чатов: в группе ответ растёт правками, как в 4.2."""
+    backend = dp["backend"] = FakeBackend(delay=0.05)
+    chat = -new_chat_id()
+    await dp.feed_update(bot, message_update("Как меня зовут?", chat, chat_type="group"))
+    assert session.on_screen(chat) == [backend.answer] and not session.drafts.get(chat)
+
+
+async def test_edit_mode_from_settings(dp, bot, session, settings):
+    settings.bot_streaming = "edit"
+    backend = dp["backend"] = FakeBackend(delay=0.05)
+    chat = new_chat_id()
+    await dp.feed_update(bot, message_update("Как меня зовут?", chat))
+    assert session.on_screen(chat) == [backend.answer] and not session.drafts.get(chat)
 
 
 async def test_clear(dp, bot, session, backend):
@@ -94,8 +113,8 @@ async def test_admin_status(dp, bot, session):
 async def test_unknown_command_and_non_text(dp, bot, session, backend):
     chat = new_chat_id()
     await dp.feed_update(bot, message_update("/weather", chat))
-    await dp.feed_update(bot, message_update(None, chat, photo=[PhotoSize(file_id="f", file_unique_id="u",
-                                                                          width=1, height=1)]))
+    await dp.feed_update(bot, message_update(None, chat, sticker=Sticker(
+        file_id="s", file_unique_id="u", type="regular", width=512, height=512, is_animated=False, is_video=False)))
     assert session.sent_texts(chat) == [texts.UNKNOWN_COMMAND, texts.ONLY_TEXT]
     assert backend.sent == []
 

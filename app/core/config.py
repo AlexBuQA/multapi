@@ -26,6 +26,14 @@ certificate chain). Проверка при этом не отключается
 CHAT_STORAGE_DIR, DATABASE_URL, стратегия и окно контекста, бюджет токенов
 CONTEXT_WINDOW - RESPONSE_TOKENS - SAFETY_MARGIN — см. app/chat/ и docs/chat.md.
 
+Медиа в чатах (блок 4.3, app/chat/media.py): CHAT_VISION_MODEL — модель для запросов с
+картинкой (текстовая llama3.2 картинок не видит), AUDIO_API_KEY / AUDIO_BASE_URL /
+WHISPER_MODEL — расшифровка голоса (те же переменные, что у голосового пайплайна блока
+2.6), MEDIA__* — пределы размера файлов и длины текста документа.
+
+Уведомления из сервиса в Telegram (блок 4.3, app/services/notifier.py): BOT_URL — адрес
+HTTP-API бота, INTERNAL_TOKEN — общий секрет сервиса и бота (заголовок X-Internal-Token).
+
 Настройки ассистента с инструментами (блок 3.1) и скриптов блока 3.3 — в app/config.py.
 """
 from __future__ import annotations
@@ -38,7 +46,7 @@ from typing import Any, Literal
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -164,6 +172,25 @@ class SecuritySettings(BaseModel):
     max_input_chars: int = Field(default=4000, ge=100, le=32_000)
 
 
+class MediaSettings(BaseModel):
+    """Медиа в POST /chats/{id}/messages (блок 4.3). Переменные — с префиксом MEDIA__.
+
+    Пределы — на стороне сервиса, независимо от клиента: бот сам выбирает фото до 2 МБ и
+    документы до 10 МБ, но в сервис может прийти запрос и не от бота.
+    """
+
+    max_image_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
+    max_audio_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)      # Whisper принимает до 25 МБ
+    max_document_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
+    max_document_chars: int = Field(default=30_000, ge=1000, le=30_000)  # текст PDF/DOCX и расшифровки
+    max_pdf_pages: int = Field(default=50, ge=1, le=500)
+    # Сколько токенов считать за картинку в бюджете контекста: у разных моделей по-разному
+    # (gemma3 — 256, gpt-4o — от 85 до ~1100 по размеру), берём с запасом.
+    image_tokens: int = Field(default=800, ge=64, le=4000)
+    audio_timeout: float = Field(default=120.0, gt=0)                   # с на расшифровку
+    parse_timeout: float = Field(default=30.0, gt=0, le=600)            # с на разбор PDF/DOCX
+
+
 # Postgres из compose.yaml, опубликованный на 127.0.0.1:5433 (а не localhost: на Windows
 # localhost сначала пробует IPv6 ::1, и каждое новое соединение ждёт отказа по нему).
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://multapi:multapi@127.0.0.1:5433/multapi"
@@ -260,6 +287,28 @@ class Settings(BaseSettings):
     response_tokens: int = Field(default=1024, ge=16, le=16_000)   # max_tokens ответа
     safety_margin: int = Field(default=256, ge=0)                   # запас на неточность подсчёта
 
+    # --- Медиа в чатах (блок 4.3), app/chat/media.py ---
+    # Модель для запросов, в контексте которых есть картинка. Не задана — LLM__DEFAULT_MODEL,
+    # если она видит изображения (gpt-4o-mini да, llama3.2 нет — тогда картинка отклоняется
+    # с подсказкой). Для Ollama: gemma3:4b, qwen2.5vl:3b, llama3.2-vision. Читается и
+    # SUPPORT_VISION_MODEL — та же модель, что у демо Vision блока 2.6.
+    chat_vision_model: str | None = Field(
+        default=None, validation_alias=AliasChoices("CHAT_VISION_MODEL", "SUPPORT_VISION_MODEL"))
+    media: MediaSettings = Field(default_factory=MediaSettings)
+    # Расшифровка голоса — OpenAI-совместимый /audio/transcriptions (Whisper). Ollama его не
+    # умеет. Ключ не задан — голосовые сообщения получают понятный отказ 503.
+    audio_api_key: SecretStr | None = None
+    audio_base_url: str | None = None          # пусто — https://api.openai.com/v1
+    whisper_model: str = "whisper-1"
+    audio_language: str | None = "ru"          # подсказка языка для Whisper; auto — определит сам
+
+    # --- Уведомления в Telegram (блок 4.3), app/services/notifier.py ---
+    # HTTP-API бота (bot/web.py) и общий секрет: сервис шлёт его в X-Internal-Token, бот
+    # сверяет. Секрет — только в .env. Не задан — /system-message и уведомления выключены.
+    bot_url: str = "http://127.0.0.1:9000"
+    internal_token: SecretStr | None = None
+    bot_api_port: int = Field(default=9000, ge=1, le=65535)    # тот же порт слушает бот
+
     @field_validator("log_level")
     @classmethod
     def _check_log_level(cls, value: str) -> str:
@@ -281,6 +330,29 @@ class Settings(BaseSettings):
     @classmethod
     def _chat_dir_from_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else ROOT / value
+
+    @field_validator("audio_language")
+    @classmethod
+    def _audio_language(cls, value: str | None) -> str | None:
+        # Пустое значение в .env игнорируется (env_ignore_empty) — выключить подсказку можно словом auto.
+        return None if value is None or value.strip().lower() in {"", "auto", "none"} else value.strip()
+
+    @field_validator("internal_token")
+    @classmethod
+    def _internal_token(cls, value: SecretStr | None) -> SecretStr | None:
+        # То же правило, что у бота (bot/config.py): короткий общий секрет легко подобрать.
+        if value is not None and len(value.get_secret_value()) < 16:
+            raise ValueError("INTERNAL_TOKEN короче 16 символов: сгенерируйте длинный, например "
+                             "python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+        return value
+
+    @field_validator("bot_url")
+    @classmethod
+    def _bot_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("BOT_URL: ожидается адрес вида http://127.0.0.1:9000")
+        return value
 
     @property
     def context_budget(self) -> int:

@@ -2,6 +2,8 @@
 Эндпоинты /chats (блок 4.1) — те же шаги, что в критериях самопроверки, через приложение
 целиком: DI (get_settings -> get_repository -> get_chat_service), обработчики ошибок,
 формат SSE. Модель подменена FakeLLM через app.dependency_overrides[get_llm_client].
+С блока 4.3 вопрос уходит формой (multipart/form-data), а поток — JSON-событиями
+{"type": "token" | "done" | "error"}.
 
 Хранилище — JSON в tmp_path; один сценарий повторяется с Postgres (сессия из
 app.state.chat_sessions живёт, пока идёт поток).
@@ -15,7 +17,7 @@ import httpx
 import pytest
 
 from app.chat.deps import get_llm_client, get_repository
-from app.chat.routes import sse_data
+from app.chat.routes import sse_token
 from app.core.config import get_settings
 from app.core.exceptions import LLMRateLimitError
 from app.main import app
@@ -45,21 +47,29 @@ async def create_chat(http: httpx.AsyncClient, **body) -> str:
     return response.json()["chat_id"]
 
 
-def data_events(body: str) -> list[str]:
-    """Текст каждого события SSE: строки data: склеены через \\n, как это делает клиент."""
+def data_events(body: str) -> list[dict]:
+    """События SSE: в каждом одна строка data: с JSON (блок 4.3)."""
     events = []
     for block in body.split("\n\n"):
         lines = [line[len("data: "):] for line in block.split("\n") if line.startswith("data: ")]
         if lines:
-            events.append("\n".join(lines))
+            assert len(lines) == 1, block                               # событие — одна строка
+            events.append(json.loads(lines[0]))
     return events
 
 
+def answer_of(events: list[dict]) -> str:
+    return "".join(e["delta"] for e in events if e["type"] == "token")
+
+
+async def send(http: httpx.AsyncClient, chat_id: str, content: str, **files) -> httpx.Response:
+    """POST /chats/{id}/messages формой, как бот: content и необязательный файл media."""
+    return await http.post(f"/chats/{chat_id}/messages", data={"content": content}, files=files or None)
+
+
 async def ask(http: httpx.AsyncClient, chat_id: str, content: str) -> tuple[httpx.Response, str]:
-    response = await http.post(f"/chats/{chat_id}/messages", json={"content": content})
-    events = data_events(response.text)
-    answer = "".join(events[:-1]) if events and events[-1] == "[DONE]" else "".join(events)
-    return response, answer
+    response = await send(http, chat_id, content)
+    return response, answer_of(data_events(response.text))
 
 
 # ---------------------------------------------------------------- сценарий из критериев
@@ -70,7 +80,7 @@ async def test_stateful_chat_scenario(chat_app, tmp_path):
 
         first, answer = await ask(http, chat_id, "Привет, меня зовут Аня")
         assert first.status_code == 200 and first.headers["content-type"].startswith("text/event-stream")
-        assert first.text.endswith("data: [DONE]\n\n")
+        assert first.text.endswith('data: {"type": "done"}\n\n')
         assert len(data_events(first.text)) > 2                       # ответ кусками, а не одним блоком
 
         _, answer = await ask(http, chat_id, "Как меня зовут?")
@@ -124,7 +134,7 @@ async def test_unknown_chat_is_404_everywhere(chat_app):
         for method, path, body in (("GET", f"/chats/{unknown}", None), ("GET", f"/chats/{unknown}/messages", None),
                                    ("DELETE", f"/chats/{unknown}/messages", None),
                                    ("POST", f"/chats/{unknown}/messages", {"content": "Привет"})):
-            response = await http.request(method, path, json=body)
+            response = await http.request(method, path, data=body)
             assert response.status_code == 404, (method, path)
             assert response.json()["error"]["code"] == "chat_not_found"
         assert (await http.get("/chats/not-a-uuid")).status_code == 422
@@ -144,8 +154,20 @@ async def test_create_chat_validation(chat_app, body):
 async def test_message_validation(chat_app):
     async with await client() as http:
         chat_id = await create_chat(http)
-        assert (await http.post(f"/chats/{chat_id}/messages", json={"content": ""})).status_code == 422
+        assert (await send(http, chat_id, "")).status_code == 422                     # content обязателен
+        assert (await send(http, chat_id, "   ")).status_code == 422
+        assert (await send(http, chat_id, "x" * 32_001)).status_code == 422
         assert (await http.get(f"/chats/{chat_id}/messages", params={"limit": 0})).status_code == 422
+
+
+async def test_json_body_gets_415_with_hint(chat_app):
+    """JSON блока 4.1 — понятный 415, а не 422 «content: Field required»."""
+    async with await client() as http:
+        chat_id = await create_chat(http)
+        response = await http.post(f"/chats/{chat_id}/messages", json={"content": "Привет"})
+    body = response.json()["error"]
+    assert response.status_code == 415 and body["code"] == "unsupported_content_type"
+    assert "multipart/form-data" in body["message"]
 
 
 async def test_provider_error_before_first_chunk_is_json(chat_app):
@@ -153,7 +175,7 @@ async def test_provider_error_before_first_chunk_is_json(chat_app):
     llm.fail_after, llm.error = 0, LLMRateLimitError(retry_after=7)
     async with await client() as http:
         chat_id = await create_chat(http)
-        response = await http.post(f"/chats/{chat_id}/messages", json={"content": "Привет"})
+        response = await send(http, chat_id, "Привет")
     assert response.status_code == 429 and response.headers["Retry-After"] == "7"
     assert response.json()["error"]["code"] == "llm_rate_limit"
 
@@ -163,19 +185,21 @@ async def test_provider_error_mid_stream_is_error_event(chat_app):
     llm.fail_after = 2
     async with await client() as http:
         chat_id = await create_chat(http)
-        response = await http.post(f"/chats/{chat_id}/messages", json={"content": "Привет"})
+        response = await send(http, chat_id, "Привет")
         history = (await http.get(f"/chats/{chat_id}/messages")).json()
+    events = data_events(response.text)
     assert response.status_code == 200
-    assert "event: error\n" in response.text and "[DONE]" not in response.text
-    error = json.loads(response.text.split("event: error\ndata: ", 1)[1])
-    assert error["error"]["code"] == "llm_error"
+    assert events[-1]["type"] == "error" and events[-1]["code"] == "llm_error" and events[-1]["message"]
+    assert "done" not in [e["type"] for e in events]
     assert history[-1]["role"] == "assistant" and len(history[-1]["content"]) == 2 * llm.chunk   # сохранено, что пришло
 
 
 # ---------------------------------------------------------------- SSE и DI
 def test_multiline_chunk_is_one_event():
-    assert sse_data("Шаги:\n\n1. Откройте\r\n2. Нажмите") == "data: Шаги:\ndata: \ndata: 1. Откройте\ndata: 2. Нажмите\n\n"
-    assert sse_data(" Аня.") == "data:  Аня.\n\n"                     # ведущий пробел фрагмента сохраняется
+    """Переводы строк экранирует JSON: событие — одна строка data:, пустая строка ответа
+    не закончит его раньше времени."""
+    assert sse_token("Шаги:\n\n1. Откройте") == 'data: {"type": "token", "delta": "Шаги:\\n\\n1. Откройте"}\n\n'
+    assert sse_token(" Аня.") == 'data: {"type": "token", "delta": " Аня."}\n\n'   # ведущий пробел сохраняется
 
 
 async def test_multiline_answer_survives_sse(chat_app):
@@ -236,9 +260,10 @@ async def test_unexpected_error_mid_stream_is_error_event(chat_app):
     llm.fail_after, llm.error = 1, RuntimeError("что-то сломалось")
     async with await client() as http:
         chat_id = await create_chat(http)
-        response = await http.post(f"/chats/{chat_id}/messages", json={"content": "Привет"})
-    assert response.status_code == 200 and "[DONE]" not in response.text
-    assert json.loads(response.text.split("event: error\ndata: ", 1)[1])["error"]["code"] == "internal_error"
+        response = await send(http, chat_id, "Привет")
+    events = data_events(response.text)
+    assert response.status_code == 200 and events[-1] == {"type": "error", "code": "internal_error",
+                                                          "message": "Внутренняя ошибка сервиса."}
 
 
 async def test_bad_chat_system_prompt_is_422(chat_app):
@@ -254,7 +279,7 @@ async def test_nul_character_is_422(chat_app):
     async with await client() as http:
         assert (await http.post("/chats", json={"owner_external_id": "u\u0000", "interface": "cli"})).status_code == 422
         chat_id = await create_chat(http)
-        response = await http.post(f"/chats/{chat_id}/messages", json={"content": "при\u0000вет"})
+        response = await send(http, chat_id, "при\u0000вет")
     assert response.status_code == 422
 
 
@@ -299,4 +324,4 @@ async def test_real_pipeline_streams_short_answer_in_pieces(tmp_path, mocker):
             response, text = await ask(http, chat_id, "Привет, меня зовут Аня")
     finally:
         app.dependency_overrides.clear()
-    assert text == answer and len(data_events(response.text)) >= 3        # 2+ фрагмента и [DONE]
+    assert text == answer and len(data_events(response.text)) >= 3        # 2+ фрагмента и done

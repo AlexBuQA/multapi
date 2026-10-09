@@ -1,13 +1,14 @@
 """
-Помощники тестов Telegram-бота (блок 4.2). Отдельный модуль, а не conftest.py: так их можно
-импортировать в тестах (from bot_fakes import ...), а conftest.py только объявляет фикстуры.
-Сеть не нужна — ни Telegram, ни сервис.
+Помощники тестов Telegram-бота (блоки 4.2–4.3). Отдельный модуль, а не conftest.py: так их
+можно импортировать в тестах (from bot_fakes import ...), а conftest.py только объявляет
+фикстуры. Сеть не нужна — ни Telegram, ни сервис.
 
 - MockedSession — сессия aiogram без HTTP: запоминает вызванные методы Bot API и отвечает
   правдоподобными объектами (sendMessage -> Message и т. д.). Так апдейты проходят через
   настоящий Dispatcher: фильтры, порядок роутеров, FSM, передачу dp["backend"] в handlers.
+  Черновики sendMessageDraft — в drafts; файлы для getFile и скачивания — в files.
 - FakeBackend — подмена BackendClient: чаты по owner_external_id, ответ фрагментами,
-  ошибки по заказу.
+  ошибки по заказу; файлы, пришедшие в send_message, — в media.
 """
 from __future__ import annotations
 
@@ -31,13 +32,15 @@ from aiogram.methods import (  # noqa: E402
     AnswerCallbackQuery,
     EditMessageReplyMarkup,
     EditMessageText,
+    GetFile,
     GetMe,
     SendChatAction,
     SendMessage,
+    SendMessageDraft,
     SetMyCommands,
     TelegramMethod,
 )
-from aiogram.types import CallbackQuery, Chat, Message, Update, User  # noqa: E402
+from aiogram.types import CallbackQuery, Chat, File, Message, Update, User  # noqa: E402
 
 
 BOT_USER = User(id=42, is_bot=True, first_name="Тестовый бот", username="test_bot")
@@ -61,13 +64,17 @@ class MockedSession(BaseSession):
         self.fail: dict[type, list[Exception]] = {}       # метод -> исключения по очереди
         self._message_ids = itertools.count(500)
         self.screen: dict[int, list[tuple[int, str]]] = {}   # chat_id -> [(message_id, текст сейчас)]
+        self.drafts: dict[int, list[tuple[int, str]]] = {}   # chat_id -> [(draft_id, текст)] по порядку
+        self.files: dict[str, bytes] = {}                    # file_id -> содержимое (getFile, скачивание)
 
     async def close(self) -> None:
         pass
 
-    async def stream_content(self, *args: Any, **kwargs: Any) -> AsyncIterator[bytes]:  # pragma: no cover
-        raise NotImplementedError
-        yield b""
+    async def stream_content(self, url: str, *args: Any, **kwargs: Any) -> AsyncIterator[bytes]:
+        file_id = url.rsplit("/", 1)[-1]
+        data = self.files[file_id]
+        for i in range(0, len(data), 1000):
+            yield data[i:i + 1000]
 
     async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None) -> Any:
         self.requests.append(method)
@@ -86,6 +93,14 @@ class MockedSession(BaseSession):
                                     for mid, text in self.screen.get(chat_id, [])]
             return Message(message_id=method.message_id or 0, date=now(), from_user=BOT_USER, text=method.text,
                            chat=Chat(id=chat_id, type="private")).as_(bot)
+        if isinstance(method, SendMessageDraft):
+            self.drafts.setdefault(int(method.chat_id), []).append((method.draft_id, method.text or ""))
+            return True
+        if isinstance(method, GetFile):
+            if method.file_id not in self.files:
+                raise AssertionError(f"MockedSession: нет файла {method.file_id}")
+            return File(file_id=method.file_id, file_unique_id=f"u-{method.file_id}",
+                        file_size=len(self.files[method.file_id]), file_path=f"documents/{method.file_id}")
         if isinstance(method, (AnswerCallbackQuery, SendChatAction, SetMyCommands, EditMessageReplyMarkup)):
             return True
         if isinstance(method, GetMe):
@@ -103,6 +118,9 @@ class MockedSession(BaseSession):
         """Сообщения бота в чате так, как их видит пользователь: с учётом всех правок."""
         return [text for _, text in self.screen.get(chat_id, [])]
 
+    def draft_texts(self, chat_id: int) -> list[str]:
+        return [text for _, text in self.drafts.get(chat_id, [])]
+
 
 class FakeBackend:
     """Подмена BackendClient. answer — текст ответа; chunk — длина фрагмента; delay — пауза
@@ -117,6 +135,7 @@ class FakeBackend:
         self.error, self.error_after, self.chat_error = error, error_after, chat_error
         self.chats: dict[tuple[str, str], UUID] = {}
         self.sent: list[tuple[UUID, str]] = []
+        self.media: list[dict[str, Any]] = []                # файлы из send_message: media, mime, filename
         self.cleared: list[UUID] = []
         self.closed_streams = 0
         self.active = self.max_active = 0                 # одновременных ответов сейчас и максимум
@@ -126,8 +145,11 @@ class FakeBackend:
             raise self.chat_error
         return self.chats.setdefault((owner_external_id, interface), uuid4())
 
-    async def send_message(self, chat_id: UUID, content: str) -> AsyncIterator[str]:
+    async def send_message(self, chat_id: UUID, content: str, media: bytes | None = None, mime: str | None = None,
+                           *, filename: str | None = None) -> AsyncIterator[str]:
         self.sent.append((chat_id, content))
+        if media is not None:
+            self.media.append({"media": media, "mime": mime, "filename": filename})
         parts = [self.answer[i:i + self.chunk] for i in range(0, len(self.answer), self.chunk)]
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -160,8 +182,9 @@ def user(user_id: int) -> User:
     return User(id=user_id, is_bot=False, first_name="Аня")
 
 
-def message_update(text: str | None, chat_id: int, *, user_id: int | None = None, **extra: Any) -> Update:
-    msg = Message(message_id=next(_update_ids), date=now(), chat=Chat(id=chat_id, type="private"),
+def message_update(text: str | None, chat_id: int, *, user_id: int | None = None, chat_type: str = "private",
+                   **extra: Any) -> Update:
+    msg = Message(message_id=next(_update_ids), date=now(), chat=Chat(id=chat_id, type=chat_type),
                   from_user=user(user_id or chat_id), text=text, **extra)
     return Update(update_id=next(_update_ids), message=msg)
 

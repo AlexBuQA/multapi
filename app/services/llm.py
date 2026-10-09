@@ -79,7 +79,16 @@ from app.core.exceptions import (
 from app.observability.logging import get_logger
 from app.observability.pii import PREVIEW_CHARS, prompt_hash, prompt_preview, redact_pii
 from app.observability.pii_presidio import NameRedactor
-from app.schemas.chat import ChatDelta, ChatRequest, ChatResponse, Message, Usage
+from app.schemas.chat import (
+    ChatDelta,
+    ChatRequest,
+    ChatResponse,
+    MediaMessage,
+    Usage,
+    content_parts,
+    content_text,
+    provider_messages,
+)
 from app.schemas.models import estimate_cost
 from app.services.prompts import PROMPT_VERSION, PreparedPrompt, build_messages
 from app.services.security import refusal_for, screen_messages
@@ -143,9 +152,20 @@ def _trace_id(span: Span) -> str | None:
     return format(ctx.trace_id, "032x") if ctx.is_valid else None
 
 
-def _user_text(req: ChatRequest) -> str:
-    """Вопрос пользователя — последнее сообщение с ролью user."""
-    return next((m.content for m in reversed(req.messages) if m.role == "user"), req.messages[-1].content)
+def _user_text(req: ChatRequest, *, typed_only: bool = False) -> str:
+    """Вопрос пользователя — последнее сообщение с ролью user. С вложением (блок 4.3) — его
+    text-части: подпись, расшифровка голоса или текст документа; картинка — без текста.
+    typed_only — только напечатанное (подпись): текст документа и расшифровка в превью лога
+    не попадают."""
+    message = next((m for m in reversed(req.messages) if m.role == "user"), req.messages[-1])
+    return content_text(message.content, typed_only=typed_only)
+
+
+def _checked_length(req: ChatRequest) -> int:
+    """Самый длинный текст, который проверка входа меряет пределом длины: вопрос и подпись.
+    Текст документа и расшифровка голоса предела не имеют (validate_document)."""
+    return max((len(p["text"]) for m in req.messages if m.role == "user" for p in content_parts(m.content)
+                if p.get("type") == "text" and not p.get("media")), default=0)
 
 
 def _preview(text: str | None) -> str | None:
@@ -193,7 +213,8 @@ class LLMService:
     def _params(self, req: ChatRequest, prompt: PreparedPrompt) -> dict[str, Any]:
         return {
             "model": req.model,
-            "messages": with_canary(prompt.messages, self.canary),
+            # provider_messages: content-part без служебной пометки media (блок 4.3).
+            "messages": provider_messages(with_canary(prompt.messages, self.canary)),
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         }
@@ -209,7 +230,8 @@ class LLMService:
             return req, screened.verdict
         if screened.dropped:
             log.warning("llm_history_screened", dropped=len(screened.dropped), rules=list(screened.dropped))
-            req = req.model_copy(update={"messages": [Message(**m) for m in screened.messages]})
+            # MediaMessage принимает и текст, и content-part (блок 4.3).
+            req = req.model_copy(update={"messages": [MediaMessage(**m) for m in screened.messages]})
         return req, None
 
     def _prepare(self, req: ChatRequest) -> tuple[ChatRequest, ValidationResult | None, PreparedPrompt]:
@@ -223,7 +245,7 @@ class LLMService:
 
     def _refusal(self, rule: str, req: ChatRequest) -> str:
         return refusal_for(rule, self.settings.support.product_name,
-                           length=max(len(m.content) for m in req.messages if m.role == "user") if rule == "length" else 0,
+                           length=_checked_length(req) if rule == "length" else 0,
                            max_chars=self.settings.security.max_input_chars)
 
     @staticmethod
@@ -256,12 +278,13 @@ class LLMService:
         """Поля строки лога о вызове модели. С Presidio prompt_preview считается фоновой
         задачей (её возвращаем вторым значением) и подставляется в _apply_preview."""
         raw = _user_text(req)
+        typed = _user_text(req, typed_only=True)      # без текста документа и расшифровки голоса
         fields = {"model": req.model, "stream": stream, "prompt_hash": prompt_hash(raw), "prompt_preview": None,
                   "prompt_version": prompt.version, "kb_articles": list(prompt.article_ids)}
         if self.redactor is None:
-            fields["prompt_preview"] = prompt_preview(raw)
+            fields["prompt_preview"] = prompt_preview(typed)
             return fields, None
-        return fields, asyncio.create_task(self.redactor.preview(raw))
+        return fields, asyncio.create_task(self.redactor.preview(typed))
 
     @staticmethod
     async def _apply_preview(fields: dict[str, Any], task: asyncio.Task | None) -> None:

@@ -5,6 +5,10 @@
 Перед расчётом бюджета сверяйте их с https://openai.com/api/pricing. Локальные модели
 Ollama бесплатны: они считаются на своём компьютере. Их контекст зависит от
 настройки num_ctx в Ollama, поэтому context_window не указан.
+
+vision (блок 4.3) — видит ли модель картинки. По нему чат решает, можно ли отправить фото
+модели по умолчанию: текстовая llama3.2 изображений не видит, и вместо непонятной ошибки
+провайдера пользователь получает подсказку про CHAT_VISION_MODEL (supports_images).
 """
 from __future__ import annotations
 
@@ -19,29 +23,47 @@ class ModelInfo(BaseModel):
     input_per_1m: float = Field(ge=0, description="Цена входных токенов, $ за 1 млн")
     output_per_1m: float = Field(ge=0, description="Цена выходных токенов, $ за 1 млн")
     context_window: int | None = Field(default=None, description="Окно контекста, токенов")
+    vision: bool = Field(default=False, description="Видит изображения (content-part image_url)")
     description: str = ""
 
 
 MODEL_CATALOG: list[ModelInfo] = [
     ModelInfo(id="gpt-4o-mini", provider="openai", input_per_1m=0.15, output_per_1m=0.60,
-              context_window=128_000, description="Дешёвая модель для чата и tool calling"),
+              context_window=128_000, vision=True, description="Дешёвая модель для чата и tool calling"),
     ModelInfo(id="gpt-4o", provider="openai", input_per_1m=2.50, output_per_1m=10.00,
-              context_window=128_000, description="Мультимодальная модель: текст и изображения"),
+              context_window=128_000, vision=True, description="Мультимодальная модель: текст и изображения"),
     ModelInfo(id="gpt-4.1-nano", provider="openai", input_per_1m=0.10, output_per_1m=0.40,
-              context_window=1_047_576, description="Самая дешёвая из семейства 4.1: классификация, короткие ответы"),
+              context_window=1_047_576, vision=True,
+              description="Самая дешёвая из семейства 4.1: классификация, короткие ответы"),
     ModelInfo(id="gpt-4.1-mini", provider="openai", input_per_1m=0.40, output_per_1m=1.60,
-              context_window=1_047_576, description="Длинный контекст по цене mini-модели"),
+              context_window=1_047_576, vision=True, description="Длинный контекст по цене mini-модели"),
     ModelInfo(id="gpt-4.1", provider="openai", input_per_1m=2.00, output_per_1m=8.00,
-              context_window=1_047_576, description="Старшая модель семейства 4.1"),
+              context_window=1_047_576, vision=True, description="Старшая модель семейства 4.1"),
     ModelInfo(id="llama3.2", provider="ollama", input_per_1m=0.0, output_per_1m=0.0,
               description="Локально в Ollama, 3B: чат и классификатор проекта"),
     ModelInfo(id="qwen3:4b-instruct", provider="ollama", input_per_1m=0.0, output_per_1m=0.0,
               description="Локально в Ollama, 4B: Function Calling (блок 3.1)"),
-    ModelInfo(id="llama3.2-vision", provider="ollama", input_per_1m=0.0, output_per_1m=0.0,
+    ModelInfo(id="llama3.2-vision", provider="ollama", input_per_1m=0.0, output_per_1m=0.0, vision=True,
               description="Локально в Ollama, 11B: анализ изображений (вариант А)"),
+    ModelInfo(id="gemma3:4b", provider="ollama", input_per_1m=0.0, output_per_1m=0.0, vision=True,
+              description="Локально в Ollama, 4B: текст и изображения — фото в чатах (блок 4.3)"),
+    ModelInfo(id="qwen2.5vl:3b", provider="ollama", input_per_1m=0.0, output_per_1m=0.0, vision=True,
+              description="Локально в Ollama, 3B: текст и изображения"),
 ]
 
 _CATALOG_BY_ID = {info.id: info for info in MODEL_CATALOG}
+
+
+def _info(model: str) -> ModelInfo | None:
+    """Модель из каталога; «:latest» у Ollama и префикс провайдера OpenRouter («openai/») не важны."""
+    name = model.removesuffix(":latest")
+    return _CATALOG_BY_ID.get(name) or _CATALOG_BY_ID.get(name.rsplit("/", 1)[-1])
+
+
+def supports_images(model: str | None) -> bool | None:
+    """True/False — по каталогу; None — модели в каталоге нет, решает провайдер."""
+    info = _info(model) if model else None
+    return info.vision if info is not None else None
 
 
 def estimate_cost(model: str | None, usage: Any) -> float | None:

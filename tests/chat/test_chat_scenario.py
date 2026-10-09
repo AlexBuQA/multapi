@@ -43,6 +43,45 @@ async def test_model_with_memory_passes_every_check(use_llm, capsys):
     assert "2/2  ответы без отказа защитного слоя" in out
 
 
+def latest_name(req) -> str:
+    """«Модель», которая берёт из истории последнее имя, каким пользователь назвался."""
+    asks = "как меня зовут" in str(req.messages[-1].content).lower()
+    for item in reversed(req.messages[:-1]):
+        text = str(item.content)
+        if item.role == "user" and "меня зовут" in text.lower():
+            return f"Вас зовут {text.lower().split('меня зовут', 1)[1].strip(' .,!?').capitalize()}."
+    return "Я не знаю, как вас зовут." if asks else "Здравствуйте!"
+
+
+async def test_default_user_name_scenario_passes_with_history_recall(use_llm, capsys):
+    """--user-name: имя по умолчанию парой сообщений в начале диалога — модели, которая помнит
+    историю, этого хватает: «Александра» до представления и после очистки, «Аня» — после."""
+    async with use_llm(FakeLLM(reply=latest_name)) as http:
+        assert await chat_scenario.run(http, runs=2, user_name="Александра") == 0
+    out = capsys.readouterr().out
+    assert "< Вас зовут Александра." in out and "< Вас зовут Аня." in out
+    for check in chat_scenario.NAME_CHECKS:
+        assert f"2/2  {check}" in out
+
+
+async def test_default_user_name_scenario_catches_unknown(use_llm, capsys):
+    """Как llama3.2 с одной системной подсказкой: «Александра, я не знаю, как тебя зовут»."""
+    async with use_llm(FakeLLM(reply=lambda req: "Александра, я не знаю, как тебя зовут.")) as http:
+        assert await chat_scenario.run(http, runs=1, user_name="Александра") == 1
+    out = capsys.readouterr().out
+    assert "0/1  без представления — имя по умолчанию" in out
+    assert "0/1  после очистки — снова имя по умолчанию" in out
+
+
+@pytest.mark.parametrize("answer, ok", [
+    ("Тебя зовут Александра.", True), ("Рад помочь, Александре!", True), ("Александрой тебя зовут", True),
+    ("Александра, я не знаю, как тебя зовут.", False), ("Я не знаю, как тебя зовут.", False),
+    ("Вы не называли своего имени.", False),
+])
+def test_names_default(answer, ok):
+    assert chat_scenario.names_default(answer, chat_scenario.name_regex("Александра")) is ok
+
+
 async def test_model_that_invents_a_name_fails(use_llm, capsys):
     async with use_llm(FakeLLM(reply=lambda req: "Вас зовут Иван.")) as http:
         assert await chat_scenario.run(http, runs=1) == 1

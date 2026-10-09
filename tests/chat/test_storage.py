@@ -112,6 +112,27 @@ async def test_pg_soft_delete_keeps_rows(pg_sessions):
     assert [tuple(row) for row in rows] == [("раз", True), ("два", True), ("три", False)]
 
 
+async def test_pg_media_refs_null_and_jsonb(pg_sessions):
+    """Блок 4.3: без вложения — SQL NULL (а не JSON null), с вложением — объект JSONB."""
+    from sqlalchemy import text
+
+    from app.chat.domain import MediaRef
+    from app.chat.repositories.pg_repo import PostgresChatRepository
+
+    ref = MediaRef(kind="document", mime="application/pdf", size=3, filename="a.pdf",
+                   part={"type": "text", "text": "[документ PDF]:\nтекст"})
+    async with pg_sessions() as session:
+        repo = PostgresChatRepository(session=session)
+        chat = await repo.create_chat("u", "cli")
+        await repo.append_message(chat.id, message(chat.id, "user", "без файла"))
+        await repo.append_message(chat.id, message(chat.id, "user", "с файлом", media_refs=ref))
+        async with session.begin():
+            rows = (await session.execute(
+                text("SELECT media_refs IS NULL, jsonb_typeof(media_refs), media_refs->'part'->>'type' "
+                     "FROM chat_messages WHERE chat_id = :id ORDER BY seq"), {"id": chat.id})).all()
+    assert [tuple(row) for row in rows] == [(True, None, None), (False, "object", "text")]
+
+
 async def test_pg_concurrent_get_or_create_makes_one_chat(pg_sessions):
     """Восемь одновременных запросов из разных сессий — как из разных копий сервиса."""
     from sqlalchemy import func, select

@@ -215,6 +215,18 @@ def find_injection(text: str) -> str | None:
     return None
 
 
+def validate_document(text: str) -> ValidationResult:
+    """Текст документа из вложения (блок 4.3): только шаблоны инъекции. Длина ограничена при
+    разборе (30 000 символов), невидимые символы убраны там же (app/chat/media.py), а
+    base64, хеши и ключи в документе — обычное дело (инструкция к API), а не атака.
+    Инъекция в документе — косвенная (OWASP LLM01): «Игнорируй инструкции…» в файле действует
+    на модель так же, как в вопросе."""
+    pattern = find_injection(normalize(text))
+    if pattern:
+        return ValidationResult(False, f"document matched pattern {pattern}", rule="injection")
+    return ValidationResult(True)
+
+
 def validate_input(text: str, max_chars: int = MAX_INPUT_CHARS) -> ValidationResult:
     if len(text) > max_chars:
         return ValidationResult(False, f"input too long: {len(text)} > {max_chars}", rule="length")

@@ -35,7 +35,13 @@ sqlalchemy[asyncio]>=2.0.30,<3.0
 asyncpg>=0.29,<1.0
 alembic>=1.13,<2.0
 
+# Блок 4.3: медиа в чатах — форма multipart/form-data (python-multipart для FastAPI Form/File),
+# текст PDF (pypdf) и DOCX (python-docx). Нужны только сервису: бот файлы не разбирает.
+python-multipart>=0.0.20,<1.0
+pypdf>=5.1,<7.0
+python-docx>=1.1,<2.0
+
 # Блок 4.2: Telegram-бот (python -m bot) — тонкий клиент chat-сервиса; в Docker-образ не входит.
 # aiohttp-socks — для BOT_PROXY_URL, если api.telegram.org доступен только через прокси.
-aiogram>=3.20,<4.0
+aiogram>=3.24,<4.0          # 3.24+ — sendMessageDraft (блок 4.3)
 aiohttp-socks>=0.10,<1.0
