@@ -13,26 +13,33 @@ from pathlib import Path
 from app.chat.domain import ChatMessage
 from app.core.config import DatabaseSettings, Settings
 from app.core.exceptions import LLMError
-from app.schemas.chat import ChatDelta, ChatRequest, Usage
+from app.schemas.chat import ChatDelta, ChatRequest, Usage, content_text
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:
+    # Медиа и уведомления (блок 4.3) — явно выключены: src/config.py при импорте читает .env
+    # разработчика в os.environ (load_dotenv), и SUPPORT_VISION_MODEL, AUDIO_API_KEY или
+    # INTERNAL_TOKEN оттуда иначе попали бы в настройки тестов.
     values: dict[str, object] = {"llm": {"openai_api_key": "k", "default_model": "test-model"},
-                                 "chat_repository": "json", "chat_storage_dir": tmp_path / "chats"}
+                                 "chat_repository": "json", "chat_storage_dir": tmp_path / "chats",
+                                 "chat_vision_model": None, "audio_api_key": None, "internal_token": None,
+                                 "bot_url": "http://bot.test:9000", "media": {}}
     values.update(overrides)
     return Settings(**values, _env_file=None)  # type: ignore[arg-type]
 
 
 def remembered_name(req: ChatRequest) -> str:
-    """Ответ «модели», которой важна история: имя ищется во всех сообщениях пользователя."""
-    last = req.messages[-1].content
+    """Ответ «модели», которой важна история: имя ищется во всех сообщениях пользователя.
+    Сообщение с вложением (блок 4.3) — список content-part: смотрим его text-части."""
+    last = content_text(req.messages[-1].content)
     asks = "как меня зовут" in last.lower()
     for item in req.messages:
-        if item.role == "user" and "меня зовут" in item.content and asks:
-            name = item.content.split("меня зовут", 1)[1].strip(" .,!?")
-            if name and "?" not in item.content:
+        text = content_text(item.content)
+        if item.role == "user" and "меня зовут" in text and asks:
+            name = text.split("меня зовут", 1)[1].strip(" .,!?")
+            if name and "?" not in text:
                 return f"Вас зовут {name}."
     if asks:
         return "Вы не называли своего имени."
@@ -69,7 +76,7 @@ class FakeLLM:
         yield ChatDelta(usage=Usage(prompt_tokens=50, completion_tokens=len(parts), total_tokens=50 + len(parts)))
 
     def user_messages(self, call: int = -1) -> list[str]:
-        return [m.content for m in self.requests[call].messages if m.role == "user"]
+        return [content_text(m.content) for m in self.requests[call].messages if m.role == "user"]
 
 
 def message(chat_id: object, role: str, content: str, **extra: object) -> ChatMessage:

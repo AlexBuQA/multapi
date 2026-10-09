@@ -7,26 +7,59 @@
 model_validate(row, from_attributes=True).
 
 Здесь же доменные ошибки: их поднимают репозитории и сервис, а app/main.py переводит в
-HTTP-ответы 404 и 503.
+HTTP-ответы 404, 413, 415, 422 и 503.
+
+Медиа (блок 4.3): у сообщения пользователя с фото, голосом или документом есть media_refs —
+MediaRef с готовым content-part для модели (part). content при этом — текстовая копия для
+истории и интерфейса: подпись пользователя или пометка вида «[фото]». Модель получает и то,
+и другое: [{"type": "text", "text": content}, part] — так фото видно и на следующих
+репликах чата, без повторной загрузки.
 """
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, BaseModel, Field
 
 Role = Literal["user", "assistant", "system"]
+MediaKind = Literal["image", "audio", "document"]
 
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class MediaRef(BaseModel):
+    """Вложение сообщения (блок 4.3). part — готовый content-part OpenAI Chat Completions из
+    app/chat/media.py: {"type": "image_url", ...} для картинки, {"type": "text", ...} с
+    расшифровкой голоса или текстом документа. filename — имя файла от клиента: в лог оно не
+    пишется."""
+
+    kind: MediaKind
+    mime: str
+    size: int = Field(ge=0)
+    filename: str | None = None
+    part: dict[str, Any]
+
+    def summary(self) -> MediaInfo:
+        return MediaInfo(kind=self.kind, mime=self.mime, size=self.size, filename=self.filename)
+
+
+class MediaInfo(BaseModel):
+    """Вложение в ответе GET /chats/{id}/messages: без part — в нём картинка целиком в base64."""
+
+    kind: MediaKind
+    mime: str
+    size: int
+    filename: str | None = None
+
+
 class ChatMessage(BaseModel):
-    """Одно сообщение диалога. tokens — длина текста в токенах (для ответа модели — по
-    usage провайдера), None — не посчитано."""
+    """Одно сообщение диалога. tokens — длина в токенах (для ответа модели — по usage
+    провайдера, для вложения — с текстом документа или оценкой картинки), None — не
+    посчитано."""
 
     id: UUID = Field(default_factory=uuid4)
     chat_id: UUID
@@ -34,6 +67,7 @@ class ChatMessage(BaseModel):
     content: str
     tokens: int | None = None
     created_at: AwareDatetime = Field(default_factory=utc_now)
+    media_refs: MediaRef | None = None
 
 
 class Chat(BaseModel):
@@ -68,6 +102,22 @@ class ChatInputError(ValueError):
         self.field = field
         self.message = message
         super().__init__(f"{field}: {message}")
+
+
+class RequestError(Exception):
+    """Запрос к /chats не выполнен по понятной причине (блок 4.3). status — HTTP-код ответа,
+    code — код ошибки, message — текст для пользователя: бот показывает его как есть."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        self.status = status
+        self.code = code
+        self.message = message
+        super().__init__(f"{code}: {message}")
+
+
+class MediaError(RequestError, ValueError):
+    """Вложение не принято: тип не поддерживается, файл велик или не читается, нет модели для
+    картинок или расшифровки голоса."""
 
 
 class ChatStorageError(RuntimeError):

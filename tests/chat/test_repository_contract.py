@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.chat.domain import ChatMessage, ChatNotFoundError
+from app.chat.domain import ChatMessage, ChatNotFoundError, MediaRef
 from app.chat.repository import ChatRepository
 from chat_fakes import message
 
@@ -159,3 +159,21 @@ async def test_get_or_create_finds_earliest_chat_made_by_create_chat(repo):
 async def test_create_chat_always_makes_a_new_one(repo):
     owner = new_owner()
     assert (await repo.create_chat(owner, "cli")).id != (await repo.create_chat(owner, "cli")).id
+
+
+async def test_media_refs_round_trip(repo):
+    """Блок 4.3: вложение с готовым content-part сохраняется и читается обратно как было."""
+    chat = await repo.create_chat("u", "telegram")
+    image = MediaRef(kind="image", mime="image/png", size=4, filename="скрин.png",
+                     part={"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBO"}})
+    voice = MediaRef(kind="audio", mime="audio/ogg", size=10, filename=None,
+                     part={"type": "text", "text": "[пользователь сказал голосом]:\nПривет"})
+    sent = [message(chat.id, "user", "Что на скрине?", media_refs=image),
+            message(chat.id, "user", "[голосовое сообщение]", media_refs=voice),
+            message(chat.id, "assistant", "Ответ")]
+    for item in sent:
+        await repo.append_message(chat.id, item)
+    loaded = await repo.list_messages(chat.id)
+    assert loaded == sent
+    assert loaded[0].media_refs == image and loaded[2].media_refs is None
+

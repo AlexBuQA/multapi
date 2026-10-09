@@ -28,6 +28,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot import texts
+from bot.config import BotSettings
 from bot.handlers.common import backend_chat_id
 from bot.keyboards.inline import CANCEL, TOPIC_PREFIX, TOPICS, topics_kb
 from bot.services.backend_client import BACKEND_ERRORS, BackendClient
@@ -96,7 +97,7 @@ async def topic_expected(message: Message) -> None:
 
 @router.message(AskFlow.waiting_for_question, NOT_COMMAND)
 async def question_received(message: Message, state: FSMContext, backend: BackendClient,
-                            chat_queue: ChatQueue) -> None:
+                            chat_queue: ChatQueue, settings: BotSettings) -> None:
     data = await state.get_data()
     prompt = build_prompt(data.get("topic", ""), message.text or "")
     await state.clear()                     # ответ ниже может идти долго — сценарий уже завершён
@@ -107,4 +108,4 @@ async def question_received(message: Message, state: FSMContext, backend: Backen
             log.warning("backend_error chat=%s during=ask error=%r", message.chat.id, exc)
             await message.answer(texts.user_message(exc))
             return
-        await answer_with_stream(message, backend, chat_id, prompt)
+        await answer_with_stream(message, backend, chat_id, prompt, mode=settings.bot_streaming)

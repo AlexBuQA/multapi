@@ -13,20 +13,26 @@ from_attributes=True) в pg_repo.py.
 - ix_chats_owner_interface (owner_external_id, interface) — блок 4.2: поиск чата
   клиента в get_or_create_chat (POST /chats идемпотентен). Не уникальный: в базе могут
   быть дубли, созданные до блока 4.2;
+- media_refs (блок 4.3) — вложение сообщения в JSONB: тип, MIME, размер, имя файла и готовый
+  content-part (у картинки — base64 целиком). NULL у сообщений без вложения;
 - seq — добавлен к схеме задания: порядковый номер вставки (IDENTITY). created_at задаёт
   приложение, и у двух сообщений он может совпасть: на Windows до Python 3.13 часы
   datetime.now() идут шагом около 15 мс. Тогда порядок по created_at не определён, а
   ORDER BY created_at DESC, seq DESC сохраняет порядок записи.
 
 Миграции — migrations/versions/ (alembic revision --autogenerate): *_chat_tables.py —
-таблицы блока 4.1, *_chat_owner_index.py — индекс блока 4.2.
+таблицы блока 4.1, *_chat_owner_index.py — индекс блока 4.2, *_message_media_refs.py — столбец
+media_refs блока 4.3.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 
+from typing import Any
+
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, Integer, Text, Uuid, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -56,6 +62,8 @@ class ChatMessageRow(Base):
     tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # none_as_null: у сообщения без вложения — SQL NULL, а не JSON-значение null.
+    media_refs: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
 
 Index(

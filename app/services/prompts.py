@@ -47,7 +47,7 @@ from typing import Any
 
 from app.core.config import SupportSettings
 from app.observability.logging import get_logger
-from app.schemas.chat import ChatRequest
+from app.schemas.chat import ChatRequest, content_text, map_text
 from app.services.guardrails import mask_message, refusal_text
 from app.services.knowledge import load_knowledge_base, search_articles
 
@@ -93,7 +93,7 @@ class PreparedPrompt:
 def retrieval_query(req: ChatRequest) -> str:
     """Запрос к руководству — два последних сообщения пользователя: уточняющий вопрос
     («а если письмо так и не пришло?») сам по себе статью не находит."""
-    user_texts = [m.content for m in req.messages if m.role == "user"]
+    user_texts = [content_text(m.content) for m in req.messages if m.role == "user"]
     return "\n".join(user_texts[-2:])
 
 
@@ -119,7 +119,7 @@ def build_messages(
 
     # Персональные данные — метками до модели (guardrails.py). Поиск по руководству
     # идёт по исходному тексту: он работает в процессе сервиса и наружу не уходит.
-    history = [{**m, "content": mask_message(m["content"])} for m in history]
+    history = [{**m, "content": map_text(m["content"], mask_message)} for m in history]
     found = search_articles(retrieval_query(req), kb, top_k=support.top_k)
     articles = "\n\n".join(format_article(a) for _, a in found) or NO_ARTICLES
     scope_rule = (SCOPE_FOUND if found else SCOPE_NOT_FOUND).format(product_name=support.product_name)

@@ -29,6 +29,9 @@ Swagger: http://localhost:8000/docs
 - чаты с историей на сервере (блок 4.1, app/chat/): роутер /chats; lifespan проверяет
   стратегию контекста и для CHAT_REPOSITORY=postgres создаёт движок SQLAlchemy и фабрику
   сессий (init_chat_storage), а при остановке закрывает их;
+- медиа в чатах (блок 4.3): если задан AUDIO_API_KEY, lifespan создаёт второй AsyncOpenAI —
+  для Whisper на AUDIO_BASE_URL (app.state.audio), с тем же прокси и сертификатами, что у
+  клиента модели; ошибки вложений (MediaError) и служебных запросов — JSON с кодом 401–504;
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -52,7 +55,8 @@ from redis.asyncio import Redis
 from app.chat import routes as chat_routes
 from app.chat.context import make_strategy
 from app.chat.deps import close_chat_storage, init_chat_storage
-from app.chat.domain import ChatInputError, ChatNotFoundError, ChatStorageError
+from app.chat.domain import ChatInputError, ChatNotFoundError, ChatStorageError, RequestError
+from app.core.body_limit import BodyLimitMiddleware, BodyTooLarge
 from app.core.charset import JSONCharsetMiddleware
 from app.core.config import (
     get_settings,
@@ -97,6 +101,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         default_headers=provider_headers(cfg.llm.base_url, "multapi"),   # только для OpenRouter
     )
     app.state.llm_limiter = asyncio.Semaphore(cfg.llm.max_concurrency)
+    # Whisper для голосовых сообщений в чатах (блок 4.3): отдельный клиент — у расшифровки свой
+    # адрес и ключ (Ollama её не умеет). Без AUDIO_API_KEY — None, голос получает 503.
+    app.state.audio = None
+    if cfg.audio_api_key is not None:
+        audio_proxy = proxy_for(cfg.audio_base_url, cfg.llm.proxy_url)
+        audio_options = http_client_options(audio_proxy,
+                                            cfg.llm.use_system_certs and not is_local_url(cfg.audio_base_url))
+        app.state.audio = AsyncOpenAI(
+            api_key=cfg.audio_api_key.get_secret_value(),
+            base_url=cfg.audio_base_url or None,
+            timeout=cfg.media.audio_timeout,
+            max_retries=2,
+            http_client=DefaultAsyncHttpxClient(**audio_options) if audio_options else None,
+        )
     # Канарейка (блок 3.8): новая при каждом старте; само значение в лог не пишем.
     app.state.canary = new_canary() if cfg.security.enabled else None
     # Presidio (опционально): модель грузится несколько секунд — один раз здесь, в потоке.
@@ -121,13 +139,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("service_started", default_model=cfg.llm.default_model,
              provider=cfg.llm.base_url or "https://api.openai.com/v1",
              security_enabled=cfg.security.enabled, rate_limit_per_min=cfg.rate_limit_per_min,
-             chat_repository=cfg.chat_repository)
+             chat_repository=cfg.chat_repository, vision_model=cfg.chat_vision_model,
+             audio=(cfg.audio_base_url or "https://api.openai.com/v1") if app.state.audio else None,
+             notify=cfg.bot_url if cfg.internal_token else None)
     if not cfg.security.enabled:
         log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
                                               "(только для прогона garak baseline)")
     yield
 
     await app.state.openai.close()
+    if app.state.audio is not None:
+        await app.state.audio.close()
     await app.state.cache.aclose()
     await close_chat_storage(app.state)
     if app.state.pii_redactor is not None:
@@ -137,11 +159,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title=settings.app_name,
-    version="4.2.0",
+    version="4.3.0",
     description=(
         "Чат-ядро ассистента техподдержки: ответ целиком (`POST /chat`) и потоком "
         "(`POST /chat/stream`), кеш в Redis, каталог моделей; чаты с историей на сервере "
-        "(`/chats`, ответ потоком SSE). Каждый ответ содержит "
+        "(`/chats`, ответ потоком SSE; фото, голос, PDF и DOCX — с блока 4.3). Каждый ответ содержит "
         "заголовок `X-Request-ID`; ошибки приходят в формате "
         "`{\"error\": {\"code\": ..., \"message\": ...}}`."
     ),
@@ -154,6 +176,11 @@ app = FastAPI(
         {"name": "health", "description": "Проверка состояния"},
     ],
 )
+
+# Предел тела вопроса с файлом (блок 4.3): до разбора формы — иначе файл любого размера лёг
+# бы на диск раньше проверки MEDIA__MAX_*_BYTES. Самый внутренний: его 413 проходит через
+# CORS и RequestContextMiddleware.
+app.add_middleware(BodyLimitMiddleware)
 
 # Лимит запросов (блок 3.8, RATE_LIMIT_PER_MIN): добавлен первым, поэтому внутренний —
 # ответ 429 проходит через CORS и RequestContextMiddleware (CORS-заголовки, X-Request-ID,
@@ -212,6 +239,18 @@ async def handle_chat_not_found(request: Request, exc: ChatNotFoundError) -> JSO
 async def handle_chat_input(request: Request, exc: ChatInputError) -> JSONResponse:
     return _error(request, 422, exc.code, "Запрос не прошёл валидацию.",
                   fields=[{"field": exc.field, "message": exc.message}])
+
+
+@app.exception_handler(RequestError)
+async def handle_request_error(request: Request, exc: RequestError) -> JSONResponse:
+    # Вложение не принято (413/415/422/502–504), нет X-Internal-Token (401): текст — для пользователя.
+    return _error(request, exc.status, exc.code, exc.message)
+
+
+@app.exception_handler(BodyTooLarge)
+async def handle_body_too_large(request: Request, exc: BodyTooLarge) -> JSONResponse:
+    # Тело без Content-Length оказалось больше предела уже при разборе формы.
+    return _error(request, 413, "request_too_large", str(exc.detail))
 
 
 @app.exception_handler(ChatStorageError)

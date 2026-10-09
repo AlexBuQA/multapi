@@ -109,6 +109,15 @@ def get_llm_client(llm: Annotated[LLMService, Depends(get_llm_service)]) -> LLMS
     return llm
 
 
+def get_audio_client(request: Request) -> Any | None:
+    """Клиент Whisper (блок 4.3): AsyncOpenAI на AUDIO_BASE_URL, создаёт lifespan, если задан
+    AUDIO_API_KEY. None — расшифровка голоса не настроена."""
+    return getattr(request.app.state, "audio", None)
+
+
+AudioClientDep = Annotated[Any | None, Depends(get_audio_client)]
+
+
 def get_chat_locks(request: Request) -> ChatLocks | None:
     """Замки чатов процесса (создаёт lifespan); в тестах без lifespan — None."""
     return getattr(request.app.state, "chat_locks", None)

@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8 и 4.1
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8 и 4.1–4.3
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -18,6 +18,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 3.7 — Тестирование и оценка качества:** `/chat` отвечает как ассистент по руководству пользователя, unit-тесты на `pytest` с `mocker` и запретом сети, golden dataset на 25 вопросов, eval-прогон с LLM-as-judge (G-Eval) и проверка порогов перед релизом — см. раздел [«Блок 3.7»](#блок-37--тестирование-и-оценка-качества).
 - **Блок 4.1 — Архитектура чата и хранение истории:** модуль `app/chat/` — чат с историей на сервере, хранилище JSONL или Postgres за одним контрактом `ChatRepository`, скользящее окно контекста с бюджетом токенов, ответ потоком SSE, миграция Alembic — см. раздел [«Блок 4.1»](#блок-41--архитектура-чата-и-хранение-истории) и [`docs/chat.md`](docs/chat.md).
 - **Блок 4.2 — Telegram-бот как тонкий клиент:** бот на aiogram 3 в `bot/` ходит в чат блока 4.1 за всей работой с моделью — `/start`, `/help`, `/clear`, `/cancel`, сценарий `/ask` с выбором раздела, ответ потоком правками сообщения; `POST /chats` стал идемпотентным — см. раздел [«Блок 4.2»](#блок-42--telegram-бот-как-тонкий-клиент) и [`docs/bot.md`](docs/bot.md).
+- **Блок 4.3 — Мультимодальность и streaming:** бот принимает фото, голосовые, PDF и DOCX и отправляет их в сервис тем же `send_message`; сервис превращает файл в content-part (картинка — `image_url` прямо в `chat.completions`, голос — Whisper, документ — текст) и хранит его в истории; ответ в Telegram — нативным черновиком `sendMessageDraft`; обратный канал сервис → бот `POST /notify` — см. раздел [«Блок 4.3»](#блок-43--мультимодальность-и-streaming).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -83,9 +84,10 @@ multapi/
 │   ├── vision.py            # вариант А: base64 + Vision (vision-модель)
 │   ├── voice.py             # вариант Б: Whisper -> classify -> LLM -> TTS
 │   └── utils.py             # логирование, base64, валидация файлов, UsageTracker
-├── app/                     # блоки 3.1, 3.3–3.8, 4.1–4.2
+├── app/                     # блоки 3.1, 3.3–3.8, 4.1–4.3
 │   ├── chat/                # блок 4.1: domain.py, repository.py (Protocol), repositories/ (JSONL, Postgres),
-│   │                        #   context.py (окно, токены), service.py, routes.py (/chats, SSE), deps.py
+│   │                        #   context.py (окно, токены), service.py, routes.py (/chats, SSE), deps.py;
+│   │                        #   4.3: media.py (фото, Whisper, PDF/DOCX -> content-part)
 │   ├── main.py              # блок 3.4: FastAPI — lifespan, middleware, CORS, обработчики ошибок
 │   ├── observability/       # блок 3.6: tracing.py (Phoenix), logging.py (structlog), middleware.py
 │   │                        #   (request_id), pii.py (маскирование), pii_presidio.py (опционально)
@@ -116,8 +118,9 @@ multapi/
 ├── bot/                     # блок 4.2: Telegram-бот (python -m bot) — тонкий клиент /chats
 │   ├── __main__.py          # Bot, Dispatcher + MemoryStorage, роутеры, dp["backend"], polling
 │   ├── config.py            # BOT_TOKEN, BACKEND_URL, BOT_ADMIN_IDS (pydantic-settings, .env)
-│   ├── handlers/            # commands.py, fsm.py (/ask), text.py, errors.py
-│   ├── services/            # backend_client.py (httpx, SSE), streaming.py, telegram.py (HTTPS, прокси)
+│   ├── handlers/            # commands.py, fsm.py (/ask), media.py (4.3: фото, голос, документы), text.py, errors.py
+│   ├── services/            # backend_client.py (httpx, SSE), streaming.py (черновик или правки), telegram.py
+│   ├── web.py               # блок 4.3: HTTP-API бота POST /notify (X-Internal-Token)
 │   ├── keyboards/inline.py  # разделы руководства для /ask
 │   ├── states.py            # AskFlow
 │   └── texts.py             # тексты бота и ошибки для пользователя
@@ -126,7 +129,7 @@ multapi/
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   ├── run_tool_call.py     # прогон трёх тест-запросов
-│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4; chats_*.json — блок 4.1)
+│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4; chats_* — блоки 4.1, 4.3)
 ├── scripts/                 # блок 3.3
 │   ├── benchmark.py         # бенчмарк sync vs async -> benchmark_results.md
 │   ├── benchmark_results.md # результаты локального прогона (мок и Ollama)
@@ -139,8 +142,8 @@ multapi/
 │   └── chat_scenario.py     # блок 4.1: сценарий «Аня» против запущенного сервиса, N прогонов
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
-│   ├── chat.md              # блок 4.1: архитектура чата, стратегия контекста, эндпоинты с curl
-│   ├── bot.md               # блок 4.2: Telegram-бот — устройство, поток, сценарий /ask, запуск
+│   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
+│   ├── bot.md               # блоки 4.2–4.3: Telegram-бот — поток, /ask, медиа, /notify, запуск
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -158,9 +161,12 @@ multapi/
 │   ├── log_capture.py       # перехват JSON-лога в тестах
 │   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
-│   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток
+│   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
+│   │                        #   4.3: медиа, черновики, /notify
+│   ├── app/chat/            # блок 4.3: test_media.py (PDF, DOCX, картинки), test_whisper.py (голос)
 │   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm)
-├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav
+├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav;
+│                            #   блок 4.3: support_rules.docx/.pdf — регламент поддержки для бота и тестов
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 ├── var/chats/               # блок 4.1: история чатов в JSONL (CHAT_STORAGE_DIR, в git не попадает)
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
@@ -1743,6 +1749,8 @@ python eval/security/garak_report.py after          # с таблицей «бы
 
 Сервис стал stateful-чатом: история диалога хранится на сервере, клиент присылает только новый вопрос. Подробно — [`docs/chat.md`](docs/chat.md): схема Mermaid, выбор стратегии контекста, эндпоинты с примерами curl для bash и PowerShell, переключение хранилища.
 
+> С блока 4.3 вопрос в `POST /chats/{id}/messages` — форма (`multipart/form-data`), а поток — JSON-события `{"type": "token" | "done"}`. Ниже — формат и результаты на момент блока 4.1: JSON-тело и `data: [DONE]`.
+
 Что сделано:
 - **Модуль `app/chat/`.** Доменные `Chat` и `ChatMessage`, контракт `ChatRepository` (`typing.Protocol`) и две реализации:
   - `JsonChatRepository` — файлы JSONL, только дописывание, мягкое удаление строкой-маркером;
@@ -1848,6 +1856,8 @@ docker compose exec postgres psql -U multapi -d multapi -c "select role, left(co
 ## Блок 4.2 — Telegram-бот как тонкий клиент
 
 Бот на aiogram 3 в папке `bot/`. За всей работой с моделью он ходит в чат блока 4.1: про LLM ничего не знает и историю не хранит. Подробно — [`docs/bot.md`](docs/bot.md).
+
+> В блоке 4.3 бот стал принимать файлы, показывать ответ черновиком `sendMessageDraft` и получил свой HTTP-API `/notify`; таймауты `BackendClient` — 60 и 120 с. Ниже — описание и результаты на момент блока 4.2.
 
 - **`BackendClient`** (`bot/services/backend_client.py`) — async-клиент на httpx с таймаутом 30 с (`BACKEND_TIMEOUT`):
   - `get_or_create_chat` → `POST /chats`;
@@ -1971,6 +1981,168 @@ python scripts/chat_scenario.py --runs 10            # терминал 2: ст�
 
 garak после правки не перезапускался: проверка входа и ответа не менялась, а прогоны блока 3.8 выше относятся к старой формулировке.
 
+## Блок 4.3 — Мультимодальность и streaming
+
+Связка бот + chat-сервис научилась работать с файлами. Бот принимает фото, голосовые, PDF и DOCX и отправляет их в сервис — тем же `BackendClient.send_message`, что и текст. Сервис превращает файл в content-part, сохраняет его в истории и вызывает модель одним `chat.completions.create`. Ответ в Telegram растёт нативным черновиком `sendMessageDraft`. Появился и обратный канал: сервис пишет пользователю первым через HTTP-API бота `POST /notify`. Подробно — [`docs/chat.md`](docs/chat.md#медиа-блок-43) (сервис) и [`docs/bot.md`](docs/bot.md) (бот).
+
+```mermaid
+sequenceDiagram
+    actor U as Пользователь
+    participant T as Telegram
+    participant B as Бот
+    participant S as Сервис /chats
+    participant W as Whisper
+    participant M as Модель
+    U->>T: фото, голосовое или PDF + подпись
+    T->>B: update
+    B->>T: getFile, скачать (в память)
+    B->>S: POST /chats/{id}/messages — форма: content, media
+    alt голос
+        S->>W: /audio/transcriptions (ogg как есть)
+        W-->>S: текст
+    end
+    S->>S: media.py: content-part; история: media_refs
+    S->>M: chat.completions.create(stream=True): [подпись, картинка или текст]
+    B->>T: sendMessageDraft — «Thinking…»
+    loop SSE {"type": "token"}
+        S-->>B: фрагмент
+        B->>T: sendMessageDraft(draft_id, текст) не чаще раза в 0,3 с
+    end
+    S-->>B: {"type": "done"}
+    B->>T: sendMessage — ответ целиком
+    Note over S,B: позже: POST BOT_URL/notify (X-Internal-Token) -> sendMessage
+```
+
+### Что сделано
+
+- **Контракт `POST /chats/{chat_id}/messages`.** URL прежний, тело — форма `multipart/form-data`: `content` (обязательно) и необязательный файл `media`. Отдельного `/messages/with-media` нет. JSON-тело блока 4.1 получает `415` с подсказкой, а не непонятный `422`. Поток — JSON-события задания: `data: {"type": "token", "delta": "..."}`, в конце `data: {"type": "done"}`, ошибка — `{"type": "error", "code", "message"}`. Клиенты переведены на новый формат: бот, `scripts/chat_scenario.py`, примеры в `docs/chat.md`.
+- **`app/chat/media.py` — файл → content-part:**
+
+  | Файл | content-part | Чем |
+  |---|---|---|
+  | фото JPEG/PNG/WEBP/GIF | `{"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}` | как есть, в том же вызове модели — отдельного Vision-вызова нет |
+  | голос ogg/opus, mp3, m4a, wav | `{"type": "text", "text": "[пользователь сказал голосом]:\n..."}` | Whisper (`whisper-1`), ogg принимается без конвертации — FFmpeg и subprocess в сервисе нет |
+  | PDF | `{"type": "text", "text": "[документ PDF]:\n..."}` | pypdf, до 50 страниц, скан распознаётся эвристикой |
+  | DOCX | `{"type": "text", "text": "[документ DOCX]:\n..."}` | python-docx, абзацы и таблицы по порядку |
+
+  Тип проверяется по первым байтам файла, текст документа обрезается до 30 000 символов, пределы размера — `MEDIA__*`. Ошибки — JSON с кодом и текстом для пользователя: `413`, `415`, `422`, `502`–`504`.
+- **История.** Вопрос сохраняется с `media_refs`: тип, MIME, размер, имя файла и готовый `part`. В JSONL это поле строки, в Postgres — столбец `media_refs JSONB` (миграция `de37b49a9e5c`). На следующих репликах `ChatService` восстанавливает `[подпись, part]` — модель снова «видит» фото и документ, пока сообщение в окне истории. `GET /chats/{id}/messages` показывает `media` без `part`.
+- **Фото смотрит `CHAT_VISION_MODEL`.** `llama3.2` изображений не видит, поэтому запрос с картинкой в контексте уходит vision-модели — для Ollama `gemma3:4b`. В каталоге моделей появилось поле `vision`. Если vision-модели нет, фото получает понятный отказ и в историю не попадает.
+- **Бюджет токенов.** Картинка считается за `MEDIA__IMAGE_TOKENS` (800). Длинный документ не выбрасывается, а укорачивается до остатка бюджета с пометкой: иначе Ollama молча отрезала бы начало запроса вместе с системным промптом.
+- **Защитный слой 3.8.** Текст документа и расшифровка голоса проверяются шаблонами инъекции: «Игнорируй инструкции…» в файле — отказ без вызова модели. Подпись проверяется как вопрос. Персональные данные маскируются во всех текстовых частях. В лог (`prompt_preview`) попадает только подпись.
+- **Тяжёлые файлы.** Тело запроса ограничено до разбора формы (`413 request_too_large`), размер файла проверяется до чтения в память. У DOCX до разбора проверяются распакованные размеры — защита от zip-бомбы. Текст извлекается не больше, чем нужно, разбор PDF/DOCX ограничен по времени (`MEDIA__PARSE_TIMEOUT`) и числу одновременных разборов.
+- **Бот:**
+  - `bot/handlers/media.py`: фото (размер до 2 МБ), голосовое как `audio/ogg`, аудиофайл, PDF и DOCX до 10 МБ. Файл скачивается в память (`get_file` + `download_file`). Подпись — вопрос, без подписи — вопрос по умолчанию. Бот не импортирует `openai`, `pypdf` и `python-docx`, это проверяет тест.
+  - Ответ — нативным черновиком `sendMessageDraft`: сначала «Thinking…», затем черновик с одним `draft_id` растёт не чаще раза в 0,3 с, в конце `sendMessage` фиксирует ответ. В группах и если Telegram отклонил черновик — правки сообщения, как в 4.2 (`BOT_STREAMING=edit` включает их везде).
+  - httpx: один `AsyncClient` на приложение, закрывается в `finally`. Таймауты: подключение 3 с, чтение 60 с, отправка 10 с, пул 5 с, поток ответа — 120 с. Повтор — только при ошибке подключения, без повтора на 4xx/5xx и начавшийся поток. Ошибки — текстами задания, а для файлов — текстом сервиса.
+- **Обратный канал.** `bot/web.py` — FastAPI-приложение с `POST /notify`, uvicorn рядом с polling в том же цикле событий. Без верного `X-Internal-Token` — `401`. На стороне сервиса — `app/services/notifier.py` и демо-эндпоинт `POST /chats/{chat_id}/system-message` (`{text, notify}`): он дописывает сообщение ассистента в историю и при `notify: true` отправляет его в Telegram. `INTERNAL_TOKEN` — общий секрет в `.env`, не короче 16 символов; без него API бота не поднимается.
+- **Имя по умолчанию** (добавлено после проверки на Windows). Бот присылает с каждым вопросом поле `user_name` — `BOT_DEFAULT_USER_NAME`, по умолчанию «Александра». Сервис передаёт имя модели двумя способами. Первый — подсказка в системном промпте: пользователя зовут так, пока он не назовёт себя иначе, а имена из документов и с картинок — не его имя. Второй — пара сообщений в начале диалога: «Меня зовут Александра.» и ответ модели. Одной подсказке `llama3.2` следовала через раз, а имя из истории называет надёжно. Сервис не сохраняет имя в историю и не пишет его в лог; в `answer_preview` оно видно, только если его произнесла сама модель. Поле уходит в системный промпт, поэтому принимается только одно-три слова из букв до 40 знаков, иначе `422`. Без поля промпт прежний, и сценарий блока 4.1 не меняется. Подробно — [`docs/chat.md`](docs/chat.md#имя-по-умолчанию-блок-43).
+- **Зависимости:** `pypdf`, `python-docx` и явно `python-multipart`. Он и раньше стоял в окружении как зависимость другого пакета, но в `uv.lock` его не было, и Docker-образ без него не принял бы форму. Боту новые пакеты не нужны (FastAPI и uvicorn уже были), но aiogram — не ниже 3.24: в нём появился `sendMessageDraft`.
+- **Образцы:** `samples/support_rules.docx` и `.pdf` — «Регламент технической поддержки» с таблицей сроков. Их можно прислать боту, на них же тесты проверяют кириллицу и таблицы. Генератор — `samples/_generate_documents.py`.
+- **Тесты:** 790 вместо 581.
+  - `tests/app/chat/test_media.py` и `test_whisper.py` — 47 тестов по заданию: PDF, PNG/JPEG как data-URI, голос через `AsyncMock`; zip-бомба, таймаут разбора, проверка аудио по байтам.
+  - `tests/chat/test_routes_media.py` и `test_media_context.py` — 34 теста: файлы через приложение целиком, предел тела запроса, защитный слой, бюджет, `system-message`.
+  - `tests/chat/test_client_gone.py` — 7 тестов: клиент ушёл до первого фрагмента (найдено на Windows, см. «Результаты»).
+  - `tests/chat/test_default_user_name.py` — 23 теста: имя по умолчанию в системном промпте и парой сообщений в начале диалога, не в истории и не в логе, `422` на неверное имя и инъекцию, бот и сервис вместе.
+  - `tests/chat/test_chat_scenario.py` — ещё 8 тестов: режим `scripts/chat_scenario.py --user-name` и разбор ответа «Александра, я не знаю…» как непройденной проверки.
+  - `tests/bot` — 156 тестов вместо 70: формат SSE через `MockTransport`, multipart, повторы и таймауты, медиа-хендлеры, черновики и их ошибки, `/notify`, `BOT_DEFAULT_USER_NAME`.
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt                 # python-multipart, pypdf, python-docx
+alembic upgrade head                            # Postgres: столбец media_refs (для JSON не нужно)
+ollama pull gemma3:4b                           # vision-модель для фото, если её ещё нет
+python -m pytest -q                             # 790 passed
+```
+
+В `.env` добавить:
+
+```
+CHAT_VISION_MODEL=gemma3:4b
+INTERNAL_TOKEN=<python -c "import secrets; print(secrets.token_urlsafe(32))">
+LLM__REQUEST_TIMEOUT=600        # фото на CPU: gemma3:4b думает до первого слова 3–4 минуты
+BACKEND_STREAM_TIMEOUT=600      # столько же ждёт бот; по заданию 120 с — для фото на CPU мало
+```
+
+Запустить `uvicorn app.main:app --port 8000` и `python -m bot`. В логе бота должно быть `notify_api_started` и `streaming=draft`. В Telegram:
+1. `samples/support_rules.pdf` с подписью «Сколько ждать ответа по заявке с высоким приоритетом?» — ответ по таблице регламента, черновик растёт на глазах.
+2. `samples/support_rules.docx` без подписи — пересказ документа.
+3. Фото или скриншот с подписью — ответ `gemma3:4b`; на CPU первое слово появляется через 3–4 минуты, до этого бот показывает «печатает».
+4. Голосовое — без `AUDIO_API_KEY` бот отвечает «Голосовые сообщения пока не принимаются…».
+5. Файл `.txt` — подсказка про PDF и DOCX.
+6. `/notify` из PowerShell — сообщение в Telegram; без токена — 401 (команды — в [`docs/bot.md`](docs/bot.md#уведомления-из-сервиса--post-notify-блок-43)).
+7. Имя по умолчанию: `/clear`, «Как меня зовут?» — «Александра»; «Меня зовут Аня», затем «Как меня зовут?» — «Аня». То же несколькими прогонами без Telegram: `python scripts/chat_scenario.py --user-name Александра --runs 5`.
+
+### Результаты
+
+**Песочница (Linux).**
+- **Тесты:** `pytest` — 790 passed, с `-W error` тоже.
+- **Вся связка целиком.** Подняты uvicorn (JSON-хранилище, `LLM__DEFAULT_MODEL=llama3.2`, `CHAT_VISION_MODEL=gemma3:4b`), поддельный OpenAI-совместимый провайдер с потоковым ответом и `/audio/transcriptions`, поддельный Telegram Bot API (апдейты, `getFile`, скачивание, `sendMessageDraft`) и бот из `bot/__main__.py` с настоящим `/notify`. Результаты:
+  - текст — ответ `llama3.2`;
+  - фото с подписью — `gemma3:4b`, в запросе модели `[text, image_url]`;
+  - голосовое — Whisper получил `audio.ogg` с заголовком `OggS` как есть, модель — расшифровку;
+  - PDF с русским именем «Регламент поддержки.pdf» и DOCX без подписи — текст документа в запросе модели;
+  - следующий текстовый вопрос — история со всеми вложениями, служебная пометка `media` провайдеру не ушла;
+  - `.txt` — подсказка;
+  - в группе — правки сообщения вместо черновика;
+  - в личном чате — черновики с одним `draft_id`, затем `sendMessage` с полным ответом;
+  - `/notify`: с токеном — 200 и сообщение в Telegram, с чужим и без токена — 401, заблокировавший бота — 403;
+  - `system-message` с `notify: true` — 200, `notified: true`;
+  - JSON-тело в `/messages` — 415;
+  - текст документов, телефон и e-mail из них в логи сервиса и бота не попали;
+  - Ctrl+C (SIGINT) остановил polling и API штатно, порт освободился.
+- **Образ Docker:** зависимости из `uv.lock` (`uv sync --frozen`) ставятся, сервис на них принимает форму с DOCX.
+- **Что песочница не проверяет:** настоящий Telegram (как он показывает черновик), `gemma3:4b` и Whisper — это проверка на Windows.
+
+**Windows (Ollama на CPU, Postgres).**
+- **Установка и тесты:** `pip install -r requirements.txt` доставил `python-multipart`, `pypdf`, `python-docx`; `alembic upgrade head` применил `de37b49a9e5c`; `pytest` — 742 passed (до исправления ниже). Строка `notify_api_failed … WinError 10048` посреди точек — это тест занятого порта, он её и ждёт.
+- **Старт:** сервис — `service_started` с `vision_model: gemma3:4b`, `notify: http://127.0.0.1:9000`; бот — `notify_api_started` и `streaming=draft`.
+- **PDF без подписи** (`support_rules.pdf`) — пересказ `llama3.2`: первый фрагмент через 23 с, весь ответ — 35 с; черновик в Telegram рос на глазах, 21 обновление (`mode=draft updates=21`), затем ответ сохранился сообщением.
+- **Вопрос по PDF следом** («Сколько ждать ответа по заявке с высоким приоритетом?») — документ был в контексте (`input_tokens` 727 против 574), но `llama3.2` перепутала строки таблицы: «1 рабочий день» вместо «первый ответ — 1 час». Это предел модели 3B, а не потеря документа.
+- **DOCX без подписи** — пересказ, 21 обновление черновика. В одном из двух прогонов `llama3.2` перешла на английский посреди ответа — известная особенность модели (английская фраза попадалась ей и в оценке блока 3.7, `faq_003`).
+- **Голосовое** без `AUDIO_API_KEY` — `503 audio_not_configured`, бот ответил «Голосовые сообщения пока не принимаются…».
+- **Фото — найден дефект.** `gemma3:4b` думала над скриншотом около 200 с до первого слова (`prompt_tokens_est` 948 с картинкой), а бот ждал 120 с (`BACKEND_STREAM_TIMEOUT` из задания) и отвечал «Ответ занимает слишком долго». Хуже другое: сервис не замечал ухода бота, пока модель молчала — `StreamingResponse` ещё не создан, и разрыв никто не слушал. Запрос к Ollama шёл до конца и держал замок чата, поэтому `/clear` после таймаута ждал 56–70 с.
+  - **Исправлено:** пока первого фрагмента нет, `POST /chats/{id}/messages` раз в 0,5 с проверяет соединение (`first_chunk` в `app/chat/routes.py`). Клиент ушёл — генератор ответа отменяется, запрос к модели обрывается, замок отпускается, в логе `chat_client_gone` и статус `499`. Тесты — `tests/chat/test_client_gone.py`; без исправления два из них зависают.
+  - **Проверка на uvicorn в песочнице:** провайдер «думает» 8 с, `curl --max-time 2` уходит через 2 с → провайдер увидел разрыв через 1,6 с после начала запроса, `DELETE /messages` выполнился за 0,45 с вместо ожидания конца генерации; клиент, который ждёт, получил ответ через 8,1 с, как обычно.
+  - **Для CPU** в `.env` — `LLM__REQUEST_TIMEOUT=600` и `BACKEND_STREAM_TIMEOUT=600` (раздел «Проверка на Windows» выше).
+- **Telegram из рабочей сети** напрямую недоступен: ping до `api.telegram.org` проходит, TCP-соединение на 443 — нет. Бот работает через учебный прокси (`BOT_PROXY_URL`); `curl.exe -x` через тот же прокси получил от `api.telegram.org` ответ 302.
+- **Фото после исправления** (`LLM__REQUEST_TIMEOUT=600`, `BACKEND_STREAM_TIMEOUT=600`, `pytest` — 749 passed): скриншот профиля с подписью «Что за ошибка на скриншоте и как её исправить?» — ответ `gemma3:4b` через 215 с (первый токен — через 214 с), `outcome: completed`, бот показал черновик и сохранил ответ сообщением (`mode=draft`).
+  - Смысл ответа неточен: на скриншоте ошибка «пароль должен содержать не менее 8 символов», а модель отнесла её к полю «Имя пользователя». Мелкий текст на скриншоте, сжатом Telegram до JPEG, 4B-модель читает неуверенно.
+  - Модель обратилась к пользователю по имени с картинки: персональные данные на фото не маскируются — маскер работает с текстом (отмечено в `docs/chat.md`).
+  - Бюджет: оценка сервиса — 955 токенов (картинка за 800), фактически у `gemma3:4b` — 419 (картинка — 256). Оценка с запасом, как и задумано.
+  - Обращение «Иван» по логину со скриншота привело к доработке «Имя по умолчанию» (раздел «Что сделано»).
+- **`/notify`** из PowerShell: с токеном — `ok: True` и сообщение «Заявка №42 решена…» в Telegram, в логе бота `notify_sent`; без токена и с чужим токеном — `401` и `notify_unauthorized token=missing|wrong`, в Telegram ничего.
+- **`system-message`** с `notify: true` — `notified: True`, второе сообщение в Telegram и последняя запись истории чата (`assistant`); в логе сервиса `notify_sent` и `chat_system_message`.
+- **Ушедший клиент на Windows:** `curl.exe --max-time 20` с фото отключился через 20 с (код 28) → в логе сервиса `llm_stream_cancelled` (`gemma3:4b`, 20,0 с), `chat_turn_finished` с `outcome: interrupted`, `chat_client_gone` (`waited_ms` 20069) и `http_request` со статусом `499`; `DELETE /messages` сразу после — за 0,22 с. До исправления `/clear` в такой ситуации ждал 56–70 с.
+- **Имя по умолчанию, первая версия — только подсказка в системном промпте** (`default_user_name=on` в логе бота). После `/clear` на «Как меня зовут?» `llama3.2` ни разу не ответила просто «Александра». Было так: дважды «Александра, … я не знаю, как тебя зовут», раз «Я не знаю, как тебя зовут», раз «Александра, твоё имя — [ИМЯ]». «Меня зовут Юлия» и затем «Как меня зовут?» дали верное «Юлия». Поэтому имя теперь передаётся ещё и парой сообщений в начале диалога (`docs/chat.md`).
+- **Имя по умолчанию, вторая версия — подсказка и пара сообщений** (`pytest` — 790 passed). `python scripts/chat_scenario.py --user-name Александра --runs 5`:
+  - «без представления — имя по умолчанию» — 4/5. Один раз модель ответила «Александра, я их не знаю…»;
+  - «представилась Аней — ответ называет Аню» — 5/5;
+  - «после очистки — снова имя по умолчанию» — 5/5.
+
+  В Telegram после `/clear` на «Как меня зовут?» модель ответила «Александра, я их уже знала: Александра.». После «Меня зовут Красотка.» она перешла на новое имя: «Красотка, я их уже знаю: Красотка.».
+
+  Побочный эффект: модель иногда говорит «мы ранее разговаривали о тебе». Так 3B-модель объясняет себе имя в начале диалога. Сценарий блока 4.1 без `--user-name` не изменился: 3/3 по всем проверкам.
+
+### Соответствие критериям блока 4.3
+
+| Критерий | Реализация |
+|---|---|
+| `POST /chats/{id}/messages` принимает `multipart/form-data` с `content` и необязательным `media`; `/messages/with-media` нет | `app/chat/routes.py` — `Form` + `File`; `test_routes.py`, `test_routes_media.py` |
+| `media_to_part` — `image_url` для картинок, `text` для голоса (Whisper) и PDF/DOCX | `app/chat/media.py`; `tests/app/chat/test_media.py`, `test_whisper.py` |
+| Картинка — прямо в основной `chat.completions.create`, отдельного Vision-вызова нет | `test_image_goes_to_vision_model_in_the_same_call`, `test_provider_gets_openai_content_parts` |
+| Голос — через `whisper-1` без конвертации, FFmpeg/subprocess нет | `whisper_transcribe` с ogg как есть; `test_backend_has_no_ffmpeg_or_subprocess` |
+| `media_refs.part` сохраняется в `ChatMessage` и используется дальше | `MediaRef`, JSONL и `JSONB`; `test_media_refs_round_trip`, `test_document_is_seen_on_next_turns` |
+| Минимум один тип медиа end-to-end | PDF, DOCX, фото, голос — связка в песочнице; на Windows с Ollama — PDF и DOCX (`llama3.2`), фото (`gemma3:4b`), голос без ключа — понятный отказ |
+| Бот не импортирует `openai`, `pypdf`, `python-docx` | `test_bot_does_not_import_media_libraries` |
+| Все вызовы бота — один `BackendClient.send_message(chat_id, content, media=None, mime=None)` | `bot/services/backend_client.py`; `test_send_message_with_media_is_multipart` |
+| `/notify` шлёт сообщение в Telegram; без верного `X-Internal-Token` — 401 | `bot/web.py`; `test_notify.py`; на Windows — 200 и сообщение, без токена и с чужим — 401 |
+| Streaming через черновик: растёт до финального `send_message` | `DraftRenderer`; `test_draft_*`, `test_answer_with_stream_draft_end_to_end` |
+| `httpx.AsyncClient` — singleton, закрывается в `finally` | `make_http` в `bot/__main__.py`; `test_run_closes_singleton_http_client` |
+| Ошибки backend — текстом пользователю, не трейсбеком | `bot/texts.py`; `test_spec_error_texts`, `test_status_errors_become_user_messages` |
+| SSE-парсинг через `httpx.MockTransport` | `test_send_message_parses_sse_through_mock_transport` |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -2011,6 +2183,8 @@ LLM__MAX_RETRIES=2
 Для ассистента и оценки качества (блок 3.7): `SUPPORT__ENABLED` (`true` — без `system` в запросе сервис добавляет промпт ассистента и статьи руководства), `SUPPORT__PRODUCT_NAME`, `SUPPORT__MAX_SENTENCES`; для судьи eval — `EVAL_JUDGE_MODEL`, `EVAL_JUDGE_BASE_URL`, `EVAL_JUDGE_API_KEY`, `EVAL_JUDGE_REASONING` (только OpenRouter) и `EVAL_JUDGE_MAX_TOKENS`; `LLM__PROXY_URL` — HTTP-прокси до внешнего провайдера (к локальной Ollama не применяется); `LLM__USE_SYSTEM_CERTS` — проверять HTTPS по хранилищу сертификатов ОС (сеть или антивирус проверяют HTTPS).
 
 Для безопасности (блок 3.8): `SECURITY__ENABLED` (пусто — `true`; `false` — «голый» сервис только для прогона garak baseline), `SECURITY__MAX_INPUT_CHARS` (4000), `RATE_LIMIT_PER_MIN` (лимит запросов к `/chat` в минуту на `X-User-ID` или IP; 0 — без лимита) и `LOG_FILE` (копия JSON-лога в файл, например `logs/service.jsonl`).
+
+Для медиа и уведомлений (блок 4.3): `CHAT_VISION_MODEL` (модель для фото, например `gemma3:4b`), `AUDIO_API_KEY` / `AUDIO_BASE_URL` / `WHISPER_MODEL` / `AUDIO_LANGUAGE` (Whisper), `MEDIA__*` (пределы файлов и токены картинки), `INTERNAL_TOKEN` (общий секрет сервиса и бота), `BOT_URL` (адрес HTTP-API бота); у бота — `BOT_API_HOST`, `BOT_API_PORT`, `BOT_STREAMING`, `BACKEND_STREAM_TIMEOUT`.
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 

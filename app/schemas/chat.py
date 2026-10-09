@@ -7,11 +7,19 @@ ChatResponse не повторяет структуру ответа SDK: from_o
 repr и str сообщения (блок 3.7) маскируют персональные данные: модель запроса попадает
 в отладчик, трейсбеки и сообщения об ошибках, а сырой текст пользователя туда попадать
 не должен. model_dump() возвращает текст как есть — он нужен модели.
+
+Мультимодальные сообщения (блок 4.3) — MediaMessage и MediaChatRequest: content — строка
+или список content-part OpenAI ({"type": "text"} и {"type": "image_url"}). Их собирает
+ChatService для чатов (/chats); публичный POST /chat по-прежнему принимает только текст —
+его схема ChatRequest не меняется. У text-части есть служебная пометка media ("audio" —
+расшифровка голоса, "document" — текст PDF/DOCX): по ней защитный слой и бюджет контекста
+отличают вложение от того, что пользователь напечатал сам. Провайдеру пометка не уходит —
+provider_messages() её убирает.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any, Literal
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -28,6 +36,92 @@ class Message(BaseModel):
         # repr/str: email, телефон, карта, ИНН и паспорт — плейсхолдерами
         for name, value in super().__repr_args__():
             yield name, redact_pii(value) if name == "content" and isinstance(value, str) else value
+
+
+class TextPart(BaseModel):
+    type: Literal["text"] = "text"
+    text: str = Field(max_length=40_000)
+    media: Literal["audio", "document"] | None = Field(
+        default=None, description="Служебная пометка сервиса: текст вложения (провайдеру не уходит)")
+
+    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
+        for name, value in super().__repr_args__():
+            yield name, redact_pii(value) if name == "text" else value
+
+
+class ImageURL(BaseModel):
+    url: str
+    detail: Literal["auto", "low", "high"] | None = None
+
+    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
+        # data:-URL картинки — сотни тысяч символов base64: в repr и трейсбеках только начало.
+        for name, value in super().__repr_args__():
+            yield name, (value[:40] + f"…({len(value)} симв.)") if name == "url" and len(value) > 60 else value
+
+
+class ImagePart(BaseModel):
+    type: Literal["image_url"] = "image_url"
+    image_url: ImageURL
+
+
+ContentPart = Annotated[TextPart | ImagePart, Field(discriminator="type")]
+Content = Annotated[str, Field(min_length=1, max_length=32_000)] | Annotated[
+    list[ContentPart], Field(min_length=1, max_length=8)]
+
+
+class MediaMessage(Message):
+    """Сообщение с вложением (блок 4.3): content — текст или список content-part."""
+
+    content: Content = Field(description="Текст или content-part: text, image_url")  # type: ignore[assignment]
+
+
+def _part(part: Any) -> dict[str, Any]:
+    return part if isinstance(part, Mapping) else part.model_dump()
+
+
+def content_parts(content: str | Sequence[Any]) -> list[dict[str, Any]]:
+    """content как список content-part (строка — одна text-часть)."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [_part(p) for p in content]
+
+
+def content_text(content: str | Sequence[Any], *, typed_only: bool = False) -> str:
+    """Текст сообщения: text-части через пустую строку. typed_only — без текста вложений
+    (только то, что пользователь напечатал сам)."""
+    if isinstance(content, str):
+        return content
+    return "\n\n".join(p["text"] for p in content_parts(content)
+                       if p.get("type") == "text" and not (typed_only and p.get("media")))
+
+
+def has_image(content: str | Sequence[Any]) -> bool:
+    return not isinstance(content, str) and any(p.get("type") == "image_url" for p in content_parts(content))
+
+
+def map_text(content: str | Sequence[Any], fn: Callable[[str], str]) -> str | list[dict[str, Any]]:
+    """fn к каждой text-части; картинки — как есть."""
+    if isinstance(content, str):
+        return fn(content)
+    return [{**p, "text": fn(p["text"])} if p.get("type") == "text" else p for p in content_parts(content)]
+
+
+def provider_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Сообщения в формате OpenAI Chat Completions: без служебной пометки media и пустых полей."""
+    result = []
+    for message in messages:
+        content = message["content"]
+        if not isinstance(content, str):
+            parts = []
+            for p in content_parts(content):
+                if p.get("type") == "image_url":
+                    image = {k: v for k, v in dict(p["image_url"]).items() if v is not None}
+                    parts.append({"type": "image_url", "image_url": image})
+                else:
+                    parts.append({"type": "text", "text": p["text"]})
+            content = parts
+        result.append({**message, "content": content})
+    return result
 
 
 class ChatRequest(BaseModel):
@@ -75,6 +169,12 @@ class ChatRequest(BaseModel):
         if self.messages[0].role == "assistant":
             raise ValueError("Диалог не может начинаться с сообщения assistant")
         return self
+
+
+class MediaChatRequest(ChatRequest):
+    """Запрос ChatService к модели (блок 4.3): сообщения могут быть мультимодальными."""
+
+    messages: list[MediaMessage] = Field(min_length=1, max_length=50)  # type: ignore[assignment]
 
 
 class Usage(BaseModel):

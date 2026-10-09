@@ -6,7 +6,7 @@
 # После изменения списка зависимостей обновите lock-файл: uv lock
 [project]
 name = "multapi-llm-service"
-version = "4.2.0"
+version = "4.3.0"
 description = "HTTP-сервис ассистента техподдержки на FastAPI: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов"
 requires-python = ">=3.12"
 dependencies = [
@@ -26,6 +26,10 @@ dependencies = [
     "asyncpg>=0.29,<1.0",
     "alembic>=1.13,<2.0",
     "tiktoken>=0.7,<1.0",
+    # блок 4.3: медиа в чатах — форма multipart, текст PDF и DOCX
+    "python-multipart>=0.0.20,<1.0",
+    "pypdf>=5.1,<7.0",
+    "python-docx>=1.1,<2.0",
 ]
 
 [tool.uv]

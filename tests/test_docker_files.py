@@ -205,7 +205,11 @@ class TestSecrets(unittest.TestCase):
                      "CHAT_CONTEXT_WINDOW", "CHAT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "RESPONSE_TOKENS", "SAFETY_MARGIN",
                      # блок 4.2
                      "BOT_TOKEN", "BACKEND_URL", "BOT_ADMIN_IDS", "BACKEND_TIMEOUT", "BOT_USE_SYSTEM_CERTS",
-                     "BOT_PROXY_URL"):
+                     "BOT_PROXY_URL",
+                     # блок 4.3
+                     "CHAT_VISION_MODEL", "AUDIO_LANGUAGE", "MEDIA__MAX_IMAGE_BYTES", "MEDIA__MAX_DOCUMENT_BYTES",
+                     "INTERNAL_TOKEN", "BOT_URL", "BACKEND_STREAM_TIMEOUT", "BOT_STREAMING", "BOT_API_HOST",
+                     "BOT_API_PORT", "BOT_DEFAULT_USER_NAME"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -214,7 +218,8 @@ class TestSecrets(unittest.TestCase):
         example = _read(".env.example")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
         for line in example.splitlines():
-            if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL)\s*=", line):
+            if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL|INTERNAL_TOKEN|"
+                        r"AUDIO_API_KEY)\s*=", line):
                 self.assertRegex(line, r"=\s*(#|$)", line)        # значение пустое
 
     def test_env_not_tracked_by_git(self):
