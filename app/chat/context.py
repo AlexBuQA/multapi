@@ -66,25 +66,26 @@ MIN_SHRUNK_TOKENS = 200     # меньше — укороченный докум
 SHRUNK_NOTE = "\n[…текст вложения не поместился в контекст модели: показано {shown} из {total} символов]"
 
 
-def tiktoken_cache_file() -> Path:
+def tiktoken_cache_file(url: str = ENCODING_URL) -> Path:
     """Где tiktoken ищет скачанный словарь: имя файла — sha1 от адреса (tiktoken.load)."""
     folder = (os.environ.get("TIKTOKEN_CACHE_DIR") or os.environ.get("DATA_GYM_CACHE_DIR")
               or os.path.join(tempfile.gettempdir(), "data-gym-cache"))
-    return Path(folder) / hashlib.sha1(ENCODING_URL.encode()).hexdigest()
+    return Path(folder) / hashlib.sha1(url.encode()).hexdigest()
 
 
-def download_with_system_certs() -> None:
+def download_with_system_certs(url: str = ENCODING_URL) -> None:
     """Скачивает словарь с проверкой HTTPS по хранилищу сертификатов ОС и кладёт в кеш
-    tiktoken. Хеш содержимого tiktoken проверит сам при загрузке."""
+    tiktoken. Хеш содержимого tiktoken проверит сам при загрузке. url — другой словарь,
+    например cl100k_base для подсчёта токенов эмбеддингов OpenAI (блок 5.1)."""
     import ssl
 
     import httpx
     import truststore
 
-    response = httpx.get(ENCODING_URL, verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+    response = httpx.get(url, verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
                          timeout=60, follow_redirects=True)
     response.raise_for_status()
-    path = tiktoken_cache_file()
+    path = tiktoken_cache_file(url)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(response.content)

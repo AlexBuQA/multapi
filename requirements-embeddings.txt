@@ -1,0 +1,12 @@
+# Блок 5.1: эмбеддинги в процессе через sentence-transformers — EMBEDDINGS__PROVIDER=sentence-transformers
+# и модели st:… в scripts/embeddings_benchmark.py (multilingual-e5-small / -base).
+# Не входят в requirements.txt и Docker-образ: torch — сотни мегабайт, а модель по умолчанию
+# (bge-m3) считает Ollama, и ей эти пакеты не нужны.
+#
+#   pip install -r requirements-embeddings.txt
+#
+# На Windows pip ставит torch для CPU (около 200 МБ). На Linux без видеокарты сначала:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Веса модели скачиваются с Hugging Face при первом запуске (e5-small ~470 МБ, e5-base ~1,1 ГБ)
+# в %USERPROFILE%\.cache\huggingface. Сеть с подменой HTTPS: LLM__USE_SYSTEM_CERTS=true.
+sentence-transformers>=3.0,<7.0

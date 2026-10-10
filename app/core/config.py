@@ -34,6 +34,9 @@ WHISPER_MODEL — расшифровка голоса (те же перемен�
 Уведомления из сервиса в Telegram (блок 4.3, app/services/notifier.py): BOT_URL — адрес
 HTTP-API бота, INTERNAL_TOKEN — общий секрет сервиса и бота (заголовок X-Internal-Token).
 
+Эмбеддинги (блок 5.1, app/services/embeddings.py): EMBEDDINGS__* — модель (по умолчанию
+bge-m3 в Ollama на адресе LLM__BASE_URL), батч, префиксы, кеш — см. docs/embeddings.md.
+
 Настройки ассистента с инструментами (блок 3.1) и скриптов блока 3.3 — в app/config.py.
 """
 from __future__ import annotations
@@ -227,6 +230,47 @@ class ModerationSettings(BaseModel):
         return value
 
 
+class EmbeddingSettings(BaseModel):
+    """Эмбеддинги (блок 5.1), app/services/embeddings.py. Переменные — с префиксом EMBEDDINGS__.
+
+    provider=openai — OpenAI-совместимый POST /embeddings: Ollama (по умолчанию — bge-m3 на том
+    же адресе, что LLM__BASE_URL), OpenAI или OpenRouter. provider=sentence-transformers — модель
+    Hugging Face в процессе на CPU (multilingual-e5-*), пакеты — requirements-embeddings.txt.
+    Выбор модели и замеры — docs/embeddings.md.
+    """
+
+    provider: Literal["openai", "sentence-transformers"] = "openai"
+    model: str = "bge-m3"
+    base_url: str | None = None                  # пусто — LLM__BASE_URL
+    api_key: SecretStr | None = None             # пусто — LLM__OPENAI_API_KEY
+    # Только text-embedding-3-*: укоротить вектор (Matryoshka), например 512 вместо 1536.
+    dimensions: int | None = Field(default=None, ge=32, le=4096)
+    # Текстов в одном запросе. Пусто — 32 для локальной модели (Ollama, CPU), 128 для облака.
+    batch_size: int | None = Field(default=None, ge=1, le=2048)
+    # Префиксы асимметричных моделей. Пусто — по семейству модели (E5: «query: » / «passage: »),
+    # none — без префикса. Пробел в конце сохраняется только в кавычках: "query: ".
+    query_prefix: str | None = None
+    document_prefix: str | None = None
+    cache_enabled: bool = True
+    cache_path: Path = ROOT / "var" / "embeddings_cache.sqlite"
+    timeout: float = Field(default=60.0, gt=0, le=600)     # с на одну попытку запроса
+    max_attempts: int = Field(default=5, ge=1, le=10)       # попыток на обрыв, таймаут, 429, 5xx
+    device: str = "cpu"                                     # sentence-transformers: cpu или cuda
+
+    @field_validator("cache_path")
+    @classmethod
+    def _cache_from_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else ROOT / value
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("EMBEDDINGS__MODEL: укажите модель, например bge-m3 или intfloat/multilingual-e5-small")
+        return value
+
+
 # Postgres из compose.yaml, опубликованный на 127.0.0.1:5433 (а не localhost: на Windows
 # localhost сначала пробует IPv6 ::1, и каждое новое соединение ждёт отказа по нему).
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://multapi:multapi@127.0.0.1:5433/multapi"
@@ -347,6 +391,8 @@ class Settings(BaseSettings):
 
     # --- Production-обвязка (блок 4.4) ---
     moderation: ModerationSettings = Field(default_factory=ModerationSettings)
+    # Блок 5.1: модель эмбеддингов, батчи, кеш (EMBEDDINGS__*).
+    embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     # Токен admin-эндпоинтов /chats/admin/* (заголовок X-Admin-Token); тот же — у бота для
     # /stats, /users, /broadcast и рассылки. Не задан — admin-эндпоинты отвечают 503.
     admin_token: SecretStr | None = None

@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8 и 4.1–4.4
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4 и 5.1
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -20,6 +20,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 4.2 — Telegram-бот как тонкий клиент:** бот на aiogram 3 в `bot/` ходит в чат блока 4.1 за всей работой с моделью — `/start`, `/help`, `/clear`, `/cancel`, сценарий `/ask` с выбором раздела, ответ потоком правками сообщения; `POST /chats` стал идемпотентным — см. раздел [«Блок 4.2»](#блок-42--telegram-бот-как-тонкий-клиент) и [`docs/bot.md`](docs/bot.md).
 - **Блок 4.3 — Мультимодальность и streaming:** бот принимает фото, голосовые, PDF и DOCX и отправляет их в сервис тем же `send_message`; сервис превращает файл в content-part (картинка — `image_url` прямо в `chat.completions`, голос — Whisper, документ — текст) и хранит его в истории; ответ в Telegram — нативным черновиком `sendMessageDraft`; обратный канал сервис → бот `POST /notify` — см. раздел [«Блок 4.3»](#блок-43--мультимодальность-и-streaming).
 - **Блок 4.4 — Production-обвязка:** модерация вопросов и ответов в сервисе (`app/moderation/`: ключевые слова из YAML и OpenAI Moderation, `403 moderation_blocked`, замена ответа событием `moderation`), admin API `/chats/admin/*` под `X-Admin-Token` — статистика, пользователи, очередь рассылок; в боте — `/stats`, `/users`, `/broadcast` для `BOT_ADMIN_IDS` и оценки ответов 👍/👎; `docker compose up` поднимает app, бот и Postgres одной командой — см. раздел [«Блок 4.4»](#блок-44--production-обвязка).
+- **Блок 5.1 — Эмбеддинги и семантический поиск:** `app/services/embeddings.py` — `embed_texts` / `embed_query` / `embed_documents` с батчами, повторами tenacity, L2-нормализацией и кешем (память процесса + SQLite, ключ зависит от модели); модель — `bge-m3` в Ollama, выбор обоснован ruMTEB и мини-бенчмарком на своих данных, посчитана стоимость индексации — см. раздел [«Блок 5.1»](#блок-51--эмбеддинги-и-семантический-поиск) и [`docs/embeddings.md`](docs/embeddings.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -63,6 +64,7 @@ multapi/
 ├── demo_voice.py            # демо варианта Б (полный голосовой пайплайн)
 ├── requirements.txt         # зависимости всего проекта для локальной разработки (pip)
 ├── requirements-presidio.txt # блок 3.6, опционально: Presidio и модель spaCy ru_core_news_md
+├── requirements-embeddings.txt # блок 5.1, опционально: sentence-transformers (модели E5 в процессе)
 ├── pyproject.toml           # блок 3.5: зависимости Docker-образа сервиса (uv)
 ├── uv.lock                  # блок 3.5: закреплённые версии для образа
 ├── Dockerfile               # блок 3.5: multi-stage образ сервиса, non-root
@@ -107,6 +109,7 @@ multapi/
 │   │   ├── prompts.py       # блок 3.7: системный промпт ассистента со статьями руководства
 │   │   ├── knowledge.py     # блок 3.7: поиск по руководству (общий с инструментом блока 3.1)
 │   │   ├── guardrails.py    # блок 3.7: проверки до и после модели — инъекция, утечка промпта, PII
+│   │   ├── embeddings.py    # блок 5.1: embed_texts / embed_query / embed_documents, батчи, повторы, кеш
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -134,6 +137,7 @@ multapi/
 │   └── texts.py             # тексты бота и ошибки для пользователя
 ├── data/
 │   ├── knowledge_base.json  # руководство пользователя: 10 статей с разделами
+│   ├── help_center.jsonl    # блок 5.1: база для поиска — 56 документов (руководство, справка, регламент)
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   ├── run_tool_call.py     # прогон трёх тест-запросов
@@ -147,11 +151,15 @@ multapi/
 │   ├── _target.py           # выбор цели: мок или локальный Ollama
 │   ├── load_test.py         # блок 3.8: N+1 запросов к /chat — последний получает 429
 │   ├── check_tokens.py      # блок 4.1: count_tokens против usage.prompt_tokens провайдера
-│   └── chat_scenario.py     # блок 4.1: сценарий «Аня» против запущенного сервиса, N прогонов
+│   ├── chat_scenario.py     # блок 4.1: сценарий «Аня» против запущенного сервиса, N прогонов
+│   ├── embeddings_cli.py    # блок 5.1: эмбеддинги из командной строки, проверка кеша (два запуска)
+│   ├── embeddings_benchmark.py # блок 5.1: сравнение моделей на мини-бенчмарке и базе, префиксы E5
+│   └── indexing_cost.py     # блок 5.1: токены базы, цена индексации, объём векторов
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
 │   ├── bot.md               # блоки 4.2–4.3: Telegram-бот — поток, /ask, медиа, /notify, запуск
+│   ├── embeddings.md        # блок 5.1: требования, кандидаты, выбор модели, стоимость, устройство модуля
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -167,17 +175,21 @@ multapi/
 │   ├── test_observability.py# блок 3.6: JSON-логи, request_id, спаны и атрибуты gen_ai.*
 │   ├── test_pii_presidio.py # блок 3.6: Presidio (фон, откат на regex, настоящая модель)
 │   ├── log_capture.py       # перехват JSON-лога в тестах
-│   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval
+│   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval;
+│   │                        #   5.1: test_embeddings.py — батчи, кеш, повторы, префиксы, скрипты
+│   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
 │   │                        #   4.3: медиа, черновики, /notify; 4.4: admin-команды, оценки, рассылки
 │   ├── app/chat/            # блок 4.3: test_media.py (PDF, DOCX, картинки), test_whisper.py (голос)
 │   ├── app/moderation/      # блок 4.4: test_moderation_layers.py — ключевые слова, OpenAI Moderation, лог
-│   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm)
+│   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm);
+│                            #   5.1: test_embeddings_live.py — bge-m3 в Ollama, префиксы E5
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav;
 │                            #   блок 4.3: support_rules.docx/.pdf — регламент поддержки для бота и тестов
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 ├── var/chats/               # блок 4.1: история чатов в JSONL (CHAT_STORAGE_DIR, в git не попадает)
+├── var/embeddings_cache.sqlite # блок 5.1: кеш эмбеддингов (EMBEDDINGS__CACHE_PATH, в git не попадает)
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
                              # app.log, tool_calls.jsonl, llm_calls.jsonl (локальные прогоны, в git не попадают)
 ```
@@ -2341,6 +2353,123 @@ $lines = [IO.File]::ReadAllLines("$PWD\.env") -replace '^([A-Z0-9_]+)=\s+#.*$', 
 | 👍/👎 после ответа, `fb:<vote>:<message_id>`, сохранение с `UNIQUE`, кнопки убираются `edit_reply_markup(reply_markup=None)` | `bot/handlers/feedback.py`, `message_feedback`; `test_vote_is_saved_and_buttons_removed`, `test_feedback_flow` |
 | `docker compose up` поднимает app + bot + postgres одной командой | `compose.yaml`: `migrate`, `bot`; `TestProductionCompose`; прогон в песочнице и на Windows (после исправлений `.env`, `LOG_FILE` и сертификатов) |
 | Том `pg-data` сохраняет данные | `compose.yaml`; `test_postgres_service`; `down` / `up` в песочнице и на Windows — `/stats` и оценка сохранились |
+
+## Блок 5.1 — Эмбеддинги и семантический поиск
+
+Первый шаг к RAG: тексты базы знаний и вопросы пользователей превращаются в векторы, и близкие по смыслу тексты оказываются рядом. Здесь — модуль эмбеддингов с батчами, повторами и кешем, база для поиска, мини-бенчмарк на своих данных и обоснованный выбор модели. Подробно — [`docs/embeddings.md`](docs/embeddings.md).
+
+```mermaid
+flowchart LR
+    T["embed_texts / embed_query / embed_documents"] --> P["префикс модели<br/>(E5: query: / passage:)"]
+    P --> M{"кеш в памяти?"}
+    M -- да --> R["векторы"]
+    M -- нет --> D{"SQLite<br/>var/embeddings_cache.sqlite?"}
+    D -- да --> R
+    D -- нет --> B["батчи по 32 (облако — 128<br/>и ≤ 250 000 токенов)"]
+    B --> A["POST /embeddings — Ollama bge-m3<br/>или sentence-transformers<br/>(tenacity: обрыв, 429, 5xx)"]
+    A --> N["L2-нормализация, float32"] --> S["в кеш: ключ = sha256(провайдер, модель,<br/>dimensions, текст с префиксом)"] --> R
+```
+
+### Что сделано
+
+- **`app/services/embeddings.py`** — `embed_texts(texts: list[str]) -> list[list[float]]`, а для асимметричных моделей ещё `embed_query(text)` и `embed_documents(texts)` с префиксами модели (E5 — `query: ` / `passage: `; подбираются по имени модели или из `.env`).
+  - **Батчи:** 32 текста для локальной модели на CPU, 128 для облака плюс бюджет 250 000 токенов на запрос (tiktoken cl100k_base); одинаковые тексты в вызове — один раз.
+  - **Сеть:** tenacity — обрыв, таймаут, 429, 5xx — до 5 попыток с экспоненциальной задержкой и разбросом, `Retry-After` учитывается; 401/404/400 — сразу понятная ошибка («скачайте её: ollama pull bge-m3»).
+  - **Векторы** L2-нормализованы (у sentence-transformers — ещё и `normalize_embeddings=True`) и округлены до float32.
+  - **Кеш** в два уровня: словарь в памяти процесса и SQLite-файл `var/embeddings_cache.sqlite`. Ключ — sha256 от провайдера, модели, `dimensions` и текста с префиксом: повтор не обращается к модели ни в том же процессе, ни после перезапуска, а смена модели в `.env` даёт новые ключи.
+  - **Провайдеры:** OpenAI-совместимый `POST /embeddings` — Ollama, OpenAI, OpenRouter (прокси и сертификаты — как у чата, `LLM__PROXY_URL`, `LLM__USE_SYSTEM_CERTS`) — и sentence-transformers в процессе (`requirements-embeddings.txt`, в Docker-образ не входит).
+- **Модель — `bge-m3` в Ollama.** Лучший retrieval на русском среди кандидатов (ruMTEB Retrieval 74.79 против 74.04 у multilingual-e5-large и 65.85 у e5-small) и лучшая на наших вопросах (MRR 0.933 против 0.883 у E5 и 0.717 у поиска по словам), окно 8192 токена против 512 у E5, работает в уже установленной Ollama без torch, 0 $, вопросы пользователей не уходят внешнему провайдеру; 1024 числа — 4 КБ на документ. Плата — скорость на CPU: около 5 документов в секунду против 35 у e5-small. Таблица кандидатов, компромиссы и когда выбрать другое — [`docs/embeddings.md`](docs/embeddings.md).
+- **Данные:**
+  - `data/help_center.jsonl` — база для поиска, 56 документов: 10 статей руководства (`data/knowledge_base.json` без изменений), 42 статьи справочного центра в том же стиле, 4 раздела регламента поддержки из `samples/support_rules.docx`;
+  - `tests/eval/mini_benchmark.json` — 10 троек `{"query", "relevant", "irrelevant"}`: вопросы — формулировки пользователей (golden dataset блока 3.7 и вопросы боту в Telegram), фрагменты — дословно из базы; ложный фрагмент — на ту же тему, но не тот.
+- **Скрипты:**
+  - `scripts/embeddings_cli.py` — эмбеддинги модели из `.env` через публичные функции модуля, с подсчётом попаданий в кеш, запросов к модели и времени; `--benchmark`, `--corpus`, `--cache-info`, `--clear-cache`;
+  - `scripts/embeddings_benchmark.py` — модели на мини-бенчмарке и поиск по всей базе (пары rel > irr, hit@1, hit@3, MRR, время индексации и вопроса), smoke-тест префиксов E5 (вопрос без `query: ` при базе с `passage: ` и без префиксов везде), лексический бейзлайн `baseline:trigrams` как точка отсчёта;
+  - `scripts/indexing_cost.py` — токены базы, цена индексации в OpenAI (обычный запрос и Batch API) для 56 / 1 000 / 10 000 / 100 000 документов, объём векторов, время локальной индексации по замеру бенчмарка.
+- **Новые переменные** (`.env.example`): `EMBEDDINGS__PROVIDER`, `EMBEDDINGS__MODEL`, `EMBEDDINGS__BASE_URL`, `EMBEDDINGS__API_KEY`, `EMBEDDINGS__DIMENSIONS`, `EMBEDDINGS__BATCH_SIZE`, `EMBEDDINGS__QUERY_PREFIX`, `EMBEDDINGS__DOCUMENT_PREFIX`, `EMBEDDINGS__CACHE_*`, `EMBEDDINGS__TIMEOUT`, `EMBEDDINGS__MAX_ATTEMPTS`, `EMBEDDINGS__DEVICE`. Пусто — `bge-m3` на адресе `LLM__BASE_URL`.
+- **Зависимости:** `tenacity` — в `pyproject.toml` и `uv.lock` (модуль сможет работать и в образе сервиса); `requirements-embeddings.txt` — `sentence-transformers` для моделей E5.
+- **Найдено на Windows и исправлено:**
+  - подпись модели `openai@openrouter.ai/…` маскирование персональных данных в JSON-логе принимало за email и писало `[EMAIL]/openai/text-embedding-3-small`. Подпись теперь без «@»: `openai:openrouter.ai/openai/text-embedding-3-small`;
+  - ответ OpenRouter `402 Insufficient credits` (у учебного ключа нет кредитов, а эмбеддинги OpenAI там платные) показывался длинным JSON. Теперь — «у ключа нет кредитов (402)…» и что делать;
+  - smoke-тест E5 утверждал гипотезу задания «без префиксов близость нужной пары падает» — на наших данных она не подтвердилась (см. «Результаты»). Тест теперь печатает замер для трёх вариантов и проверяет, что префиксы доходят до модели, а с ними нужный фрагмент ближе ложного.
+- **Тесты:** 1067 вместо 984.
+  - `tests/unit/test_embeddings.py` — 83: нормализация и порядок, батчи и бюджет токенов, кеш в памяти и в файле между «перезапусками», смена модели, размерности и провайдера — новый запрос, повторы на обрыв, 503, 429 с `Retry-After` и без повторов на 401/402/404/400, префиксы по семействам, подпись модели в логе не маскируется, OpenAI SDK через `httpx.MockTransport`, sentence-transformers через подставной загрузчик, формат мини-бенчмарка и базы, CLI (второй запуск без запросов), метрики бенчмарка и арифметика стоимости.
+  - `tests/integration/test_embeddings_live.py` (маркер `llm`) — `bge-m3` в Ollama и smoke-тест префиксов на настоящей `multilingual-e5-small`.
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt                 # tenacity 9 (если стояла 8.x)
+python -m pytest -q                             # 1067 passed
+ollama pull bge-m3                              # ~1,2 ГБ
+```
+
+`.env` можно не трогать: пусто — `bge-m3` на адресе `LLM__BASE_URL` (Ollama).
+
+1. **Кеш.** Одна и та же команда дважды:
+   ```powershell
+   python scripts/embeddings_cli.py "тот же текст"
+   python scripts/embeddings_cli.py "тот же текст"
+   ```
+   В первом запуске — строка `embeddings_request`, «Вызов 1: … запросов к модели 1, … мс» и «Вызов 2 (тот же процесс): из кеша 1 (память 1…), запросов к модели 0». Во втором — «Вызов 1: из кеша 1 (память 0, диск 1), запросов к модели 0» и время в единицах миллисекунд, строки `embeddings_request` нет.
+2. **База и батчи:** `python scripts/embeddings_cli.py --corpus` — 56 документов, при первом запуске 2 запроса (32 + 24).
+3. **Сравнение моделей** (E5 — через sentence-transformers, веса скачиваются с Hugging Face: ~470 МБ и ~1,1 ГБ):
+   ```powershell
+   pip install -r requirements-embeddings.txt
+   python scripts/embeddings_benchmark.py --details
+   python scripts/indexing_cost.py
+   python -m pytest -m llm tests/integration/test_embeddings_live.py -v -s
+   ```
+   Без `requirements-embeddings.txt` бенчмарк пропустит модели `st:` с причиной и посчитает бейзлайн и `bge-m3`. Модели OpenAI — `--models openrouter:openai/text-embedding-3-small` (ключ — `EVAL_JUDGE_API_KEY`, нужны кредиты).
+4. **Смена модели** — e5-small на e5-base через sentence-transformers (бесплатно, модели уже скачаны бенчмарком). В `.env`:
+   ```
+   EMBEDDINGS__PROVIDER=sentence-transformers
+   EMBEDDINGS__MODEL=intfloat/multilingual-e5-small
+   ```
+   `python scripts/embeddings_cli.py "тот же текст"` дважды — запрос к новой модели (её векторов в кеше нет, хотя у bge-m3 этот текст есть), затем из кеша. Потом `EMBEDDINGS__MODEL=intfloat/multilingual-e5-base` — снова запрос, код не менялся. `python scripts/embeddings_cli.py --cache-info` — записи каждой модели отдельно. После проверки обе строки — пустые. С ключом OpenRouter, у которого есть кредиты, — то же для `openai/text-embedding-3-small` → `-large` (`EMBEDDINGS__BASE_URL=https://openrouter.ai/api/v1`, `EMBEDDINGS__API_KEY`).
+
+### Результаты
+
+**Песочница (Linux).** Hugging Face, реестр Ollama, OpenAI и OpenRouter из песочницы недоступны — настоящие модели не запускались; модуль проверен на подставном OpenAI-совместимом сервере (`/v1/embeddings` с векторами из триграмм).
+- **Тесты:** `pytest` — 1067 passed, с `-W error` тоже; живые тесты (`-m llm`) пропущены с причиной: нет Ollama, нет sentence-transformers.
+- **CLI, два запуска «тот же текст»:** первый — «запросов к модели 1, 338.3 мс», в том же процессе — «из кеша 1 (память 1, диск 0), запросов к модели 0, 0.1 мс»; второй запуск — «из кеша 1 (память 0, диск 1), запросов к модели 0, 0.2 мс».
+- **Смена модели** (`EMBEDDINGS__MODEL=multilingual-e5-small`): «запросов к модели 1», префиксы `query: ` / `passage: ` подставились сами; `--cache-info` — две модели, по одной записи.
+- **Сбои сети:** сервер дважды ответил `503` — две строки `embeddings_retry` (паузы 1,3 и 2,6 с), третья попытка успешна, «повторов после ошибок 2»; модель не скачана (`404`) — «Модель … не найдена (404): скачайте её: ollama pull …», код выхода 2; сервер не запущен — после всех попыток «Нет связи … запущена ли Ollama (ollama serve)».
+- **Стоимость** (`scripts/indexing_cost.py`, cl100k_base): база — 5 373 токена; text-embedding-3-small — 0.000107 $, 100 000 таких документов — 0.19 $ (Batch — 0.096 $); text-embedding-3-large — 1.25 $ (0.62 $). Таблицы — в [`docs/embeddings.md`](docs/embeddings.md#стоимость-индексации).
+- **Лексический бейзлайн** (`baseline:trigrams`, детерминирован): пары 8/10, hit@1 60 %, hit@3 80 %, MRR 0.717. Ошибки — там, где слова совпадают, а смысл нет: на «Забыл пароль…» нужная статья — 11-я из 56.
+
+**Windows (CPU, Ollama; E5 — sentence-transformers 6.1, torch 2.14).**
+- **Тесты:** 1065 passed (до исправлений из «Найдено на Windows»).
+- **Кеш, два запуска `embeddings_cli.py "тот же текст"`:**
+  - первый — строка `embeddings_request` (1024 числа), «запросов к модели 1, 5641.6 мс» (в том числе загрузка `bge-m3` в Ollama), в том же процессе — «из кеша 1 (память 1, диск 0), запросов к модели 0, 0.1 мс»;
+  - второй запуск — «из кеша 1 (память 0, диск 1), запросов к модели 0, 0.2 мс», строки `embeddings_request` нет, вектор тот же (`[-0.0398, 0.0825, -0.0419, 0.0012, …]`).
+- **База:** `--corpus` — 56 документов двумя запросами (32 и 24 текста, 9,5 и 4,6 с), всего 14,1 с; повтор в процессе — 1,4 мс из памяти.
+- **Бенчмарк** (`embeddings_benchmark.py --details`, 56 документов, 10 вопросов):
+
+  | Модель | Размерность | Пары rel > irr | Отрыв rel − irr | hit@1 | hit@3 | MRR | Индексация, с | Документов/с | Вопрос, мс |
+  |---|---|---|---|---|---|---|---|---|---|
+  | поиск по словам (`baseline:trigrams`) | 4096 | 8/10 | +0.165 | 60 % | 80 % | 0.717 | 0.04 | 1331 | 1 |
+  | **bge-m3** (Ollama) | 1024 | **10/10** | +0.116 | **90 %** | 100 % | **0.933** | 11.1 | 5.1 | 189 |
+  | multilingual-e5-small | 384 | 10/10 | +0.050 | 80 % | 100 % | 0.883 | 1.6 | 34.9 | 21 |
+  | multilingual-e5-base | 768 | 10/10 | +0.041 | 80 % | 100 % | 0.883 | 5.0 | 11.3 | 90 |
+
+  Второй прогон (он же в `docs/embeddings_benchmark.json`); первый дал те же метрики качества, время отличалось на 10–30 %. Все модели обходят поиск по словам; `bge-m3` — лучшая по качеству (выбор подтверждён) и самая медленная: 100 000 документов — около 5,4 ч против 48 мин у e5-small (`indexing_cost.py`). Разбор — [`docs/embeddings.md`](docs/embeddings.md#результаты-на-windows).
+- **Префиксы E5 — гипотеза не подтвердилась:** близость нужной пары без префиксов не упала, а чуть выросла — e5-small 0.884 → 0.886, e5-base 0.871 → 0.878; пары 10/10 во всех вариантах. Забытый `query: ` при базе с `passage: ` у e5-small снижает близость в 7 вопросах из 10 и отрыв 0.050 → 0.048 — на сотые доли, порядок тот же. Косинус — величина относительная: без префиксов сдвигаются и нужный, и ложный фрагмент. Живой тест в первой версии утверждал гипотезу и упал — теперь он печатает замер трёх вариантов и проходит. Для выбранной `bge-m3` префиксов нет.
+- **Живые тесты:** `bge-m3` — 1024 числа, длина 1, 10 пар из 10; smoke-тест E5 — замер трёх вариантов: 2 passed.
+- **Смена модели в `.env`:** `EMBEDDINGS__PROVIDER=sentence-transformers`, `EMBEDDINGS__MODEL=intfloat/multilingual-e5-small` — «запросов к модели 1, 18199.1 мс» (загрузка torch и модели), хотя у `bge-m3` этот текст уже в кеше; повтор — «из кеша 1 (диск 1), запросов к модели 0, 0.3 мс». Затем `intfloat/multilingual-e5-base` — снова 1 запрос (768 чисел вместо 384), повтор — 0.2 мс с диска. `--cache-info` — три модели отдельно: `bge-m3` (57 векторов), e5-small (1), e5-base (1). Код не менялся.
+- **Тесты после исправлений:** 1067 passed.
+- **OpenRouter:** `402 Insufficient credits` — у учебного ключа нет кредитов, а эмбеддинги OpenAI на OpenRouter платные; модели OpenAI на наших данных не измерены. Неудачные запросы в кеш не попали: `--cache-info` — только `bge-m3`, 57 векторов. Заодно повтор сработал на настоящей сети: первое соединение через прокси оборвалось (`embeddings_retry`, `APIConnectionError`), вторая попытка через 1,7 с дошла до OpenRouter.
+
+### Соответствие критериям блока 5.1
+
+| Критерий | Реализация |
+|---|---|
+| Мини-бенчмарк: 5–10 объектов `{"query", "relevant", "irrelevant"}` из домена | `tests/eval/mini_benchmark.json` — 10 троек; `test_mini_benchmark_format`, `test_benchmark_fragments_are_real_corpus_chunks` |
+| `embed_texts(texts: list[str]) -> list[list[float]]`, батчи ≥ 32, сетевые сбои, нормализованные векторы | `app/services/embeddings.py`; `test_local_model_batches_of_32`, `test_cloud_model_batches_of_128_and_token_budget`, `test_connection_errors_are_retried_with_backoff`, `test_vectors_are_normalized_and_in_order` |
+| Для E5 — `embed_query(text)` и `embed_documents(texts)` с префиксами; smoke-тест «без префиксов score падает» | `resolve_prefixes`; `test_query_and_documents_use_prefixes`, `test_prefixes_by_model_family`; smoke-тест — `test_e5_prefixes_smoke` и раздел «Префиксы» бенчмарка. На наших данных близость без префиксов не упала (0.884 → 0.886) — разобрано в `docs/embeddings.md`; выбранная `bge-m3` префиксов не использует |
+| Выбор модели обоснован: язык, размерность, стоимость; расчёт индексации 50+ документов | [`docs/embeddings.md`](docs/embeddings.md): ruMTEB, мини-бенчмарк, `scripts/indexing_cost.py` на 56 документах |
+| Повторный `embed_texts(["тот же текст"])` — без запроса к API в том же процессе и после перезапуска, замер времени CLI | кеш в памяти и SQLite; `test_repeat_in_same_process_comes_from_memory`, `test_repeat_after_restart_comes_from_disk`, `test_cli_second_run_makes_no_requests`; на Windows — 5641.6 мс и 1 запрос, затем 0.1 мс из памяти и 0.2 мс с диска после перезапуска, 0 запросов |
+| Смена модели в `.env` — векторы старой модели не используются, код не меняется | ключ кеша содержит провайдера, модель и `dimensions`; `test_model_change_does_not_reuse_old_vectors`; на Windows — `bge-m3` → e5-small → e5-base: у каждой новой модели первый запуск с запросом, повтор из кеша, `--cache-info` — записи моделей раздельно |
 
 ## Конфигурация (.env)
 
