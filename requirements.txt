@@ -1,5 +1,5 @@
 openai>=2.0,<3.0
-tenacity>=8.2,<10.0
+tenacity>=9.0,<10.0           # повторы запросов: RobustLLMClient (блок 3.2), эмбеддинги (блок 5.1)
 python-dotenv>=1.0,<2.0
 tiktoken>=0.7,<1.0
 httpx>=0.26,<1.0

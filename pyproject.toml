@@ -7,8 +7,8 @@
 # После изменения списка зависимостей обновите lock-файл: uv lock
 [project]
 name = "multapi-llm-service"
-version = "4.4.0"
-description = "HTTP-сервис ассистента техподдержки на FastAPI и Telegram-бот: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов, модерация"
+version = "5.1.0"
+description = "HTTP-сервис ассистента техподдержки на FastAPI и Telegram-бот: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов, модерация, эмбеддинги"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.142,<1.0",   # 0.142 — встроенная трассировка HTTP-запросов (блок 3.6)
@@ -37,6 +37,8 @@ dependencies = [
     "truststore>=0.10,<1.0",
     "aiogram>=3.24,<4.0",      # 3.24+ — sendMessageDraft (блок 4.3)
     "aiohttp-socks>=0.10,<1.0",
+    # блок 5.1: эмбеддинги (app/services/embeddings.py) — повторы запросов к модели
+    "tenacity>=9.0,<10.0",
 ]
 
 [tool.uv]

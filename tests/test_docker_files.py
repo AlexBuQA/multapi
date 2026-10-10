@@ -269,7 +269,12 @@ class TestSecrets(unittest.TestCase):
                      # блок 4.4
                      "ADMIN_TOKEN", "BOT_BROADCAST_POLL", "BOT_EXTRA_CA_FILE", "MODERATION__ENABLED", "MODERATION__KEYWORDS_FILE",
                      "MODERATION__OPENAI_ENABLED", "MODERATION__OPENAI_API_KEY", "MODERATION__OPENAI_BASE_URL",
-                     "MODERATION__OPENAI_MODEL", "MODERATION__THRESHOLDS", "MODERATION__FAIL_CLOSED"):
+                     "MODERATION__OPENAI_MODEL", "MODERATION__THRESHOLDS", "MODERATION__FAIL_CLOSED",
+                     # блок 5.1
+                     "EMBEDDINGS__PROVIDER", "EMBEDDINGS__MODEL", "EMBEDDINGS__BASE_URL", "EMBEDDINGS__API_KEY",
+                     "EMBEDDINGS__DIMENSIONS", "EMBEDDINGS__BATCH_SIZE", "EMBEDDINGS__QUERY_PREFIX",
+                     "EMBEDDINGS__DOCUMENT_PREFIX", "EMBEDDINGS__CACHE_ENABLED", "EMBEDDINGS__CACHE_PATH",
+                     "EMBEDDINGS__TIMEOUT", "EMBEDDINGS__MAX_ATTEMPTS", "EMBEDDINGS__DEVICE"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -279,7 +284,7 @@ class TestSecrets(unittest.TestCase):
         self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
         for line in example.splitlines():
             if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL|INTERNAL_TOKEN|"
-                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY)\s*=", line):
+                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY|EMBEDDINGS__API_KEY)\s*=", line):
                 self.assertRegex(line, r'=\s*(""\s*)?(#|$)', line)        # значение пустое
 
     def test_empty_values_survive_docker_compose(self):
