@@ -21,7 +21,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 4.3 — Мультимодальность и streaming:** бот принимает фото, голосовые, PDF и DOCX и отправляет их в сервис тем же `send_message`; сервис превращает файл в content-part (картинка — `image_url` прямо в `chat.completions`, голос — Whisper, документ — текст) и хранит его в истории; ответ в Telegram — нативным черновиком `sendMessageDraft`; обратный канал сервис → бот `POST /notify` — см. раздел [«Блок 4.3»](#блок-43--мультимодальность-и-streaming).
 - **Блок 4.4 — Production-обвязка:** модерация вопросов и ответов в сервисе (`app/moderation/`: ключевые слова из YAML и OpenAI Moderation, `403 moderation_blocked`, замена ответа событием `moderation`), admin API `/chats/admin/*` под `X-Admin-Token` — статистика, пользователи, очередь рассылок; в боте — `/stats`, `/users`, `/broadcast` для `BOT_ADMIN_IDS` и оценки ответов 👍/👎; `docker compose up` поднимает app, бот и Postgres одной командой — см. раздел [«Блок 4.4»](#блок-44--production-обвязка).
 - **Блок 5.1 — Эмбеддинги и семантический поиск:** `app/services/embeddings.py` — `embed_texts` / `embed_query` / `embed_documents` с батчами, повторами tenacity, L2-нормализацией и кешем (память процесса + SQLite, ключ зависит от модели); модель — `bge-m3` в Ollama, выбор обоснован ruMTEB и мини-бенчмарком на своих данных, посчитана стоимость индексации — см. раздел [«Блок 5.1»](#блок-51--эмбеддинги-и-семантический-поиск) и [`docs/embeddings.md`](docs/embeddings.md).
-- **Блок 5.2 — Векторная база Qdrant:** сервис `qdrant` в `compose.yaml` (ключ API, том, проверка по TCP), коллекция `documents` под `bge-m3` (1024, COSINE, HNSW m=16) с payload-индексами, база знаний из 110 фрагментов с датами и разделами, идемпотентная загрузка `scripts/load_to_qdrant.py`, `app/services/vector_store.py` на `AsyncQdrantClient`, `GET /kb/search`, сравнение cosine и dot, три примера фильтров — см. раздел [«Блок 5.2»](#блок-52--векторная-база-qdrant) и [`docs/vector_store.md`](docs/vector_store.md).
+- **Блок 5.2 — Векторная база Qdrant:** сервис `qdrant` в `compose.yaml` (ключ API, том, проверка по TCP), коллекция `documents` под `bge-m3` (1024, COSINE, HNSW m=16) с payload-индексами, база знаний из 110 фрагментов с датами и разделами, идемпотентная загрузка `scripts/load_to_qdrant.py`, `app/services/vector_store.py` на `AsyncQdrantClient`, `GET /kb/search`, сравнение cosine и dot, три примера фильтров — см. раздел [«Блок 5.2»](#блок-52--векторная-база-qdrant) и [`docs/vector_store.md`](docs/vector_store.md) Опционально (задача 7) — pgvector 0.8 в том же Postgres: задержка, halfvec, фильтры SQL против `Filter`; выбор — остаётся Qdrant.
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -72,7 +72,7 @@ multapi/
 ├── .dockerignore            # блок 3.5: что не уходит в контекст сборки
 ├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix; 4.1: + postgres;
 │                            #   4.4: + migrate (alembic) и bot из того же образа, том pg-data;
-│                            #   5.2: + qdrant (ключ API, том qdrant_storage)
+│                            #   5.2: + qdrant (ключ API, том qdrant_storage); postgres — образ pgvector/pgvector
 ├── alembic.ini              # блок 4.1: настройки Alembic (адрес базы — DATABASE_URL)
 ├── migrations/              # блок 4.1: env.py (async), versions/ — миграция chat tables;
 │                            #   4.4: message_feedback, broadcast_queue, moderation_incidents
@@ -114,6 +114,7 @@ multapi/
 │   │   ├── embeddings.py    # блок 5.1: embed_texts / embed_query / embed_documents, батчи, повторы, кеш
 │   │   ├── vector_store.py  # блок 5.2: VectorStore — ensure_collection / upsert / search над Qdrant
 │   │   ├── documents.py     # блок 5.2: фрагменты базы знаний из data/ и их payload, id uuid5
+│   │   ├── pgvector_store.py # блок 5.2, задача 7: та же база в Postgres + pgvector — для сравнения
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -165,13 +166,15 @@ multapi/
 │   ├── indexing_cost.py     # блок 5.1: токены базы, цена индексации, объём векторов
 │   ├── load_to_qdrant.py    # блок 5.2: идемпотентная загрузка базы знаний в Qdrant
 │   ├── compare_metrics.py   # блок 5.2: cosine против dot на пяти вопросах
-│   └── qdrant_filters_demo.py # блок 5.2: фильтры match, по дате, must + must_not
+│   ├── qdrant_filters_demo.py # блок 5.2: фильтры match, по дате, must + must_not
+│   ├── load_to_pgvector.py  # блок 5.2, задача 7: та же база знаний в kb.documents (pgvector)
+│   └── compare_pgvector.py  # блок 5.2, задача 7: Qdrant против pgvector — задержка, halfvec, фильтры
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
 │   ├── bot.md               # блоки 4.2–4.3: Telegram-бот — поток, /ask, медиа, /notify, запуск
 │   ├── embeddings.md        # блок 5.1: требования, кандидаты, выбор модели, стоимость, устройство модуля
-│   ├── vector_store.md      # блок 5.2: Qdrant — compose, коллекция, загрузка, метрика, фильтры
+│   ├── vector_store.md      # блок 5.2: Qdrant — compose, коллекция, загрузка, метрика, фильтры, pgvector
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -189,7 +192,8 @@ multapi/
 │   ├── log_capture.py       # перехват JSON-лога в тестах
 │   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval;
 │   │                        #   5.1: test_embeddings.py — батчи, кеш, повторы, префиксы, скрипты;
-│   │                        #   5.2: test_vector_store.py — Qdrant :memory:, загрузка, метрика, фильтры, /kb/search
+│   │                        #   5.2: test_vector_store.py — Qdrant :memory:, загрузка, метрика, фильтры, /kb/search;
+│   │                        #   test_pgvector_store.py — SQL поиска и фильтров, ошибки, без базы
 │   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
@@ -199,7 +203,8 @@ multapi/
 │   ├── app/moderation/      # блок 4.4: test_moderation_layers.py — ключевые слова, OpenAI Moderation, лог
 │   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm);
 │                            #   5.1: test_embeddings_live.py — bge-m3 в Ollama, префиксы E5;
-│                            #   5.2: test_vector_store_live.py — VectorStore на настоящем Qdrant
+│                            #   5.2: test_vector_store_live.py — VectorStore на настоящем Qdrant;
+│                            #   test_pgvector_live.py — pgvector на настоящем Postgres, скрипты
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav;
 │                            #   блок 4.3: support_rules.docx/.pdf — регламент поддержки для бота и тестов
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
@@ -625,7 +630,7 @@ docker start multapi-redis                   # включить снова
   [wsl2]
   memory=1GB
   ```
-  После правки: закрыть Docker Desktop, выполнить `wsl --shutdown` и запустить Docker Desktop снова.
+  После правки: закрыть Docker Desktop, выполнить `wsl --shutdown` и запустить Docker Desktop снова. С блока 5.2 предел — 1,7 ГБ (`memory=1700MB`): в 1 ГБ весь стек с Qdrant не помещается, см. «Docker Desktop на Windows».
 
 Без Docker Redis можно поставить в WSL: `sudo apt install redis-server`, затем `sudo service redis-server start`; сервис на Windows видит его по `localhost:6379`.
 
@@ -760,7 +765,7 @@ HTTP-сервис из блока 3.4 упакован в образ, а `compos
 ### Docker Desktop на Windows: три настройки
 
 1. **Зеркало Docker Hub.** Из нашей сети Docker Hub недоступен (`TLS handshake timeout` на `auth.docker.io`). Чтобы образы `python:3.13-slim-bookworm` и `redis:7.4-alpine` скачивались без правки `Dockerfile` и `compose.yaml`, в Docker Desktop: **Settings → Docker Engine**, добавить в JSON строку `"registry-mirrors": ["https://mirror.gcr.io"]`, затем **Apply & restart**.
-2. **Память WSL.** Предел в `%USERPROFILE%\.wslconfig` (`[wsl2]`, `memory=1GB`) из блока 3.4 оставляем: иначе виртуальная машина Docker забирает память у Ollama.
+2. **Память WSL.** Предел в `%USERPROFILE%\.wslconfig` — `[wsl2]`, `memory=1700MB`. В блоке 3.4 был 1 ГБ, чтобы виртуальная машина Docker не забирала память у Ollama. Но с Qdrant (блок 5.2) весь стек в 1 ГБ не помещается: процессы вытесняются на диск, и движок Docker перестаёт отвечать (задача 7 блока 5.2, «Найдено на Windows»). 1,7 ГБ хватает стеку, остальное остаётся Ollama. После правки — `wsl --shutdown` и перезапуск Docker Desktop.
 3. **Ollama на хосте.** Контейнер обращается к Ollama по адресу `host.docker.internal:11434`. Если запросы к модели заканчиваются `502 llm_unavailable`, задайте Ollama переменную окружения `OLLAMA_HOST=0.0.0.0` и перезапустите Ollama.
 4. **`localhost` зависает, `127.0.0.1` отвечает.** Порт 8000 на IPv6-адресе `[::1]` может занять `wslrelay.exe` — служебный процесс WSL, который пересылает `localhost` в виртуальную машину. Windows пробует `localhost` сначала как `::1`, соединение уходит в `wslrelay` и остаётся без ответа (`curl` показывает `000`). Проверка: `netstat -ano | findstr :8000` — на `[::1]:8000` чужой PID, `Get-Process -Id <PID>` — `wslrelay`. Docker Desktop эта пересылка не нужна, он пробрасывает порты сам, поэтому её можно выключить строкой `localhostForwarding=false` в `%USERPROFILE%\.wslconfig`, затем `wsl --shutdown` и перезапуск Docker Desktop. Либо обращаться к сервису по `http://127.0.0.1:8000`.
 
@@ -2529,7 +2534,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"   # ключ Qdrant
 В `.env` (ключ — только туда):
 
 ```
-QDRANT_URL=http://localhost:6333
+QDRANT_URL=http://127.0.0.1:6333
 QDRANT_API_KEY=<ключ из команды выше>
 EMBEDDING_DIM=1024
 ```
@@ -2585,6 +2590,58 @@ $q = [uri]::EscapeDataString("Сколько стоит тариф «Профе�
 | Три фильтра (match, datetime range, must + must_not) с кодом и top-3 | раздел «Фильтры», `scripts/qdrant_filters_demo.py`; `test_filters_demo` |
 | `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`, `EMBEDDING_DIM` в `.env`, в коде нет `localhost:6333` | `Settings`, `.env.example`; `test_no_hardcoded_qdrant_address_in_code` |
 | HNSW явно или с обоснованием | `HNSW = HnswConfigDiff(m=16, ef_construct=100)` с комментарием; `test_ensure_collection_creates_with_dim_cosine_and_hnsw` |
+
+### Задача 7 (опционально): pgvector
+
+Та же база знаний — в Postgres сервиса с расширением pgvector 0.8.7, чтобы сравнить его с Qdrant и выбрать хранилище осознанно. Подробно — [`docs/vector_store.md`, раздел «pgvector»](docs/vector_store.md#pgvector-та-же-база-в-postgres-задача-7).
+
+- **Образ `postgres`** — официальный `pgvector/pgvector:0.8.7-pg16-bookworm`: тот же Postgres 16 с расширением pgvector 0.8.7, том `pg-data` прежний. Образ на Debian, а том создан на Alpine, где строки сортируются иначе, поэтому после смены образа индексы по тексту один раз перестраиваются: `docker compose exec postgres reindexdb -U multapi --all`.
+- **`app/services/pgvector_store.py`** — `PgVectorStore`: таблица `kb.documents (id uuid, embedding vector(1024), payload jsonb)`, HNSW `vector_cosine_ops` (m=16, ef_construction=100 — как у Qdrant), HNSW по `embedding::halfvec(1024)`, GIN по payload. Поиск — `ORDER BY embedding <=> $1`, фильтры `sql_filter` повторяют `build_filter` для Qdrant. Сервис по-прежнему ищет в Qdrant.
+- **`scripts/load_to_pgvector.py`** — идемпотентная загрузка тех же 110 фрагментов: повторный запуск — «новых 0, изменено 0, без изменений 110», неизменённые строки не переписываются. `--recreate` — пересоздать таблицу, `--drop` — удалить её после сравнения.
+- **`scripts/compare_pgvector.py`** — задержка на пяти вопросах (Qdrant, pgvector с планом по умолчанию, только HNSW, только HNSW halfvec; от вызова до ответа и на сервере), совпадение top-5, три фильтра SQL против `Filter`, HNSW + WHERE с итеративным сканированием и без, размеры таблицы и индексов.
+- **`VectorStore`** открывает к Qdrant по HTTP на локальном адресе новое соединение на каждый запрос (ниже, «Найдено на Windows»); `.env.example` — `QDRANT_URL=http://127.0.0.1:6333`.
+- **Тесты:** +43 — `tests/unit/test_pgvector_store.py` (28, без базы), `tests/integration/test_pgvector_live.py` (6, настоящий Postgres во временной схеме; без pgvector — пропускаются), `TestPgvectorImage` (4: образ, `reindexdb`, том и порт, `127.0.0.1` в `.env.example`), в `test_vector_store.py` — тайм-аут Qdrant и соединения без keep-alive (5).
+- **Найдено на Windows:**
+  - сначала pgvector собирался из исходников в прежнем `postgres:16-alpine` (чтобы не трогать том), но сборка упала: `apk` не скачал пакеты — `TLS: server certificate not trusted`, сеть подменяет HTTPS-сертификаты, как у бота. Отсюда готовый образ `pgvector/pgvector`: его Docker Desktop скачивает сам, и при сборке сеть не нужна;
+  - Docker Desktop с пределом памяти WSL 1 ГБ перестал отвечать (500 на запрос образа, тайм-ауты Postgres и Qdrant), когда весь стек проработал около часа: `docker stats` — у `app` и `bot` по 22–29 МиБ в памяти, остальное вытеснено на диск, у phoenix 20 ГБ чтения с диска. Предел поднят до 1,7 ГБ (`memory=1700MB` в `.wslconfig`, раздел «Docker Desktop на Windows»);
+  - ошибка «Нет связи с Qdrant (http://localhost:6333): .» приходила без причины — текст `ResponseHandlingException` в `qdrant-client` всегда пуст, причина лежит в `exc.source`. Теперь в сообщении её тип и текст: «ConnectError: All connection attempts failed», «ReadTimeout — нет ответа»;
+  - **`localhost` — +260 мс к каждому запросу Qdrant:** 264.52 мс при 0.56 мс поиска на сервере. Для `localhost` `qdrant-client` открывает соединение на каждый запрос, а `localhost` в Windows сначала пробует IPv6 (`::1`), где Qdrant не слушает, и ждёт ~250 мс. С `127.0.0.1` — 5.13 мс; в `.env.example` теперь `127.0.0.1`, как у `DATABASE_URL`. Отсюда и ~2 с на загрузку 110 точек в блоке 5.2;
+  - **keep-alive — +40 мс к каждому ответу Qdrant** (песочница: 45.9 мс против 4.5 мс): на переиспользуемом соединении ответ ждёт задержанное подтверждение TCP вместе с алгоритмом Нейгла. Поэтому `qdrant-client` и отключает keep-alive для `localhost`, но для `qdrant:6333`, по которому ходит `app` в compose, оставлял — каждый поиск сервиса платил 40 мс. Теперь `VectorStore` отключает keep-alive для всех локальных адресов по HTTP (для внешнего Qdrant по HTTPS пул остаётся).
+
+**Проверка на Windows:**
+
+В `.env` — `QDRANT_URL=http://127.0.0.1:6333` (не `localhost`, см. выше).
+
+```powershell
+docker compose stop app bot phoenix             # замер задержки — без лишней нагрузки
+docker compose up -d postgres                   # образ pgvector/pgvector; том pg-data тот же
+docker compose ps postgres                      # healthy
+docker compose exec postgres reindexdb -U multapi --all   # один раз: том создан старым образом
+python scripts/load_to_pgvector.py              # count(*): 110
+python scripts/load_to_pgvector.py              # новых 0, изменено 0, без изменений 110
+python scripts/compare_pgvector.py --today 2026-10-10
+python -m pytest -q                             # 1156 passed
+```
+
+**Windows** (11.10.2026, Docker Desktop с пределом WSL 1,7 ГБ, `bge-m3` в Ollama):
+- **Образ** `pgvector/pgvector:0.8.7-pg16-bookworm` скачан за 21 с, том `pg-data` прежний, `reindexdb` — по базам `multapi`, `multapi_test`, `postgres`, `template1`.
+- **Загрузка:** 110 строк за 0,25 с (векторы из кеша), повтор — «новых 0, изменено 0, без изменений 110» за 0,11 с. Таблица с TOAST — 744 КБ, HNSW `vector` — 888 КБ, HNSW `halfvec` — 304 КБ. `EMBEDDING_DIM=384` — «Таблица kb.documents создана для векторов из 1024 чисел… --recreate».
+- **Задержка**, медиана (p95): Qdrant — 5.13 мс (13.51), pgvector — 1.83 (3.21), только HNSW — 1.81 (2.86), HNSW halfvec — 1.59 (2.26). Сам поиск на сервере — 0.52 / 0.40 / 0.16 / 0.19 мс. С `QDRANT_URL=http://localhost:6333` Qdrant — 264.52 мс.
+- **Совпадение:** top-5 pgvector совпали с Qdrant на всех пяти вопросах, halfvec — тоже (разница score до 0.00002). Три фильтра — те же top-3 и те же score, что у Qdrant.
+- **HNSW + WHERE:** только архивные редакции — без итеративного сканирования 1 строка из 5, с ним — 5.
+- **Тесты:** 1151 passed (до правок keep-alive и `127.0.0.1`).
+- **Память:** при пределе 1,52 ГиБ весь стек занимает около 550 МиБ, из них phoenix — 400 МиБ.
+
+**Песочница** (Linux, Qdrant 1.19.1 и Postgres 16.15 + pgvector 0.8.7 без Docker, подставная модель эмбеддингов):
+- **Загрузка:** 110 строк за 0,25 с; повтор — «без изменений 110» за 0,05 с, размер таблицы не растёт. Таблица с TOAST — 744 КБ, HNSW `vector` — 888 КБ, HNSW `halfvec` — 304 КБ.
+- **Задержка**, медиана: Qdrant — 3,49 мс, pgvector — 1,02 (план по умолчанию — перебор), только HNSW — 1,01, HNSW halfvec — 0,72. Сам поиск на сервере — 0,40 / 0,50 / 0,16 / 0,20 мс: разница во времени ответа — это клиент (у Qdrant новое соединение, REST и разбор ответа), а не поиск. `VectorStore` с адресом, для которого `qdrant-client` оставлял keep-alive (как `qdrant:6333` в compose), — 45.9 мс до правки и 4.47 мс после.
+- **Совпадение:** top-5 pgvector совпали с Qdrant на всех вопросах, halfvec — тоже (разница score до 0,00003); три фильтра — top-3 совпали.
+- **HNSW + WHERE:** только архивные редакции (8 из 110) — без итеративного сканирования HNSW вернул 1 строку из 5, с `hnsw.iterative_scan = strict_order` — 5.
+- **Ошибки** — понятным текстом, код 2: в Postgres нет pgvector — «…нет расширения pgvector… В compose.yaml у postgres образ pgvector/pgvector — запустите его: docker compose up -d postgres»; Postgres не запущен — «Нет связи с Postgres… docker compose up -d postgres»; `EMBEDDING_DIM=384` — «Таблица kb.documents создана для векторов из 1024 чисел… --recreate».
+- **Образ:** Docker Hub из песочницы недоступен — Postgres 16 с pgvector 0.8.7 собран из исходников тега `v0.8.7`, той же версии, что в образе `pgvector/pgvector:0.8.7-pg16-bookworm`.
+- **Тесты:** `pytest` — 1155 passed и 1 skipped (живой тест Qdrant без `.env`), с `-W error` тоже.
+
+**Выбор — остаётся Qdrant.** Поиск на сервере — доли миллисекунды у обоих. В Qdrant фильтр работает внутри поиска, а в pgvector при переходе на HNSW без итеративного сканирования редкие условия теряют результаты. На блоке 5.3 к коллекции Qdrant подключится LlamaIndex, а гибридный поиск в Qdrant есть из коробки. Обоснование — в [`docs/vector_store.md`](docs/vector_store.md#выбор-оставляю-qdrant).
 
 ## Конфигурация (.env)
 

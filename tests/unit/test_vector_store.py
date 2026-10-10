@@ -241,7 +241,10 @@ class Failing:
 
 
 @pytest.mark.parametrize("exc, cls, text", [
-    (ResponseHandlingException(httpx.ConnectError("refused")), VectorStoreUnavailable, "docker compose up -d qdrant"),
+    (ResponseHandlingException(httpx.ConnectError("refused")), VectorStoreUnavailable,
+     r"Нет связи с Qdrant \(http://qdrant\.invalid:6333\): ConnectError: refused\. .*docker compose up -d qdrant"),
+    # Тайм-аут httpx без текста: в сообщении — его тип, а не пустое место перед точкой.
+    (ResponseHandlingException(httpx.ReadTimeout("")), VectorStoreUnavailable, r"\): ReadTimeout — нет ответа\. "),
     (UnexpectedResponse(401, "Unauthorized", b"Invalid API key or JWT", httpx.Headers()), VectorStoreError,
      r"не принял ключ \(401\): QDRANT_API_KEY"),
     (UnexpectedResponse(500, "Internal", b'{"status": {"error": "disk full"}}', httpx.Headers()), VectorStoreError,
@@ -262,6 +265,31 @@ def test_client_is_created_once_and_without_insecure_warning_for_local(recwarn):
         VectorStore("http://qdrant.example.com:6333", "key-1234567890", "documents", DIM)   # внешний — нужен https
     with pytest.raises(VectorStoreError, match="QDRANT_URL не задан"):
         VectorStore(None, None, "documents", DIM)
+
+
+@pytest.mark.parametrize(("url", "keepalive"), [
+    ("http://qdrant:6333", 0),                   # app в compose
+    ("http://127.0.0.1:6333", 0),
+    ("http://192.168.1.20:6333", 0),
+    ("https://xyz.cloud.qdrant.io:6333", None),  # внешний по https — пул qdrant-client по умолчанию
+])
+def test_local_qdrant_gets_new_connection_per_request(monkeypatch, url, keepalive):
+    """Keep-alive к Qdrant по HTTP добавлял ~40 мс к каждому ответу (delayed ACK + Нейгл):
+    для локальных адресов — новое соединение на каждый запрос, как qdrant-client делает для localhost."""
+    seen = {}
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(vs, "AsyncQdrantClient", Recorder)
+    VectorStore(url, "key-1234567890", "documents", DIM)
+    limits = seen.get("limits")
+    assert (limits.max_keepalive_connections if limits else None) == keepalive
+    assert seen["check_compatibility"] is False
+    explicit = httpx.Limits(max_keepalive_connections=4)
+    VectorStore(url, "key-1234567890", "documents", DIM, limits=explicit)
+    assert seen["limits"] is explicit                            # свои limits не перезаписываются
 
 
 def test_from_settings(clean_env):

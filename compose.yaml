@@ -23,6 +23,9 @@
 # docker compose down / up, удаляются только down -v). Дашборд: http://localhost:6333/dashboard
 # (ключ — QDRANT_API_KEY из .env). Без QDRANT_API_KEY в .env docker compose не запустится:
 # ключ задаётся и на учебном стенде — конфигурация переезжает на сервер как есть.
+#
+# Блок 5.2, задача 7: в образе postgres есть расширение pgvector — для сравнения с Qdrant
+# (scripts/load_to_pgvector.py, scripts/compare_pgvector.py, docs/vector_store.md, «pgvector»).
 
 services:
   app:
@@ -138,7 +141,13 @@ services:
       start_interval: 1s
 
   postgres:
-    image: postgres:16-alpine
+    # Блок 5.2, задача 7: официальный образ pgvector — Postgres 16 (тот же мажор, что был) с
+    # расширением pgvector 0.8.7. Собрать pgvector в прежнем postgres:16-alpine не вышло: при сборке
+    # apk и git ходят по HTTPS, а сеть подменяет сертификаты (как у бота, docs/bot.md). Этот образ
+    # на Debian, а том pg-data создан на Alpine, где строки сортируются иначе: после смены образа
+    # индексы по тексту один раз перестраиваются — docker compose exec postgres reindexdb -U multapi --all
+    # (новому тому это не нужно).
+    image: pgvector/pgvector:0.8.7-pg16-bookworm
     restart: unless-stopped
     environment:
       POSTGRES_USER: multapi
