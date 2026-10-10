@@ -1,8 +1,8 @@
 # Стек сервиса: HTTP-сервис app + Redis для кеша (блок 3.5) + Phoenix для трейсов (блок 3.6)
-# + Postgres для истории чатов (блок 4.1) + Telegram-бот bot (блок 4.4).
+# + Postgres для истории чатов (блок 4.1) + Telegram-бот bot (блок 4.4) + Qdrant (блок 5.2).
 #
 #   cp .env.example .env           # вписать LLM__OPENAI_API_KEY (для Ollama — любое значение),
-#                                  # BOT_TOKEN, INTERNAL_TOKEN и ADMIN_TOKEN
+#                                  # BOT_TOKEN, INTERNAL_TOKEN, ADMIN_TOKEN и QDRANT_API_KEY
 #   docker compose up -d --build   # всё одной командой: postgres -> migrate -> app -> bot
 #   docker compose ps
 #   docker compose logs -f app bot
@@ -18,6 +18,11 @@
 #
 # Модель (Ollama) работает на хосте, а не в контейнере: из контейнера она доступна
 # по адресу host.docker.internal.
+#
+# Блок 5.2: векторная база Qdrant — сервис qdrant, данные в томе qdrant_storage (переживают
+# docker compose down / up, удаляются только down -v). Дашборд: http://localhost:6333/dashboard
+# (ключ — QDRANT_API_KEY из .env). Без QDRANT_API_KEY в .env docker compose не запустится:
+# ключ задаётся и на учебном стенде — конфигурация переезжает на сервер как есть.
 
 services:
   app:
@@ -46,6 +51,9 @@ services:
       # Куда отправлять трейсы: Phoenix по имени сервиса, OTLP по HTTP (/v1/traces
       # дописывает app/observability/tracing.py). Без этой переменной трейсинг выключен.
       PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      # Блок 5.2: Qdrant — по имени сервиса; QDRANT_API_KEY, QDRANT_COLLECTION и EMBEDDING_DIM —
+      # из .env (env_file выше).
+      QDRANT_URL: http://qdrant:6333
     extra_hosts:
       # Docker Desktop знает host.docker.internal сам; строка нужна для Docker на Linux.
       - "host.docker.internal:host-gateway"
@@ -63,6 +71,9 @@ services:
         # Phoenix нужен только для трейсов: сервис отвечает и без него, а спаны,
         # которые не удалось отправить, экспортёр отбрасывает. Ждём лишь запуска.
         condition: service_started
+      qdrant:
+        # Блок 5.2: при старте app проверяет коллекцию (ensure_collection) — Qdrant уже отвечает.
+        condition: service_healthy
     healthcheck:
       # Готовность: /ready отвечает 200, только когда доступен Redis.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
@@ -149,6 +160,34 @@ services:
       start_period: 10s
       start_interval: 1s
 
+  qdrant:
+    # Блок 5.2: векторная база. Версия образа — в паре с пакетом qdrant-client 1.19 (pyproject.toml,
+    # requirements.txt): клиент и сервер должны совпадать по мажорной версии и расходиться по
+    # минорной не больше чем на 1.
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    ports:
+      # Только на 127.0.0.1: дашборд и скрипты на этом компьютере; с других компьютеров не видно.
+      - "127.0.0.1:6333:6333"    # REST API и дашборд /dashboard
+      - "127.0.0.1:6334:6334"    # gRPC
+    environment:
+      # Ключ API: без него Qdrant пускает любого. Значение — только в .env.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?задайте QDRANT_API_KEY в .env — python -c "import secrets; print(secrets.token_urlsafe(32))"}
+      # Телеметрию (анонимную статистику использования) Qdrant по умолчанию отправляет разработчикам.
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      # Именованный том: коллекции переживают docker compose down / up и пересоздание контейнера.
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      # Проверка по TCP: порт 6333 принимает соединения. В образе нет curl и wget, а /dev/tcp —
+      # встроенная возможность bash. /healthz отвечал бы и без ключа, но TCP-проверки достаточно.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+      start_interval: 1s
+
   phoenix:
     image: arizephoenix/phoenix:latest
     restart: unless-stopped
@@ -185,3 +224,4 @@ volumes:
   phoenix-data: {}
   pg-data: {}
   chat_data: {}
+  qdrant_storage: {}

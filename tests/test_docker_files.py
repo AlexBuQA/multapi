@@ -200,6 +200,51 @@ class TestProductionCompose(unittest.TestCase):
                 self.assertIn(f'name = "{package}"', lock)                # uv lock выполнен
 
 
+class TestQdrantCompose(unittest.TestCase):
+    """Блок 5.2: Qdrant — сервис compose рядом с app, redis, postgres и bot."""
+
+    def setUp(self) -> None:
+        self.text = _read("compose.yaml")
+        self.qdrant = _service_block(self.text, "qdrant")
+        self.app = _service_block(self.text, "app")
+
+    def test_image_is_pinned_v1_and_matches_client(self):
+        match = re.search(r"image: qdrant/qdrant:v1\.(\d+)\.(\d+)\n", self.qdrant)
+        self.assertIsNotNone(match, "образ qdrant/qdrant:v1.x.y с точной версией, не latest")
+        server_minor = int(match.group(1))
+        self.assertGreaterEqual(server_minor, 14)
+        client = re.search(r'"qdrant-client>=1\.(\d+)', _read("pyproject.toml"))
+        self.assertIsNotNone(client)
+        self.assertLessEqual(abs(server_minor - int(client.group(1))), 1)     # правило совместимости qdrant-client
+        self.assertRegex(_read("uv.lock"), r'name = "qdrant-client"\nversion = "1\.')
+
+    def test_ports_volume_restart(self):
+        self.assertIn('"127.0.0.1:6333:6333"', self.qdrant)
+        self.assertIn('"127.0.0.1:6334:6334"', self.qdrant)
+        self.assertRegex(self.qdrant, r"volumes:\n(\s+#.*\n)*\s+- qdrant_storage:/qdrant/storage")
+        self.assertRegex(self.text, r"(?m)^volumes:\n(  .*\n)*  qdrant_storage: \{\}")
+        self.assertIn("restart: unless-stopped", self.qdrant)
+
+    def test_healthcheck_is_tcp(self):
+        self.assertIn('test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]', self.qdrant)
+
+    def test_api_key_comes_from_env_and_is_required(self):
+        self.assertRegex(self.qdrant, r"QDRANT__SERVICE__API_KEY: \$\{QDRANT_API_KEY:\?")
+        self.assertIn('QDRANT__TELEMETRY_DISABLED: "true"', self.qdrant)
+
+    def test_app_waits_for_healthy_qdrant(self):
+        self.assertRegex(self.app, r"\n\s+qdrant:\n(\s+#.*\n)*\s+condition: service_healthy")
+        self.assertIn("QDRANT_URL: http://qdrant:6333", self.app)
+
+    def test_no_hardcoded_qdrant_address_in_code(self):
+        """Адрес и порт Qdrant — только из QDRANT_URL (.env, compose.yaml), не из кода."""
+        for path in ("app/services/vector_store.py", "scripts/load_to_qdrant.py", "scripts/compare_metrics.py",
+                     "scripts/qdrant_filters_demo.py"):
+            with self.subTest(path=path):
+                self.assertNotIn("6333", _read(path))
+        self.assertRegex(_read("app/core/config.py"), r"\n    qdrant_url: str \| None = None\n")
+
+
 class TestCompose(unittest.TestCase):
     def setUp(self) -> None:
         self.text = _read("compose.yaml")
@@ -274,7 +319,9 @@ class TestSecrets(unittest.TestCase):
                      "EMBEDDINGS__PROVIDER", "EMBEDDINGS__MODEL", "EMBEDDINGS__BASE_URL", "EMBEDDINGS__API_KEY",
                      "EMBEDDINGS__DIMENSIONS", "EMBEDDINGS__BATCH_SIZE", "EMBEDDINGS__QUERY_PREFIX",
                      "EMBEDDINGS__DOCUMENT_PREFIX", "EMBEDDINGS__CACHE_ENABLED", "EMBEDDINGS__CACHE_PATH",
-                     "EMBEDDINGS__TIMEOUT", "EMBEDDINGS__MAX_ATTEMPTS", "EMBEDDINGS__DEVICE"):
+                     "EMBEDDINGS__TIMEOUT", "EMBEDDINGS__MAX_ATTEMPTS", "EMBEDDINGS__DEVICE",
+                     # блок 5.2
+                     "QDRANT_URL", "QDRANT_API_KEY", "QDRANT_COLLECTION", "EMBEDDING_DIM"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -284,7 +331,7 @@ class TestSecrets(unittest.TestCase):
         self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
         for line in example.splitlines():
             if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL|INTERNAL_TOKEN|"
-                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY|EMBEDDINGS__API_KEY)\s*=", line):
+                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY|EMBEDDINGS__API_KEY|QDRANT_API_KEY)\s*=", line):
                 self.assertRegex(line, r'=\s*(""\s*)?(#|$)', line)        # значение пустое
 
     def test_empty_values_survive_docker_compose(self):
