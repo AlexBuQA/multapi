@@ -45,3 +45,8 @@ python-docx>=1.1,<2.0
 # aiohttp-socks — для BOT_PROXY_URL, если api.telegram.org доступен только через прокси.
 aiogram>=3.24,<4.0          # 3.24+ — sendMessageDraft (блок 4.3)
 aiohttp-socks>=0.10,<1.0
+
+# Блок 5.2: векторная база Qdrant (app/services/vector_store.py, scripts/load_to_qdrant.py).
+# Версия клиента — в паре с образом qdrant/qdrant:v1.19.x в compose.yaml.
+qdrant-client>=1.19,<2.0
+tqdm>=4.66,<5.0               # прогресс загрузки в Qdrant

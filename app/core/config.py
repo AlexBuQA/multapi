@@ -37,6 +37,9 @@ HTTP-API бота, INTERNAL_TOKEN — общий секрет сервиса и 
 Эмбеддинги (блок 5.1, app/services/embeddings.py): EMBEDDINGS__* — модель (по умолчанию
 bge-m3 в Ollama на адресе LLM__BASE_URL), батч, префиксы, кеш — см. docs/embeddings.md.
 
+Векторная база (блок 5.2, app/services/vector_store.py): QDRANT_URL, QDRANT_API_KEY,
+QDRANT_COLLECTION, EMBEDDING_DIM — см. docs/vector_store.md.
+
 Настройки ассистента с инструментами (блок 3.1) и скриптов блока 3.3 — в app/config.py.
 """
 from __future__ import annotations
@@ -397,6 +400,19 @@ class Settings(BaseSettings):
     # /stats, /users, /broadcast и рассылки. Не задан — admin-эндпоинты отвечают 503.
     admin_token: SecretStr | None = None
 
+    # --- Векторная база Qdrant (блок 5.2), app/services/vector_store.py ---
+    # Адрес REST API Qdrant: на хосте — http://localhost:6333, в compose — http://qdrant:6333
+    # (задан в compose.yaml). Пусто или none — векторный поиск выключен, сервис работает без него
+    # (none — чтобы выключить его переменной окружения поверх .env, например в тестах).
+    qdrant_url: str | None = None
+    # Ключ Qdrant (заголовок api-key) — тот же, что QDRANT__SERVICE__API_KEY контейнера. Только в .env.
+    qdrant_api_key: SecretStr | None = None
+    qdrant_collection: str = "documents"
+    # Размерность векторов коллекции — от модели эмбеддингов блока 5.1 (EMBEDDINGS__MODEL):
+    # bge-m3 — 1024, multilingual-e5-small — 384, text-embedding-3-small — 1536. Обязательна,
+    # если задан QDRANT_URL: угадывать её по умолчанию — значит однажды залить чужие векторы.
+    embedding_dim: int | None = Field(default=None, ge=1, le=65536)
+
     @field_validator("log_level")
     @classmethod
     def _check_log_level(cls, value: str) -> str:
@@ -441,6 +457,34 @@ class Settings(BaseSettings):
             raise ValueError("ADMIN_TOKEN короче 16 символов: сгенерируйте длинный, например "
                              "python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
         return value
+
+    @field_validator("qdrant_url")
+    @classmethod
+    def _qdrant_url(cls, value: str | None) -> str | None:
+        if value is None or value.strip().lower() in {"", "none", "off"}:
+            return None
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("QDRANT_URL: ожидается адрес вида http://localhost:6333")
+        return value
+
+    @field_validator("qdrant_collection")
+    @classmethod
+    def _qdrant_collection(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", value):
+            raise ValueError("QDRANT_COLLECTION: латинские буквы, цифры, _ и -, например documents")
+        return value
+
+    @model_validator(mode="after")
+    def _check_vector_store(self) -> Settings:
+        if self.qdrant_url and self.embedding_dim is None:
+            raise ValueError("QDRANT_URL задан, а EMBEDDING_DIM — нет: укажите размерность векторов модели "
+                             "эмбеддингов (bge-m3 — 1024, multilingual-e5-small — 384, text-embedding-3-small — 1536)")
+        dims = self.embeddings.dimensions
+        if dims and self.embedding_dim and dims != self.embedding_dim:
+            raise ValueError(f"EMBEDDINGS__DIMENSIONS={dims}, а EMBEDDING_DIM={self.embedding_dim}: модель будет "
+                             "возвращать векторы не той длины, что у коллекции Qdrant — сделайте их одинаковыми")
+        return self
 
     @field_validator("bot_url")
     @classmethod

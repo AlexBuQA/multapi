@@ -37,6 +37,10 @@ Swagger: http://localhost:8000/docs
   403 с detail.code = moderation_blocked; роутеры /chats/admin/* (X-Admin-Token) и оценки
   ответов POST /chats/{id}/messages/{message_id}/feedback. Роутер admin подключается раньше
   роутера чатов: иначе /chats/admin/stats совпал бы с /chats/{chat_id};
+- векторная база (блок 5.2): если задан QDRANT_URL, lifespan создаёт VectorStore — один
+  AsyncQdrantClient на процесс — и вызывает ensure_collection (коллекция, размерность,
+  payload-индексы); Qdrant недоступен — сервис стартует, коллекция под другую модель — ошибка
+  старта. GET /kb/search — вопрос → эмбеддинг (блок 5.1) → поиск с фильтрами;
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -79,10 +83,11 @@ from app.observability.logging import get_logger, setup_logging
 from app.observability.middleware import REQUEST_ID_HEADER, USER_ID_HEADER, RequestContextMiddleware
 from app.observability.pii_presidio import load_redactor
 from app.observability.tracing import fastapi_telemetry, setup_tracing, shutdown_tracing
-from app.routers import chat, health, models
+from app.routers import chat, health, kb, models
 from app.services.llm import CACHE_ERRORS
 from app.services.security.canary import new_canary
 from app.services.security.rate_limit import LIMIT_HEADER, REMAINING_HEADER, RateLimitMiddleware
+from app.services.vector_store import open_vector_store
 
 settings = get_settings()   # без ключа здесь ValidationError — uvicorn не стартует
 setup_logging(settings.log_level, log_file=settings.log_file)   # JSON-логи; LOG_LEVEL и LOG_FILE из .env
@@ -161,6 +166,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Чаты (блок 4.1): неподдерживаемая стратегия контекста — ошибка старта, а не 500 на запросах.
     make_strategy(cfg.chat_context_strategy, cfg.chat_context_window)
     await init_chat_storage(app.state, cfg)
+    # Векторная база (блок 5.2): один AsyncQdrantClient на процесс, коллекция и индексы —
+    # ensure_collection. Без QDRANT_URL — None, /kb/search отвечает 503.
+    app.state.vector_store = await open_vector_store(cfg)
 
     log.info("service_started", default_model=cfg.llm.default_model,
              provider=cfg.llm.base_url or "https://api.openai.com/v1",
@@ -170,7 +178,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
              notify=cfg.bot_url if cfg.internal_token else None,
              moderation=("keywords+openai" if app.state.moderation.openai else "keywords")
              if cfg.moderation.enabled else None,
-             admin_api=cfg.admin_token is not None)
+             admin_api=cfg.admin_token is not None,
+             vector_store=cfg.qdrant_collection if app.state.vector_store is not None else None)
     if not cfg.security.enabled:
         log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
                                               "(только для прогона garak baseline)")
@@ -183,6 +192,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.moderation_client.close()
     await app.state.cache.aclose()
     await close_chat_storage(app.state)
+    if app.state.vector_store is not None:
+        await app.state.vector_store.close()
     if app.state.pii_redactor is not None:
         app.state.pii_redactor.close()
     shutdown_tracing(app.state.tracer_provider)
@@ -204,6 +215,7 @@ app = FastAPI(
         {"name": "chat", "description": "Запросы к модели"},
         {"name": "chats", "description": "Чаты с историей на сервере (блок 4.1)"},
         {"name": "models", "description": "Каталог моделей и цен"},
+        {"name": "kb", "description": "Поиск по базе знаний в Qdrant (блок 5.2)"},
         {"name": "health", "description": "Проверка состояния"},
     ],
 )
@@ -331,4 +343,5 @@ app.include_router(admin_routes.router)
 app.include_router(chat_routes.router)
 app.include_router(chat_feedback.router)
 app.include_router(models.router)
+app.include_router(kb.router)
 app.include_router(health.router)

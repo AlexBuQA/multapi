@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4 и 5.1
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.2
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -21,6 +21,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 4.3 — Мультимодальность и streaming:** бот принимает фото, голосовые, PDF и DOCX и отправляет их в сервис тем же `send_message`; сервис превращает файл в content-part (картинка — `image_url` прямо в `chat.completions`, голос — Whisper, документ — текст) и хранит его в истории; ответ в Telegram — нативным черновиком `sendMessageDraft`; обратный канал сервис → бот `POST /notify` — см. раздел [«Блок 4.3»](#блок-43--мультимодальность-и-streaming).
 - **Блок 4.4 — Production-обвязка:** модерация вопросов и ответов в сервисе (`app/moderation/`: ключевые слова из YAML и OpenAI Moderation, `403 moderation_blocked`, замена ответа событием `moderation`), admin API `/chats/admin/*` под `X-Admin-Token` — статистика, пользователи, очередь рассылок; в боте — `/stats`, `/users`, `/broadcast` для `BOT_ADMIN_IDS` и оценки ответов 👍/👎; `docker compose up` поднимает app, бот и Postgres одной командой — см. раздел [«Блок 4.4»](#блок-44--production-обвязка).
 - **Блок 5.1 — Эмбеддинги и семантический поиск:** `app/services/embeddings.py` — `embed_texts` / `embed_query` / `embed_documents` с батчами, повторами tenacity, L2-нормализацией и кешем (память процесса + SQLite, ключ зависит от модели); модель — `bge-m3` в Ollama, выбор обоснован ruMTEB и мини-бенчмарком на своих данных, посчитана стоимость индексации — см. раздел [«Блок 5.1»](#блок-51--эмбеддинги-и-семантический-поиск) и [`docs/embeddings.md`](docs/embeddings.md).
+- **Блок 5.2 — Векторная база Qdrant:** сервис `qdrant` в `compose.yaml` (ключ API, том, проверка по TCP), коллекция `documents` под `bge-m3` (1024, COSINE, HNSW m=16) с payload-индексами, база знаний из 110 фрагментов с датами и разделами, идемпотентная загрузка `scripts/load_to_qdrant.py`, `app/services/vector_store.py` на `AsyncQdrantClient`, `GET /kb/search`, сравнение cosine и dot, три примера фильтров — см. раздел [«Блок 5.2»](#блок-52--векторная-база-qdrant) и [`docs/vector_store.md`](docs/vector_store.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -70,7 +71,8 @@ multapi/
 ├── Dockerfile               # блок 3.5: multi-stage образ сервиса, non-root
 ├── .dockerignore            # блок 3.5: что не уходит в контекст сборки
 ├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix; 4.1: + postgres;
-│                            #   4.4: + migrate (alembic) и bot из того же образа, том pg-data
+│                            #   4.4: + migrate (alembic) и bot из того же образа, том pg-data;
+│                            #   5.2: + qdrant (ключ API, том qdrant_storage)
 ├── alembic.ini              # блок 4.1: настройки Alembic (адрес базы — DATABASE_URL)
 ├── migrations/              # блок 4.1: env.py (async), versions/ — миграция chat tables;
 │                            #   4.4: message_feedback, broadcast_queue, moderation_incidents
@@ -102,14 +104,16 @@ multapi/
 │   ├── core/                # блок 3.4: config.py (Settings), exceptions.py (ошибки LLM); 3.7: llm_output.py;
 │   │                        #   3.8: charset.py (charset=utf-8 у JSON-ответов)
 │   ├── deps/providers.py    # блок 3.4: внедрение зависимостей
-│   ├── routers/             # блок 3.4: chat.py, models.py, health.py
-│   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py
+│   ├── routers/             # блок 3.4: chat.py, models.py, health.py; 5.2: kb.py (GET /kb/search)
+│   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py; 5.2: kb.py
 │   ├── services/
 │   │   ├── llm.py           # блок 3.4: LLMService — кеш в Redis, поток, перевод ошибок; 3.6: span и лог вызова
 │   │   ├── prompts.py       # блок 3.7: системный промпт ассистента со статьями руководства
 │   │   ├── knowledge.py     # блок 3.7: поиск по руководству (общий с инструментом блока 3.1)
 │   │   ├── guardrails.py    # блок 3.7: проверки до и после модели — инъекция, утечка промпта, PII
 │   │   ├── embeddings.py    # блок 5.1: embed_texts / embed_query / embed_documents, батчи, повторы, кеш
+│   │   ├── vector_store.py  # блок 5.2: VectorStore — ensure_collection / upsert / search над Qdrant
+│   │   ├── documents.py     # блок 5.2: фрагменты базы знаний из data/ и их payload, id uuid5
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -137,7 +141,11 @@ multapi/
 │   └── texts.py             # тексты бота и ошибки для пользователя
 ├── data/
 │   ├── knowledge_base.json  # руководство пользователя: 10 статей с разделами
-│   ├── help_center.jsonl    # блок 5.1: база для поиска — 56 документов (руководство, справка, регламент)
+│   ├── help_center.jsonl    # блок 5.1: база для поиска — 56 документов (руководство, справка, регламент);
+│   │                        #   5.2: + created_at, status
+│   ├── release_notes.md     # блок 5.2: заметки «Что нового», 24 фрагмента с датами
+│   ├── faq.md               # блок 5.2: частые вопросы, 22 фрагмента
+│   ├── archive/             # блок 5.2: прежние редакции статей (status: archived)
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   ├── run_tool_call.py     # прогон трёх тест-запросов
@@ -154,12 +162,16 @@ multapi/
 │   ├── chat_scenario.py     # блок 4.1: сценарий «Аня» против запущенного сервиса, N прогонов
 │   ├── embeddings_cli.py    # блок 5.1: эмбеддинги из командной строки, проверка кеша (два запуска)
 │   ├── embeddings_benchmark.py # блок 5.1: сравнение моделей на мини-бенчмарке и базе, префиксы E5
-│   └── indexing_cost.py     # блок 5.1: токены базы, цена индексации, объём векторов
+│   ├── indexing_cost.py     # блок 5.1: токены базы, цена индексации, объём векторов
+│   ├── load_to_qdrant.py    # блок 5.2: идемпотентная загрузка базы знаний в Qdrant
+│   ├── compare_metrics.py   # блок 5.2: cosine против dot на пяти вопросах
+│   └── qdrant_filters_demo.py # блок 5.2: фильтры match, по дате, must + must_not
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
 │   ├── bot.md               # блоки 4.2–4.3: Telegram-бот — поток, /ask, медиа, /notify, запуск
 │   ├── embeddings.md        # блок 5.1: требования, кандидаты, выбор модели, стоимость, устройство модуля
+│   ├── vector_store.md      # блок 5.2: Qdrant — compose, коллекция, загрузка, метрика, фильтры
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -176,7 +188,9 @@ multapi/
 │   ├── test_pii_presidio.py # блок 3.6: Presidio (фон, откат на regex, настоящая модель)
 │   ├── log_capture.py       # перехват JSON-лога в тестах
 │   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval;
-│   │                        #   5.1: test_embeddings.py — батчи, кеш, повторы, префиксы, скрипты
+│   │                        #   5.1: test_embeddings.py — батчи, кеш, повторы, префиксы, скрипты;
+│   │                        #   5.2: test_vector_store.py — Qdrant :memory:, загрузка, метрика, фильтры, /kb/search
+│   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
@@ -184,7 +198,8 @@ multapi/
 │   ├── app/chat/            # блок 4.3: test_media.py (PDF, DOCX, картинки), test_whisper.py (голос)
 │   ├── app/moderation/      # блок 4.4: test_moderation_layers.py — ключевые слова, OpenAI Moderation, лог
 │   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm);
-│                            #   5.1: test_embeddings_live.py — bge-m3 в Ollama, префиксы E5
+│                            #   5.1: test_embeddings_live.py — bge-m3 в Ollama, префиксы E5;
+│                            #   5.2: test_vector_store_live.py — VectorStore на настоящем Qdrant
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav;
 │                            #   блок 4.3: support_rules.docx/.pdf — регламент поддержки для бота и тестов
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
@@ -2470,6 +2485,106 @@ ollama pull bge-m3                              # ~1,2 ГБ
 | Выбор модели обоснован: язык, размерность, стоимость; расчёт индексации 50+ документов | [`docs/embeddings.md`](docs/embeddings.md): ruMTEB, мини-бенчмарк, `scripts/indexing_cost.py` на 56 документах |
 | Повторный `embed_texts(["тот же текст"])` — без запроса к API в том же процессе и после перезапуска, замер времени CLI | кеш в памяти и SQLite; `test_repeat_in_same_process_comes_from_memory`, `test_repeat_after_restart_comes_from_disk`, `test_cli_second_run_makes_no_requests`; на Windows — 5641.6 мс и 1 запрос, затем 0.1 мс из памяти и 0.2 мс с диска после перезапуска, 0 запросов |
 | Смена модели в `.env` — векторы старой модели не используются, код не меняется | ключ кеша содержит провайдера, модель и `dimensions`; `test_model_change_does_not_reuse_old_vectors`; на Windows — `bge-m3` → e5-small → e5-base: у каждой новой модели первый запуск с запросом, повтор из кеша, `--cache-info` — записи моделей раздельно |
+
+## Блок 5.2 — Векторная база Qdrant
+
+Эмбеддинги блока 5.1 теперь хранятся в Qdrant: поиск ближайших фрагментов базы знаний — за миллисекунды и с фильтрами по метаданным (раздел, дата, источник, архивность). На блоке 5.3 к этой же коллекции подключится LlamaIndex. Подробно — [`docs/vector_store.md`](docs/vector_store.md).
+
+```mermaid
+flowchart LR
+    D["data/: справка, заметки о выпусках,<br/>FAQ, архив — 110 фрагментов"] --> L["scripts/load_to_qdrant.py"]
+    L -- "embed_documents (блок 5.1, кеш)" --> E["bge-m3 в Ollama"]
+    L -- "upsert пачками по 128,<br/>id = uuid5(source#key)" --> Q[("Qdrant: documents<br/>1024, COSINE, HNSW m=16<br/>индексы: source, created_at,<br/>category, product, status")]
+    U["GET /kb/search?q=…&category=…"] --> A["app: VectorStore<br/>(один AsyncQdrantClient)"]
+    A -- "embed_query" --> E
+    A -- "query_points + Filter" --> Q
+```
+
+### Что сделано
+
+- **Qdrant в `compose.yaml`** — сервис `qdrant`: образ `qdrant/qdrant:v1.19.1` (в паре с `qdrant-client` 1.19), порты `127.0.0.1:6333` (REST и дашборд) и `127.0.0.1:6334` (gRPC), том `qdrant_storage`, проверка готовности по TCP (`bash` и `/dev/tcp` — в образе нет curl), `restart: unless-stopped`, телеметрия выключена. Ключ `QDRANT__SERVICE__API_KEY` — из `.env` через `${QDRANT_API_KEY:?…}`: без ключа `docker compose` не запускается. `app` ждёт `qdrant: condition: service_healthy` и ходит в `http://qdrant:6333`.
+- **Настройки** (`app/core/config.py`, `.env.example`): `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION` (по умолчанию `documents`), `EMBEDDING_DIM` (у `bge-m3` — 1024). Адреса и размерности в коде нет: без `QDRANT_URL` векторный поиск выключен, а с ним `EMBEDDING_DIM` обязателен; расхождение с `EMBEDDINGS__DIMENSIONS` — ошибка настроек.
+- **`app/services/vector_store.py`** — `VectorStore` над `AsyncQdrantClient`, чтобы остальной код не знал о `qdrant-client`:
+  - `ensure_collection()` — коллекция (размерность, COSINE, HNSW `m=16, ef_construct=100` явно) и payload-индексы `source` (KEYWORD), `created_at` (DATETIME), `category` (KEYWORD, предметное поле — раздел справки), `product`, `status`; у существующей коллекции сверяет размерность и метрику;
+  - `upsert(points, batch_size=256)` — пачками, `wait=True` на последней, длина векторов проверяется до отправки;
+  - `search(query_vector, top_k=5, query_filter=None) -> list[ScoredPoint]` — через `query_points`;
+  - ошибки Qdrant — понятным текстом: не запущен, неверный ключ, коллекция под другую модель.
+- **Сервис:** lifespan создаёт один `VectorStore` на процесс и вызывает `ensure_collection` (Qdrant недоступен — сервис стартует; коллекция под другую модель — ошибка старта), эндпоинты получают его через `Depends(get_vector_store)`. `GET /kb/search` — вопрос → `embed_query` → поиск с фильтрами по разделу, источнику и дате; архивные редакции исключены по умолчанию.
+- **База знаний — 110 фрагментов** (`app/services/documents.py`): справочный центр блока 5.1 (56, добавлены даты редакций и статус), заметки о выпусках с датами (24), частые вопросы (22), архив прежних редакций (8). Payload: `source`, `text`, `created_at`, `category`, `product`, `status`, `doc_id`, `title`.
+- **`scripts/load_to_qdrant.py`** — идемпотентная загрузка: id точки — `uuid5` от файла и ключа фрагмента, векторы из кеша блока 5.1, проверка размерности до записи, `upsert` пачками по 128 с прогрессом `tqdm`, удаление точек, которых больше нет в `data/`, итог — `points_count`. `--recreate` — пересоздать коллекцию после смены модели.
+- **`scripts/compare_metrics.py`** — cosine против dot: временные коллекции `documents_cosine` и `documents_dot` на одних векторах, top-5 на пяти вопросах пользователей, контрольный опыт с ненормированными векторами; временные коллекции удаляются.
+- **`scripts/qdrant_filters_demo.py`** — три фильтра (match по `source`, `DatetimeRange` по `created_at`, `must` + `must_not`) с top-3 без фильтра и с ним.
+- **Тесты:** 1113 вместо 1067 (на Windows — 1113 passed).
+  - `tests/unit/test_vector_store.py` — 39, Qdrant в режиме `:memory:`: коллекция и HNSW, индексы, ошибка размерности и метрики, пачки и `wait` только на последней, фильтры, ошибки Qdrant, версии, настройки, lifespan, `/kb/search`, база знаний (100+ фрагментов, id `uuid5`, ошибки разметки), загрузка дважды без дублей, отказ при чужой размерности, cosine/dot и фильтры на скриптах;
+  - `tests/integration/test_vector_store_live.py` — smoke-тест на настоящем Qdrant из `.env`: индексы с типами, 300 точек тремя пачками дважды без дублей, поиск с фильтром, неверный ключ; работает во временной коллекции и удаляет её. Qdrant не запущен — пропускается;
+  - `tests/conftest.py` — `QDRANT_URL=none`: тесты, которые запускают lifespan, не создают коллекций в Qdrant из `.env` разработчика.
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt                 # qdrant-client 1.19, tqdm
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # ключ Qdrant
+```
+
+В `.env` (ключ — только туда):
+
+```
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=<ключ из команды выше>
+EMBEDDING_DIM=1024
+```
+
+```powershell
+docker compose up -d qdrant
+docker compose ps qdrant                        # healthy
+python -m pytest -q                             # 1113 passed (живой тест Qdrant — в их числе)
+python scripts/load_to_qdrant.py                # points_count: 110
+python scripts/load_to_qdrant.py                # новых 0, перезаписано 110, points_count: 110
+$env:EMBEDDING_DIM = "384"; python scripts/load_to_qdrant.py; Remove-Item Env:EMBEDDING_DIM   # понятная ошибка, код 2
+python scripts/compare_metrics.py
+python scripts/qdrant_filters_demo.py --today 2026-10-10
+```
+
+Дашборд — http://localhost:6333/dashboard (ключ — в настройках дашборда). Затем весь стек: `docker compose up -d --build`, в логе `app` — `vector_store_ready` с `points: 110`, и поиск из сервиса:
+
+```powershell
+$q = [uri]::EscapeDataString("Сколько стоит тариф «Профессиональный»?")
+(Invoke-RestMethod "http://127.0.0.1:8000/kb/search?q=$q&top_k=3").hits | Format-Table doc_id, title, status, @{n="score"; e={[math]::Round($_.score, 3)}} -AutoSize
+```
+
+Без `-AutoSize` и округления PowerShell 5.1 обрезает длинное число в колонке `score` до «...11».
+
+### Результаты
+
+**Песочница (Linux).** Docker Hub, Hugging Face и реестр Ollama недоступны: Qdrant — официальный бинарник 1.19.1 с GitHub, эмбеддинги — подставной OpenAI-совместимый сервер (векторы из триграмм символов, 1024 числа). Метрики и выдача на нём смысла не имеют — только проверка механики; настоящие таблицы — на Windows с `bge-m3`.
+- **Тесты:** `pytest` — 1112 passed и 1 skipped (живой тест без Qdrant в `.env`), с `-W error` тоже; с `.env`, где задан Qdrant, — 1113 passed, и в Qdrant после прогона не осталось лишних коллекций.
+- **Загрузка** в Qdrant 1.19.1 с ключом: 110 фрагментов, 4 запроса к модели (батчи по 32), «новых 110», `points_count: 110`, индексы `category, created_at, product, source, status`. Повторный запуск — «из кеша 110, запросов к модели 0», «новых 0, перезаписано 110», `points_count: 110`. В коллекции `indexed_vectors_count: 0` — при 110 векторах Qdrant ищет перебором, то есть точно.
+- **Ошибки:** `EMBEDDING_DIM=384` при коллекции на 1024 — «Коллекция documents создана для векторов из 1024 чисел, а EMBEDDING_DIM=384… --recreate»; модель на 384 при `EMBEDDING_DIM=1024` — «возвращает векторы из 384 чисел… Ничего не загружено»; чужой ключ — «не принял ключ (401)»; Qdrant не запущен — «Нет связи с Qdrant… docker compose up -d qdrant». Везде код выхода 2.
+- **Compose** (вместо образа с Docker Hub — образ-заменитель с тем же бинарником Qdrant 1.19.1; Postgres и Phoenix недоступны — `app` с JSON-историей): `qdrant` — healthy по TCP-проверке, затем стартовал `app`; в его логе `vector_collection_created` и `vector_store_ready` (`http://qdrant:6333`, `server_version: 1.19.1`); без ключа Qdrant отвечает 401. Загрузка с хоста — 110 точек; `GET /kb/search` из контейнера `app` вернул фрагменты раздела billing. `docker compose down` и `up` — `points_count: 110` (том `multapi_qdrant_storage`), `down -v` — том удалён. Без `QDRANT_API_KEY` в `.env` — `docker compose` отказывается стартовать с подсказкой, как сгенерировать ключ.
+- **Cosine и dot** на подставной модели: векторы модуля длины 1, ранжирование совпало на 5 из 5; контрольный опыт с векторами, домноженными на 0,5–2,0, — у косинуса совпало 5 из 5, у скалярного произведения 0 из 5. Временные коллекции удалены.
+
+**Windows (CPU; Qdrant в Docker Desktop, `bge-m3` в Ollama).**
+- **Qdrant:** `docker compose up -d qdrant` — образ `qdrant/qdrant:v1.19.1` скачан, создан том `multapi_qdrant_storage`, через 3 секунды `docker compose ps` — `Up (healthy)`, порты `127.0.0.1:6333-6334`.
+- **Тесты:** `pytest` — 1113 passed, вместе с живым тестом на этом Qdrant.
+- **Загрузка:** первый запуск — 56 векторов из кеша блока 5.1, 54 новых фрагмента — двумя запросами к `bge-m3` (18,9 с), «новых 110», `points_count: 110`, индексы `category, created_at, product, source, status`. Второй — «из кеша 110, запросов к модели 0», «новых 0, перезаписано 110», `points_count: 110`.
+- **Не та размерность:** `EMBEDDING_DIM=384` — «Коллекция documents создана для векторов из 1024 чисел, а EMBEDDING_DIM=384… пересоздайте коллекцию: python scripts/load_to_qdrant.py --recreate».
+- **Cosine и dot:** векторы длины 1.000000, top-5 совпали на всех пяти вопросах, близость первого результата — до четвёртого знака; с ненормированными векторами dot совпал бы на 0 из 5. Находка: на «Можно ли вернуть деньги за тариф?» первой идёт архивная редакция «7 дней» — поэтому `/kb/search` архив по умолчанию исключает. Таблица — в [`docs/vector_store.md`](docs/vector_store.md#метрика).
+- **Фильтры:** match по `source` убрал из выдачи FAQ и оставил заметки о выпусках; фильтр по дате поднял свежую заметку «Новый тариф «Бизнес+»» (без фильтра — FAQ июня и архив 2025 года); `must` + `must_not` на вопрос о тарифе «Профессиональный» заменил архивную цену 2025 года заметкой о переименовании тарифов. Ниже свежей заметки фильтр по дате оставляет нерелевантные фрагменты (близость 0.29–0.40) — для RAG нужен порог близости. Таблицы — в [`docs/vector_store.md`](docs/vector_store.md#фильтры).
+- **Дашборд** (`localhost:6333/dashboard`, Qdrant v1.19.1): одна коллекция `documents` — `GREEN`, 110 точек, 6 сегментов, 1 шард, вектор `Default` 1024 / `Cosine`; временных `documents_cosine` и `documents_dot` нет. У точки — вектор длины 1024 и payload из девяти полей: `source`, `text`, `created_at`, `category`, `product`, `status`, `doc_id`, `title`, `chunk_index`.
+- **Весь стек:** `docker compose up -d --build` — образ собран с `qdrant-client 1.19.1`; `qdrant`, `redis`, `postgres` и `app` — `Healthy`, `migrate` завершился, `bot` запущен. `GET /kb/search` на «Сколько стоит тариф «Профессиональный»?» вернул `RN-2025-12-16`, `FAQ-01`, `RN-2026-09-29`, все `actual`: архивная цена 2025 года, которая без фильтра идёт первой, исключена по умолчанию — та же тройка, что у фильтра `must` + `must_not` в демо-скрипте.
+
+### Соответствие критериям блока 5.2
+
+| Критерий | Реализация |
+|---|---|
+| `docker compose up -d qdrant` — без ошибок, дашборд на `localhost:6333/dashboard`, `healthy` | сервис `qdrant` в `compose.yaml`; `TestQdrantCompose`; на Windows — `Up (healthy)` через 3 с, в дашборде `documents`: 110 точек, 1024, Cosine |
+| `load_to_qdrant.py` загружает 100+ точек, повтор без дублей (`points_count` тот же) | 110 фрагментов, id `uuid5`; `test_loader_is_idempotent_and_prunes`; на Windows — 110 и 110 |
+| Размерность коллекции = `EMBEDDING_DIM`; вектор не той размерности — понятная ошибка | `ensure_collection`, проверка в `embed`/`upsert`; `test_existing_collection_with_other_dim_is_an_error`, `test_wrong_dim_is_rejected_before_sending`, `test_loader_refuses_wrong_dimension` |
+| `vector_store.py` на `AsyncQdrantClient`, клиент один, `upsert`/`search`/`ensure_collection` под smoke-тестом | lifespan + `Depends(get_vector_store)`; `test_lifespan_creates_one_store_and_closes_it`, `tests/integration/test_vector_store_live.py`; на Windows — `GET /kb/search` в полном стеке `docker compose` |
+| `docs/vector_store.md`: таблица cosine/dot на пяти запросах и выбор метрики | раздел «Метрика», `scripts/compare_metrics.py` |
+| Три фильтра (match, datetime range, must + must_not) с кодом и top-3 | раздел «Фильтры», `scripts/qdrant_filters_demo.py`; `test_filters_demo` |
+| `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`, `EMBEDDING_DIM` в `.env`, в коде нет `localhost:6333` | `Settings`, `.env.example`; `test_no_hardcoded_qdrant_address_in_code` |
+| HNSW явно или с обоснованием | `HNSW = HnswConfigDiff(m=16, ef_construct=100)` с комментарием; `test_ensure_collection_creates_with_dim_cosine_and_hnsw` |
 
 ## Конфигурация (.env)
 

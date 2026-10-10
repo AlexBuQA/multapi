@@ -28,6 +28,7 @@ for path in (ROOT, ROOT / "tests"):          # tests — для общего п�
 # До импорта app.main: настройки читаются при импорте. Переменные окружения важнее .env,
 # поэтому тесты не зависят от локального .env.
 os.environ["LLM__OPENAI_API_KEY"] = "test-key"
+os.environ["QDRANT_URL"] = "none"     # блок 5.2: lifespan не ходит в Qdrant из .env разработчика
 os.environ["LLM__DEFAULT_MODEL"] = "test-model"
 os.environ["CORS_ORIGINS"] = '["http://localhost:3000"]'
 os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"   # закрытый порт: Redis «выключен»

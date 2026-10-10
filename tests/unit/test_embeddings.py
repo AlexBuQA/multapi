@@ -598,8 +598,10 @@ def test_sentence_transformers_missing_package(monkeypatch, services):
 
 # ---------------------------------------------------------------- настройки
 def settings(**embeddings) -> Settings:
+    # qdrant_url и embedding_dim — явно: src/config.py загружает .env разработчика в окружение, а
+    # EMBEDDING_DIM оттуда (блок 5.2) не совпал бы с dimensions теста.
     return Settings(_env_file=None, llm=LLMSettings(openai_api_key="llm-key", base_url="http://localhost:11434/v1"),
-                    embeddings=EmbeddingSettings(**embeddings))
+                    embeddings=EmbeddingSettings(**embeddings), qdrant_url=None, embedding_dim=None)
 
 
 def test_defaults_bge_m3_in_ollama(tmp_path):
