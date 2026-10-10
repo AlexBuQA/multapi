@@ -39,7 +39,8 @@ htmlcov/
 *.swp
 .DS_Store
 
-# Не нужно сервису: тесты, данные, документация, CLI-часть проекта, Telegram-бот (блок 4.2)
+# Не нужно сервису: тесты, данные, документация, CLI-часть проекта. Telegram-бот (bot/)
+# с блока 4.4 входит в образ: compose запускает его отдельным сервисом.
 tests/
 eval/
 notebooks/
@@ -57,7 +58,8 @@ examples/
 scripts/
 tools/
 src/
-bot/
+# Корневые сертификаты сети (блок 4.4) — не в образ: compose подключает папку certs/ томом
+certs/
 demo_*.py
 main.py
 requirements.txt

@@ -13,19 +13,33 @@ from pathlib import Path
 from app.chat.domain import ChatMessage
 from app.core.config import DatabaseSettings, Settings
 from app.core.exceptions import LLMError
+from app.moderation.keywords import DEFAULT_KEYWORDS_FILE
 from app.schemas.chat import ChatDelta, ChatRequest, Usage, content_text
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+# Модерация в тестах — словарь по умолчанию, без OpenAI. Каждое поле задано явно: вложенные
+# настройки pydantic-settings дополняет из окружения, и MODERATION__KEYWORDS_FILE из .env
+# разработчика (например, samples/moderation_demo.yaml для ручной проверки) иначе попал бы в тесты.
+TEST_MODERATION: dict[str, object] = {
+    "enabled": True, "keywords_file": DEFAULT_KEYWORDS_FILE, "openai_enabled": False, "openai_api_key": None,
+    "openai_base_url": None, "openai_model": "omni-moderation-latest", "thresholds": {}, "timeout": 10.0,
+    "fail_closed": False,
+}
+
+
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:
-    # Медиа и уведомления (блок 4.3) — явно выключены: src/config.py при импорте читает .env
-    # разработчика в os.environ (load_dotenv), и SUPPORT_VISION_MODEL, AUDIO_API_KEY или
-    # INTERNAL_TOKEN оттуда иначе попали бы в настройки тестов.
+    # Медиа, уведомления (блок 4.3), admin API и модерация (блок 4.4) — явно: src/config.py при
+    # импорте читает .env разработчика в os.environ (load_dotenv), и SUPPORT_VISION_MODEL,
+    # AUDIO_API_KEY, INTERNAL_TOKEN, ADMIN_TOKEN или MODERATION__* оттуда иначе попали бы в
+    # настройки тестов.
+    moderation = {**TEST_MODERATION, **dict(overrides.pop("moderation", {}))}  # type: ignore[call-overload]
     values: dict[str, object] = {"llm": {"openai_api_key": "k", "default_model": "test-model"},
                                  "chat_repository": "json", "chat_storage_dir": tmp_path / "chats",
                                  "chat_vision_model": None, "audio_api_key": None, "internal_token": None,
-                                 "bot_url": "http://bot.test:9000", "media": {}}
+                                 "admin_token": None, "bot_url": "http://bot.test:9000", "media": {},
+                                 "moderation": moderation}
     values.update(overrides)
     return Settings(**values, _env_file=None)  # type: ignore[arg-type]
 
@@ -117,7 +131,8 @@ async def truncate_tables(url: str) -> None:
 
     engine = create_async_engine(url)
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE chats CASCADE"))
+        # Блок 4.4: у broadcast_queue нет внешнего ключа на chats — её очищаем явно.
+        await conn.execute(text("TRUNCATE chats, broadcast_queue, moderation_incidents CASCADE"))
     await engine.dispose()
 
 

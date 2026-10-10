@@ -24,11 +24,17 @@ user_name — необязательное имя, как обращаться �
 Поток POST /chats/{chat_id}/messages — text/event-stream, в каждом событии одна строка
 data: с JSON (блок 4.3; до него фрагменты шли текстом и в конце data: [DONE]):
     data: {"type": "token", "delta": "<фрагмент>"}\\n\\n      по мере генерации
-    data: {"type": "done"}\\n\\n                            конец ответа
+    data: {"type": "moderation", "code": "moderation_blocked", "categories": [...],
+           "message": "Не могу показать ответ — он мог нарушить правила."}\\n\\n
+                                                        ответ не прошёл модерацию (блок 4.4):
+                                                        показанный текст заменить на message
+    data: {"type": "done", "message_id": "<uuid>"}\\n\\n    конец ответа; message_id — id
+                                                        сохранённого ответа для оценки (4.4)
     data: {"type": "error", "code": "...", "message": "..."}\\n\\n   ошибка посреди ответа
 Переводы строк внутри фрагмента экранирует JSON, поэтому событие всегда в одну строку.
 Ошибка до первого фрагмента (чата нет, провайдер недоступен, 429) — обычный JSON-ответ с
-кодом 404/429/502/503/504. После события error события done нет. Клиент ушёл, не дождавшись
+кодом 404/429/502/503/504; вопрос не прошёл модерацию — 403 с detail.code =
+moderation_blocked (блок 4.4). После события error события done нет. Клиент ушёл, не дождавшись
 первого фрагмента (бот получил ReadTimeout), — запрос к модели обрывается, замок чата
 отпускается, в лог — chat_client_gone, ответ 499 (его уже некому читать).
 
@@ -43,7 +49,7 @@ import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any, TypeVar
 from uuid import UUID
 
 import structlog
@@ -55,7 +61,7 @@ from app.chat.deps import AudioClientDep, ChatServiceDep, SettingsDep
 from app.chat.domain import Chat, ChatInputError, ChatMessage, ChatStorageError, MediaError, MediaInfo, \
     RequestError, Role
 from app.chat.media import normalize_mime, read_media
-from app.chat.service import clean_user_name
+from app.chat.service import AnswerReplaced, AnswerSaved, StreamItem, clean_user_name
 from app.core.exceptions import LLMError
 from app.observability.logging import get_logger
 from app.schemas.errors import LLM_ERROR_RESPONSES, ErrorResponse
@@ -64,7 +70,7 @@ from app.services.notifier import NotifyError, notify_user
 router = APIRouter(prefix="/chats", tags=["chats"])
 log = get_logger()
 
-def sse_event(payload: dict[str, str]) -> str:
+def sse_event(payload: dict[str, Any]) -> str:
     """Одно событие SSE: JSON в одной строке data:. ensure_ascii=False — кириллица как есть."""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -80,6 +86,7 @@ MEDIA = {
 FORM_TYPES = {"multipart/form-data", "application/x-www-form-urlencoded"}
 DISCONNECT_POLL = 0.5     # с: как часто, пока модель молчит, проверять, ждёт ли ещё клиент
 CLIENT_CLOSED = 499       # как у nginx: клиент закрыл соединение, ответ некому отдать
+T = TypeVar("T")
 
 
 def no_nul(value: str | None) -> str | None:
@@ -164,6 +171,16 @@ def sse_token(delta: str) -> str:
     return sse_event({"type": "token", "delta": delta})
 
 
+def sse_item(item: StreamItem) -> str:
+    """Событие потока ChatService.stream_message -> строка SSE."""
+    if isinstance(item, AnswerSaved):
+        return sse_event({"type": "done", "message_id": str(item.message_id) if item.message_id else None})
+    if isinstance(item, AnswerReplaced):
+        return sse_event({"type": "moderation", "code": "moderation_blocked", "categories": item.categories,
+                          "message": item.text})
+    return sse_token(item)
+
+
 def sse_error(code: str, message: str) -> str:
     return sse_event({"type": "error", "code": code, "message": message})
 
@@ -172,8 +189,8 @@ class ClientGone(Exception):
     """Клиент закрыл соединение, не дождавшись первого фрагмента ответа."""
 
 
-async def first_chunk(chunks: AsyncIterator[str], is_disconnected: Callable[[], Awaitable[bool]],
-                      poll: float | None = None) -> str | None:
+async def first_chunk(chunks: AsyncIterator[T], is_disconnected: Callable[[], Awaitable[bool]],
+                      poll: float | None = None) -> T | None:
     """Первый фрагмент ответа, пока клиент ещё ждёт; None — ответ пустой.
 
     До первого фрагмента StreamingResponse ещё нет, и разрыв соединения слушать некому.
@@ -182,7 +199,7 @@ async def first_chunk(chunks: AsyncIterator[str], is_disconnected: Callable[[], 
     в poll секунд проверяем соединение; клиент ушёл — генератор отменяется (запрос к модели
     обрывается, замок отпускается) и поднимается ClientGone.
     Ошибки генератора, пока клиент на связи, поднимаются как есть."""
-    async def step() -> str | None:
+    async def step() -> T | None:
         try:
             return await anext(chunks)
         except StopAsyncIteration:
@@ -202,12 +219,15 @@ async def first_chunk(chunks: AsyncIterator[str], is_disconnected: Callable[[], 
                 await task
 
 
-async def _events(first: str | None, chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _events(first: StreamItem | None, chunks: AsyncIterator[StreamItem]) -> AsyncIterator[str]:
+    done = False
     try:
         if first is not None:
-            yield sse_token(first)
-        async for chunk in chunks:
-            yield sse_token(chunk)
+            done = isinstance(first, AnswerSaved)
+            yield sse_item(first)
+        async for item in chunks:
+            done = done or isinstance(item, AnswerSaved)
+            yield sse_item(item)
     except (LLMError, ChatStorageError) as exc:
         # Заголовки с кодом 200 уже ушли: об ошибке посреди ответа сообщаем событием error.
         yield sse_error(exc.code, exc.message)
@@ -218,7 +238,8 @@ async def _events(first: str | None, chunks: AsyncIterator[str]) -> AsyncIterato
         return
     finally:
         await chunks.aclose()   # type: ignore[attr-defined]
-    yield DONE
+    if not done:                # поток без AnswerSaved (не ChatService) — done без message_id
+        yield DONE
 
 
 @router.post("", response_model=CreateChatOut, summary="Чат клиента: найти или создать", responses=STORAGE)
@@ -292,7 +313,7 @@ async def send_message(
         log.info("chat_media_received", kind=media_ref.kind, mime=media_ref.mime, bytes=media_ref.size,
                  text_chars=len(part["text"]) if part.get("type") == "text" else None,
                  latency_ms=round((time.perf_counter() - started) * 1000, 1))
-    chunks = service.send_message(chat_id, content, media=media_ref, user_name=user_name)
+    chunks = service.stream_message(chat_id, content, media=media_ref, user_name=user_name)
     # Первый фрагмент — до ответа клиенту: «чата нет», недоступная база или провайдер
     # возвращаются обычным JSON с нужным HTTP-кодом, а не событием посреди потока.
     waiting = time.perf_counter()

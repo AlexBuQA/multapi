@@ -1,14 +1,18 @@
 # Стек сервиса: HTTP-сервис app + Redis для кеша (блок 3.5) + Phoenix для трейсов (блок 3.6)
-# + Postgres для истории чатов (блок 4.1).
+# + Postgres для истории чатов (блок 4.1) + Telegram-бот bot (блок 4.4).
 #
-#   cp .env.example .env           # вписать LLM__OPENAI_API_KEY (для Ollama — любое значение)
-#   docker compose up -d --build --wait   # ждёт, пока все сервисы станут healthy
+#   cp .env.example .env           # вписать LLM__OPENAI_API_KEY (для Ollama — любое значение),
+#                                  # BOT_TOKEN, INTERNAL_TOKEN и ADMIN_TOKEN
+#   docker compose up -d --build   # всё одной командой: postgres -> migrate -> app -> bot
 #   docker compose ps
+#   docker compose logs -f app bot
 #
 # Интерфейс Phoenix: http://127.0.0.1:6006 (проект diploma-fastapi).
 #
-# История чатов в Postgres (CHAT_REPOSITORY=postgres в .env): после первого запуска
-# применить миграцию — docker compose exec app alembic upgrade head.
+# Блок 4.4: история чатов, оценки, очередь рассылок и инциденты модерации — в Postgres
+# (CHAT_REPOSITORY=postgres задан здесь, .env его не меняет), данные — в томе pg-data и
+# переживают docker compose down / up (их удаляет только down -v). Миграции применяет
+# одноразовый сервис migrate (alembic upgrade head) до старта app.
 # Для uvicorn на хосте и тестов достаточно одного Postgres: docker compose up -d postgres,
 # он доступен на 127.0.0.1:5433.
 #
@@ -29,10 +33,13 @@ services:
     environment:
       # Внутри compose-сети Redis — это имя сервиса redis, а не localhost.
       REDIS_URL: redis://redis:6379/0
-      # Блок 4.1: история чатов. Postgres — по имени сервиса; для CHAT_REPOSITORY=json
-      # файлы лежат в томе chat_data и переживают пересоздание контейнера.
+      # Блок 4.1: история чатов. Postgres — по имени сервиса. Блок 4.4: в compose — всегда
+      # Postgres (CHAT_REPOSITORY=json из .env для uvicorn на хосте здесь не действует).
+      CHAT_REPOSITORY: postgres
       DATABASE_URL: postgresql+asyncpg://multapi:${POSTGRES_PASSWORD:-multapi}@postgres:5432/multapi
       CHAT_STORAGE_DIR: /app/var/chats
+      # Блок 4.3: уведомления — в HTTP-API бота по имени сервиса (нужен INTERNAL_TOKEN в .env).
+      BOT_URL: http://bot:9000
       # localhost внутри контейнера — сам контейнер. По умолчанию — Ollama на хосте;
       # для облачного провайдера задайте DOCKER_LLM_BASE_URL в .env.
       LLM__BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
@@ -49,6 +56,9 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      migrate:
+        # Таблицы созданы до первого запроса: app стартует, только если миграция прошла.
+        condition: service_completed_successfully
       phoenix:
         # Phoenix нужен только для трейсов: сервис отвечает и без него, а спаны,
         # которые не удалось отправить, экспортёр отбрасывает. Ждём лишь запуска.
@@ -61,6 +71,46 @@ services:
       retries: 3
       start_period: 15s
       start_interval: 2s     # во время start_period проверка чаще — healthy через секунды, а не через 15 с
+
+  migrate:
+    # Блок 4.4: alembic upgrade head — один раз при каждом docker compose up, затем
+    # контейнер завершается (Exited (0) в docker compose ps — это норма). Образ — тот же,
+    # что у app: миграции лежат в нём (COPY migrations/).
+    image: llm-service:v1
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://multapi:${POSTGRES_PASSWORD:-multapi}@postgres:5432/multapi
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true          # проверка образа (/ready на 8000) — для app, не для миграции
+
+  bot:
+    # Блок 4.4: Telegram-бот (python -m bot) из того же образа, что и сервис.
+    image: llm-service:v1
+    command: ["python", "-m", "bot"]
+    restart: unless-stopped
+    env_file:
+      - .env                 # BOT_TOKEN, BOT_ADMIN_IDS, BOT_PROXY_URL, INTERNAL_TOKEN, ADMIN_TOKEN
+    environment:
+      # Сервис — по имени в сети compose, а не 127.0.0.1 (это был бы сам контейнер бота).
+      BACKEND_URL: http://app:8000
+      # HTTP-API для уведомлений слушает все интерфейсы контейнера, иначе app до него не
+      # достучится. Портов наружу нет: API доступно только из сети compose.
+      BOT_API_HOST: 0.0.0.0
+      BOT_API_PORT: "9000"
+    volumes:
+      # Корневые сертификаты сети для BOT_EXTRA_CA_FILE=certs/windows-roots.pem: у контейнера
+      # своё хранилище Linux, и сертификата, которым сеть подменяет HTTPS, в нём нет
+      # (docs/bot.md, «Бот в Docker»). Нет папки certs/ — Docker создаст пустую; в git она не идёт.
+      - ./certs:/app/certs:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      disable: true          # у бота нет /ready; упадёт — его перезапустит restart
 
   redis:
     image: redis:7.4-alpine
@@ -89,7 +139,8 @@ services:
       # 5432 часто занят своим Postgres. С других компьютеров база не видна.
       - "127.0.0.1:5433:5432"
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      # Блок 4.4: том pg-data — данные переживают docker compose down / up и пересборку.
+      - pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "multapi", "-d", "multapi"]
       interval: 10s
@@ -132,5 +183,5 @@ services:
 volumes:
   redis_data: {}
   phoenix-data: {}
-  pg_data: {}
+  pg-data: {}
   chat_data: {}

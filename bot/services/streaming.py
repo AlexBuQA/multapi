@@ -27,6 +27,12 @@ answer_with_stream(message, backend, chat_id, prompt, media=..., mime=..., mode=
 4. Ошибка до первого фрагмента — сообщение об ошибке вместо ответа; посреди ответа —
    пометка «Ответ прерван: …» к уже показанному тексту, и он сохраняется сообщением. Текст
    ответа модели не разбирается как HTML/Markdown: parse_mode не задан.
+5. Блок 4.4. Ответ не прошёл модерацию (событие moderation, AnswerStream.replacement) —
+   renderer.replace: уже отправленные части ответа удаляются, вместо них — текст сервиса
+   «Не могу показать ответ…» (тема «самоповреждение» — слова поддержки, texts.replacement_text).
+   Черновик эфемерный и исчезает сам.
+6. Блок 4.4. Под последним сообщением ответа — кнопки 👍/👎 (fb:up:<id>, fb:down:<id>, id —
+   из события done). Под заменённым модерацией ответом и под ответом с ошибкой их нет.
 """
 from __future__ import annotations
 
@@ -39,13 +45,15 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+import httpx
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramNotFound, TelegramRetryAfter
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from bot import texts
-from bot.services.backend_client import BACKEND_ERRORS
+from bot.keyboards.inline import feedback_kb
+from bot.services.backend_client import BACKEND_ERRORS, error_body, error_code
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +67,16 @@ StreamMode = Literal["draft", "edit"]
 class StreamingBackend(Protocol):
     def send_message(self, chat_id: UUID, content: str, *args: Any,
                      **kwargs: Any) -> AsyncIterator[str]: ...
+
+
+async def delete_messages(messages: list[Message]) -> None:
+    """Удалить части ответа (бот может удалять свои сообщения). Не вышло — не страшно: замена
+    всё равно придёт отдельным сообщением."""
+    for message in messages:
+        try:
+            await message.delete()
+        except TelegramAPIError as exc:
+            log.warning("message_delete_failed chat=%s error=%r", message.chat.id, exc)
 
 
 def new_draft_id() -> int:
@@ -123,6 +141,13 @@ class StreamRenderer:
         self.buffer += note
         await self._overflow()
         await self._show(force=True)
+
+    async def replace(self, text: str) -> None:
+        """Ответ не прошёл модерацию: показанные части — удалить, вместо них — text."""
+        await delete_messages(self.messages)
+        self.messages, self.current, self.buffer, self.shown = [], None, "", ""
+        self.current = await self._send(text)
+        self.messages.append(self.current)
 
     async def _overflow(self) -> None:
         while len(self.buffer) > self.limit:
@@ -262,6 +287,18 @@ class DraftRenderer:
             await self._send(self.buffer)       # черновик эфемерный: ответ сохраняет sendMessage
         self.buffer = self.shown = ""
 
+    async def replace(self, text: str) -> None:
+        """Ответ не прошёл модерацию: черновик исчезнет сам, отправленные части — удалить."""
+        await self.close()
+        if self.fallback is not None:
+            await delete_messages(self.messages)
+            self.messages = []
+            await self.fallback.replace(text)
+            return
+        await delete_messages(self.messages)
+        self.messages, self.buffer, self.shown = [], "", ""
+        await self._send(text)
+
     async def _overflow(self) -> None:
         while len(self.buffer) > self.limit:
             cut = split_point(self.buffer, self.limit)
@@ -330,6 +367,17 @@ def make_renderer(message: Message, mode: StreamMode = "draft") -> Renderer:
     return StreamRenderer(message)
 
 
+async def attach_feedback(renderer: Renderer, message_id: UUID | None) -> None:
+    """Кнопки 👍/👎 под последним сообщением ответа. Не вышло — ответ всё равно показан."""
+    if message_id is None or not renderer.all_messages:
+        return
+    last = renderer.all_messages[-1]
+    try:
+        await last.edit_reply_markup(reply_markup=feedback_kb(message_id))
+    except TelegramAPIError as exc:
+        log.warning("feedback_buttons_failed chat=%s error=%r", last.chat.id, exc)
+
+
 async def answer_with_stream(message: Message, backend: StreamingBackend, chat_id: UUID, prompt: str, *,
                              media: bytes | None = None, mime: str | None = None, filename: str | None = None,
                              mode: StreamMode = "draft", renderer: Renderer | None = None) -> Renderer:
@@ -342,18 +390,30 @@ async def answer_with_stream(message: Message, backend: StreamingBackend, chat_i
         async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
             await renderer.start()
             first = await anext(chunks, None)
+        replacement = getattr(chunks, "replacement", None)
         if first is None:
             await renderer.close()
-            await message.answer(texts.EMPTY_ANSWER)
+            await message.answer(texts.replacement_text(replacement or "", getattr(chunks, "categories", []))
+                                 if replacement else texts.EMPTY_ANSWER)
             return renderer
         await renderer.feed(first)
         async for chunk in chunks:
             await renderer.feed(chunk)
+        replacement = getattr(chunks, "replacement", None)
+        if replacement:                                # блок 4.4: ответ не прошёл модерацию
+            await renderer.replace(texts.replacement_text(replacement, getattr(chunks, "categories", [])))
+            return renderer
         await renderer.finish()
         if not renderer.started:                       # ответ из одних пробелов и переводов строк
             await message.answer(texts.EMPTY_ANSWER)
+        await attach_feedback(renderer, getattr(chunks, "message_id", None))
     except BACKEND_ERRORS as exc:
-        log.warning("backend_error chat=%s during=stream error=%r", message.chat.id, exc)
+        if isinstance(exc, httpx.HTTPStatusError) and error_code(exc) == "moderation_blocked":
+            # Штатный отказ модерации (блок 4.4), а не сбой сервиса: одна строка без текста вопроса.
+            categories = ",".join(str(c) for c in error_body(exc).get("categories") or [])
+            log.info("question_blocked chat=%s categories=%s", message.chat.id, categories)
+        else:
+            log.warning("backend_error chat=%s during=stream error=%r", message.chat.id, exc)
         reason = texts.user_message(exc)
         if renderer.started:
             await renderer.finish(texts.INTERRUPTED.format(reason=reason))

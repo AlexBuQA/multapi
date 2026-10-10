@@ -172,6 +172,22 @@ def test_log_file_gets_the_same_masked_lines(tmp_path):
     assert line["answer_preview"] == "ответ для [EMAIL]"
 
 
+def test_unwritable_log_file_does_not_stop_the_service(tmp_path):
+    """Блок 4.4, Docker на Windows: LOG_FILE=logs/service.jsonl, а папку создать нельзя — сервис
+    падал при старте. Теперь лог идёт в консоль, а в нём — предупреждение log_file_unavailable."""
+    blocker = tmp_path / "logs"
+    blocker.write_text("это файл, а не папка", encoding="utf-8")
+    out = io.StringIO()
+    try:
+        setup_logging("INFO", stream=out, log_file=blocker / "service.jsonl")
+        get_logger().info("service_started")
+    finally:
+        quiet_logs()
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [e["event"] for e in events] == ["log_file_unavailable", "service_started"]
+    assert events[0]["level"] == "warning" and events[0]["path"].endswith("service.jsonl")
+
+
 # ---------------------------------------------------------------- поток
 def chunk(text: str | None = None, usage: dict | None = None) -> SimpleNamespace:
     choices = [SimpleNamespace(delta=SimpleNamespace(content=text), finish_reason=None)] if text is not None else []

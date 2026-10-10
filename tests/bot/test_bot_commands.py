@@ -131,6 +131,24 @@ async def test_unexpected_error_is_caught(dp, bot, session):
     assert all(isinstance(m, SendMessage) for m in session.requests)
 
 
+async def test_telegram_network_error_is_explained(dp, bot, session, backend, caplog):
+    """Проверка в Docker: ответ на /clear не ушёл (таймаут запроса к Telegram через прокси), хотя
+    история уже очищена. Пользователю — что ответ не дошёл, в лог — одна строка без трассировки."""
+    import logging
+
+    from aiogram.exceptions import TelegramNetworkError
+
+    session.fail[SendMessage] = [TelegramNetworkError(method=SendMessage(chat_id=1, text="x"),
+                                                      message="HTTP Client says - Request timeout error")]
+    chat = new_chat_id()
+    with caplog.at_level(logging.INFO, logger="bot.handlers.errors"):
+        await dp.feed_update(bot, message_update("/clear", chat))
+    assert backend.cleared == [backend.chats[(str(chat), "telegram")]]          # команда выполнилась
+    assert session.sent_texts(chat) == [texts.HISTORY_CLEARED, texts.TELEGRAM_NETWORK]   # первая — не дошла
+    record = next(r for r in caplog.records if r.name == "bot.handlers.errors")
+    assert record.levelname == "WARNING" and record.exc_info is None and "Request timeout" in record.getMessage()
+
+
 async def test_questions_of_one_chat_go_one_by_one(dp, bot, session):
     """Второй вопрос уходит в сервис, когда показан первый ответ: в очереди сервиса он ждал бы
     без единого байта и упирался в таймаут бота."""

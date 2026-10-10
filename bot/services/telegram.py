@@ -9,11 +9,18 @@ Windows, macOS, Linux. Проверка не отключается никогд
 
 BOT_PROXY_URL (http:// или socks5://) — прокси, если api.telegram.org напрямую недоступен.
 aiogram подключает его через aiohttp-socks.
+
+BOT_EXTRA_CA_FILE (блок 4.4) — дополнительные корневые сертификаты (PEM) к хранилищу ОС. Нужен
+в Docker: у контейнера своё хранилище Linux, и сертификата, которым сеть или антивирус
+подменяют HTTPS, в нём нет — бот падал с CERTIFICATE_VERIFY_FAILED, хотя на Windows работал.
+Файл — выгрузка корневых сертификатов Windows (docs/bot.md, «Бот в Docker»): контейнер
+доверяет тем же сертификатам, что и компьютер. Проверка по-прежнему не отключается.
 """
 from __future__ import annotations
 
 import logging
 import ssl
+from pathlib import Path
 
 from aiogram.client.session.aiohttp import AiohttpSession
 
@@ -41,10 +48,17 @@ def proxy_errors() -> tuple[type[Exception], ...]:
 
 
 class TelegramSession(AiohttpSession):
-    def __init__(self, *, proxy: str | None = None, use_system_certs: bool = True) -> None:
+    def __init__(self, *, proxy: str | None = None, use_system_certs: bool = True,
+                 extra_ca_file: Path | None = None) -> None:
         super().__init__(proxy=proxy)
         context = system_ssl_context() if use_system_certs else None
         if context is not None:
             # Параметры коннектора aiohttp, который AiohttpSession создаёт в create_session().
             # С прокси их собирает aiohttp-socks без ssl — тогда ssl добавляется сюда же.
             self._connector_init["ssl"] = context
+        if extra_ca_file is not None:
+            current = self._connector_init.get("ssl")
+            if not isinstance(current, ssl.SSLContext):
+                current = self._connector_init["ssl"] = ssl.create_default_context()
+            current.load_verify_locations(cafile=str(extra_ca_file))     # к хранилищу ОС, а не вместо
+            log.info("extra_ca_loaded file=%s", extra_ca_file.name)

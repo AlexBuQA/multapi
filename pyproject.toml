@@ -1,4 +1,5 @@
-# Зависимости Docker-образа HTTP-сервиса (блок 3.5): только то, что импортирует app.main.
+# Зависимости Docker-образа (блок 3.5): то, что импортируют app.main и, с блока 4.4,
+# Telegram-бот (python -m bot) — он запускается из того же образа отдельным сервисом compose.
 # Образ собирается через uv по lock-файлу uv.lock (uv sync --frozen) — версии в нём
 # закреплены, сборка воспроизводима. Локальная разработка всего проекта (CLI, бенчмарк,
 # ассистент с инструментами) по-прежнему идёт через requirements.txt и pip.
@@ -6,8 +7,8 @@
 # После изменения списка зависимостей обновите lock-файл: uv lock
 [project]
 name = "multapi-llm-service"
-version = "4.3.0"
-description = "HTTP-сервис ассистента техподдержки на FastAPI: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов"
+version = "4.4.0"
+description = "HTTP-сервис ассистента техподдержки на FastAPI и Telegram-бот: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов, модерация"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.142,<1.0",   # 0.142 — встроенная трассировка HTTP-запросов (блок 3.6)
@@ -30,6 +31,12 @@ dependencies = [
     "python-multipart>=0.0.20,<1.0",
     "pypdf>=5.1,<7.0",
     "python-docx>=1.1,<2.0",
+    # блок 4.4: словарь модерации в YAML; Telegram-бот в том же образе (сервис bot в compose)
+    "pyyaml>=6.0,<7.0",
+    "httpx>=0.26,<1.0",
+    "truststore>=0.10,<1.0",
+    "aiogram>=3.24,<4.0",      # 3.24+ — sendMessageDraft (блок 4.3)
+    "aiohttp-socks>=0.10,<1.0",
 ]
 
 [tool.uv]

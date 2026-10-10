@@ -218,4 +218,4 @@ async def test_slow_first_chunk_still_reaches_waiting_client(tmp_path, monkeypat
             response = await http.post(f"/chats/{chat_id['chat_id']}/messages", data={"content": "Меня зовут Аня"})
     finally:
         app.dependency_overrides.clear()
-    assert response.status_code == 200 and response.text.endswith('data: {"type": "done"}\n\n')
+    assert response.status_code == 200 and '"type": "done", "message_id": "' in response.text.rsplit("data: ", 1)[1]

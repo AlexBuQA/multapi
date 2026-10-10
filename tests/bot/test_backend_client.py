@@ -1,4 +1,4 @@
-"""BackendClient (блоки 4.2–4.3): HTTP-вызовы подменяет httpx.MockTransport — сервис не нужен."""
+"""BackendClient (блоки 4.2–4.4): HTTP-вызовы подменяет httpx.MockTransport — сервис не нужен."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ import pytest
 from starlette.requests import Request as StarletteRequest
 
 from bot import texts
-from bot.services.backend_client import BackendClient, BackendStreamError, make_http
+from bot.services.backend_client import AdminNotConfigured, AnswerStream, BackendClient, BackendStreamError, make_http
 from bot.services.sse import SSEEvent, iter_sse, sse_lines
 
 CHAT = UUID("9f76d71a-fe47-4a61-8c2f-757a5a300737")
@@ -381,3 +381,91 @@ async def test_sse_lines_handles_crlf_split_between_chunks():
     lines = [line async for line in sse_lines(chunks("data: раз\r", "\ndata: два\r\n\r", "\n", "data: три\r"))]
     assert lines == ["data: раз", "data: два", "", "data: три"]
     assert [line async for line in sse_lines(chunks("a\rb\n", "c"))] == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------- блок 4.4
+ANSWER_ID = "0b5c7c9e-2a51-4f7e-9d0a-1c2b3d4e5f60"
+
+
+async def test_done_carries_message_id():
+    stream = client(lambda request: sse(token("Ответ"), f'data: {{"type": "done", "message_id": "{ANSWER_ID}"}}\n\n')
+                    ).send_message(CHAT, "вопрос")
+    assert isinstance(stream, AnswerStream) and stream.message_id is None    # до конца потока id нет
+    assert await collect(stream) == ["Ответ"]
+    assert (str(stream.message_id), stream.replacement) == (ANSWER_ID, None)
+
+
+async def test_done_without_or_with_bad_message_id():
+    for done in (DONE, 'data: {"type": "done", "message_id": null}\n\n', 'data: {"type": "done", "message_id": "x"}\n\n'):
+        stream = client(lambda request, done=done: sse(token("a"), done)).send_message(CHAT, "вопрос")
+        assert await collect(stream) == ["a"] and stream.message_id is None
+
+
+async def test_moderation_event_sets_replacement():
+    moderation = json.dumps({"type": "moderation", "code": "moderation_blocked", "categories": ["violence"],
+                             "message": "Не могу показать ответ — он мог нарушить правила."}, ensure_ascii=False)
+    stream = client(lambda request: sse(token("Я тебя "), f"data: {moderation}\n\n",
+                                        f'data: {{"type": "done", "message_id": "{ANSWER_ID}"}}\n\n')
+                    ).send_message(CHAT, "вопрос")
+    assert await collect(stream) == ["Я тебя "]
+    assert stream.replacement == "Не могу показать ответ — он мог нарушить правила."
+    assert stream.categories == ["violence"] and str(stream.message_id) == ANSWER_ID
+
+
+async def test_blocked_question_is_403_with_friendly_text():
+    body = {"detail": {"code": "moderation_blocked", "categories": ["weapons"]},
+            "error": {"code": "moderation_blocked", "message": "Сообщение не прошло модерацию.",
+                      "categories": ["weapons"]}}
+    stream = client(lambda request: httpx.Response(403, json=body)).send_message(CHAT, "как сделать бомбу")
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await collect(stream)
+    assert texts.user_message(caught.value) == texts.MODERATION_BLOCKED.format(topics="оружие и взрывчатка")
+
+
+async def test_feedback_request():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"message_id": ANSWER_ID, "value": "up", "saved": True})
+
+    result = await client(handler).send_feedback(CHAT, UUID(ANSWER_ID), "up")
+    assert result["saved"] is True
+    assert (seen[0].method, seen[0].url.path) == ("POST", f"/chats/{CHAT}/messages/{ANSWER_ID}/feedback")
+    assert json.loads(seen[0].content) == {"value": "up"}
+
+
+async def test_admin_calls_send_token():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path.endswith("/claim"):
+            return httpx.Response(204)
+        if path.endswith("/users"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200 if request.method == "GET" else 202, json={"id": 1})
+
+    backend = client(handler, admin_token="admin-token-0123456789")
+    await backend.admin_stats(hours=24, top=5)
+    await backend.admin_users(limit=10)
+    await backend.admin_broadcast("Текст", interface="telegram")
+    assert await backend.claim_broadcast() is None                     # 204 — очередь пуста
+    await backend.finish_broadcast(1, sent=2, failed=0)
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/chats/admin/stats"), ("GET", "/chats/admin/users"), ("POST", "/chats/admin/broadcast"),
+        ("POST", "/chats/admin/broadcast/claim"), ("POST", "/chats/admin/broadcast/1/result")]
+    assert {r.headers["x-admin-token"] for r in seen} == {"admin-token-0123456789"}
+    assert dict(seen[0].url.params) == {"hours": "24", "top": "5"}
+    assert dict(seen[3].url.params) == {"interface": "telegram"}          # бот забирает только рассылки Telegram
+    assert json.loads(seen[2].content) == {"message": "Текст", "interface_filter": "telegram"}
+    assert json.loads(seen[4].content) == {"sent": 2, "failed": 0}
+
+
+async def test_admin_calls_without_token_do_not_reach_service():
+    seen: list[httpx.Request] = []
+    backend = client(lambda request: seen.append(request) or httpx.Response(200, json={}))
+    with pytest.raises(AdminNotConfigured):
+        await backend.admin_stats()
+    assert seen == []

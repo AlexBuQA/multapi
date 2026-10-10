@@ -120,3 +120,19 @@ async def pg_repo(pg_sessions: object) -> AsyncIterator[object]:
 def repo(request: pytest.FixtureRequest) -> object:
     """Одна и та же проверка — против обеих реализаций ChatRepository."""
     return request.getfixturevalue("json_repo" if request.param == "json" else "pg_repo")
+
+
+@pytest.fixture
+async def clean_pg_repo(pg_url: str, pg_sessions: object) -> AsyncIterator[object]:
+    """Postgres без данных других тестов — для сводок (stats, recent_users) блока 4.4."""
+    from app.chat.repositories.pg_repo import PostgresChatRepository
+
+    await truncate_tables(pg_url)
+    async with pg_sessions() as session:  # type: ignore[operator]
+        yield PostgresChatRepository(session=session)
+
+
+@pytest.fixture(params=["json", "postgres"])
+def clean_repo(request: pytest.FixtureRequest) -> object:
+    """Пустое хранилище каждой реализации: сводки считают всё, что в нём есть."""
+    return request.getfixturevalue("json_repo" if request.param == "json" else "clean_pg_repo")

@@ -80,7 +80,8 @@ async def test_stateful_chat_scenario(chat_app, tmp_path):
 
         first, answer = await ask(http, chat_id, "Привет, меня зовут Аня")
         assert first.status_code == 200 and first.headers["content-type"].startswith("text/event-stream")
-        assert first.text.endswith('data: {"type": "done"}\n\n')
+        done = json.loads(first.text.rstrip().rsplit("data: ", 1)[1])
+        assert done["type"] == "done" and first.text.endswith("}\n\n")
         assert len(data_events(first.text)) > 2                       # ответ кусками, а не одним блоком
 
         _, answer = await ask(http, chat_id, "Как меня зовут?")
@@ -88,6 +89,7 @@ async def test_stateful_chat_scenario(chat_app, tmp_path):
 
         history = (await http.get(f"/chats/{chat_id}/messages")).json()
         assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
+        assert done["message_id"] == history[1]["id"]                   # блок 4.4: id ответа для 👍/👎
         assert history[2]["content"] == "Как меня зовут?" and history[3]["content"] == answer
 
         cleared = await http.delete(f"/chats/{chat_id}/messages")

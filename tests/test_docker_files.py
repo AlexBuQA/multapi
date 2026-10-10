@@ -1,5 +1,5 @@
 """
-Статические проверки файлов блоков 3.5–3.6 и 4.1: Dockerfile, .dockerignore, compose.yaml, .env.example.
+Статические проверки файлов блоков 3.5–3.6 и 4.1–4.4: Dockerfile, .dockerignore, compose.yaml, .env.example.
 
 Docker для этих тестов не нужен: они читают файлы как текст и следят, чтобы правки не
 сломали требования заданий (multi-stage, non-root, exec-форма CMD, healthcheck-и,
@@ -119,7 +119,7 @@ class TestChatStorageFiles(unittest.TestCase):
         dockerfile = _read("Dockerfile")
         self.assertIn("COPY alembic.ini ./", dockerfile)
         self.assertIn("COPY migrations/ ./migrations/", dockerfile)
-        self.assertIn("RUN mkdir -p /app/var/chats", dockerfile)
+        self.assertIn("RUN mkdir -p /app/var/chats /app/logs", dockerfile)   # 4.4: LOG_FILE=logs/… в контейнере
         patterns = [line.strip() for line in _read(".dockerignore").splitlines()
                     if line.strip() and not line.startswith("#")]
         for path in ("alembic.ini", "migrations/env.py", "migrations/versions/x_chat_tables.py"):
@@ -133,8 +133,10 @@ class TestChatStorageFiles(unittest.TestCase):
         self.assertIn("image: postgres:16-alpine", postgres)
         self.assertRegex(postgres, r'ports:\n(\s+#.*\n)*\s+- "127\.0\.0\.1:5433:5432"')   # только loopback
         self.assertIn('test: ["CMD", "pg_isready", "-U", "multapi", "-d", "multapi"]', postgres)
-        self.assertRegex(postgres, r"volumes:\n\s+- pg_data:/var/lib/postgresql/data")
-        self.assertRegex(compose, r"(?m)^volumes:\n(  .*\n)*  pg_data:")
+        # Блок 4.4: том называется pg-data (в блоке 4.1 был pg_data).
+        self.assertRegex(postgres, r"volumes:\n(\s+#.*\n)*\s+- pg-data:/var/lib/postgresql/data")
+        self.assertRegex(compose, r"(?m)^volumes:\n(  .*\n)*  pg-data:")
+        self.assertNotIn("pg_data", compose)
 
     def test_app_uses_postgres_by_service_name(self):
         app = _service_block(_read("compose.yaml"), "app")
@@ -142,6 +144,60 @@ class TestChatStorageFiles(unittest.TestCase):
         self.assertIn("CHAT_STORAGE_DIR: /app/var/chats", app)
         self.assertRegex(app, r"volumes:\n\s+- chat_data:/app/var/chats")
         self.assertRegex(app, r"\n\s+postgres:\n\s+condition: service_healthy")
+
+
+class TestProductionCompose(unittest.TestCase):
+    """Блок 4.4: docker compose up поднимает app + bot + postgres одной командой."""
+
+    def setUp(self) -> None:
+        self.text = _read("compose.yaml")
+        self.app = _service_block(self.text, "app")
+        self.bot = _service_block(self.text, "bot")
+        self.migrate = _service_block(self.text, "migrate")
+
+    def test_bot_runs_from_app_image(self):
+        self.assertIn("image: llm-service:v1", self.bot)
+        self.assertNotIn("build:", self.bot)                   # образ собирает app, бот его берёт
+        self.assertIn('command: ["python", "-m", "bot"]', self.bot)
+        self.assertRegex(self.bot, r"env_file:\n\s+- \.env")
+        self.assertIn("restart: unless-stopped", self.bot)
+        self.assertIn("BACKEND_URL: http://app:8000", self.bot)
+        self.assertIn("BOT_API_HOST: 0.0.0.0", self.bot)
+        self.assertNotIn("ports:", self.bot)                     # API бота — только внутри сети compose
+        self.assertRegex(self.bot, r"depends_on:\n\s+app:\n\s+condition: service_healthy")
+        self.assertRegex(self.bot, r"healthcheck:\n\s+disable: true")
+        # Сертификаты сети — томом, только чтение, и не в git
+        self.assertRegex(self.bot, r"volumes:\n(\s+#.*\n)*\s+- \./certs:/app/certs:ro")
+        self.assertIn("certs/", _read(".gitignore").splitlines())
+        self.assertIn("certs/", _read(".dockerignore").splitlines())
+
+    def test_migrations_before_app(self):
+        self.assertIn("image: llm-service:v1", self.migrate)
+        self.assertIn('command: ["alembic", "upgrade", "head"]', self.migrate)
+        self.assertIn('restart: "no"', self.migrate)
+        self.assertIn("DATABASE_URL: postgresql+asyncpg://multapi:${POSTGRES_PASSWORD:-multapi}@postgres:5432/multapi",
+                      self.migrate)
+        self.assertRegex(self.migrate, r"depends_on:\n\s+postgres:\n\s+condition: service_healthy")
+        self.assertRegex(self.app, r"\n\s+migrate:\n(\s+#.*\n)*\s+condition: service_completed_successfully")
+
+    def test_app_uses_postgres_and_bot_api(self):
+        self.assertIn("CHAT_REPOSITORY: postgres", self.app)
+        self.assertIn("BOT_URL: http://bot:9000", self.app)
+
+    def test_image_contains_bot_and_its_dependencies(self):
+        self.assertIn("COPY bot/ ./bot/", _read("Dockerfile"))
+        patterns = [line.strip() for line in _read(".dockerignore").splitlines()
+                    if line.strip() and not line.startswith("#")]
+        self.assertNotIn("bot/", patterns)
+        for path in ("bot/__main__.py", "bot/handlers/admin.py", "app/moderation/moderation_keywords.yaml"):
+            with self.subTest(path=path):
+                self.assertFalse(_ignored(path, patterns))
+        pyproject = _read("pyproject.toml")
+        lock = _read("uv.lock")
+        for package in ("aiogram", "aiohttp-socks", "truststore", "pyyaml", "httpx"):
+            with self.subTest(package=package):
+                self.assertRegex(pyproject, rf'(?m)^\s+"{package}[><=]')
+                self.assertIn(f'name = "{package}"', lock)                # uv lock выполнен
 
 
 class TestCompose(unittest.TestCase):
@@ -209,7 +265,11 @@ class TestSecrets(unittest.TestCase):
                      # блок 4.3
                      "CHAT_VISION_MODEL", "AUDIO_LANGUAGE", "MEDIA__MAX_IMAGE_BYTES", "MEDIA__MAX_DOCUMENT_BYTES",
                      "INTERNAL_TOKEN", "BOT_URL", "BACKEND_STREAM_TIMEOUT", "BOT_STREAMING", "BOT_API_HOST",
-                     "BOT_API_PORT", "BOT_DEFAULT_USER_NAME"):
+                     "BOT_API_PORT", "BOT_DEFAULT_USER_NAME",
+                     # блок 4.4
+                     "ADMIN_TOKEN", "BOT_BROADCAST_POLL", "BOT_EXTRA_CA_FILE", "MODERATION__ENABLED", "MODERATION__KEYWORDS_FILE",
+                     "MODERATION__OPENAI_ENABLED", "MODERATION__OPENAI_API_KEY", "MODERATION__OPENAI_BASE_URL",
+                     "MODERATION__OPENAI_MODEL", "MODERATION__THRESHOLDS", "MODERATION__FAIL_CLOSED"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -219,8 +279,16 @@ class TestSecrets(unittest.TestCase):
         self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
         for line in example.splitlines():
             if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL|INTERNAL_TOKEN|"
-                        r"AUDIO_API_KEY)\s*=", line):
-                self.assertRegex(line, r"=\s*(#|$)", line)        # значение пустое
+                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY)\s*=", line):
+                self.assertRegex(line, r'=\s*(""\s*)?(#|$)', line)        # значение пустое
+
+    def test_empty_values_survive_docker_compose(self):
+        """Блок 4.4, проверка на Windows: docker compose (env_file) читает «КЛЮЧ=   # комментарий»
+        как значение «# комментарий» — MODERATION__THRESHOLDS не разобрался как JSON, и сервис
+        в контейнере не стартовал. Пустое значение с комментарием — только КЛЮЧ="" # …"""
+        example = _read(".env.example")
+        bad = [line for line in example.splitlines() if re.match(r"[A-Z0-9_]+=\s+#", line)]
+        self.assertEqual(bad, [])
 
     def test_env_not_tracked_by_git(self):
         if not (ROOT / ".git").exists():
@@ -232,12 +300,10 @@ class TestSecrets(unittest.TestCase):
             self.skipTest("git недоступен")
         self.assertFalse([f for f in files if re.search(r"(^|/)\.env$", f)])
 
-    def test_env_in_gitignore_and_bot_outside_image(self):
-        """Блок 4.2: токен бота живёт в .env — тот в .gitignore; бот в образ сервиса не входит."""
+    def test_env_in_gitignore(self):
+        """Токены бота и admin API живут в .env — тот в .gitignore и не попадает в образ."""
         self.assertIn(".env", _read(".gitignore").splitlines())
-        self.assertIn("bot/", _read(".dockerignore").splitlines())
-        self.assertNotIn("aiogram", _read("pyproject.toml"))
-
+        self.assertIn(".env", _read(".dockerignore").splitlines())
 
 if __name__ == "__main__":
     unittest.main()

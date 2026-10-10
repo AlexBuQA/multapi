@@ -33,3 +33,6 @@ samples/*.mp3
 .idea/
 .vscode/
 .DS_Store
+
+# Блок 4.4: корневые сертификаты Windows для бота в Docker (BOT_EXTRA_CA_FILE) — у каждого свои
+certs/

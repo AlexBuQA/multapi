@@ -14,6 +14,10 @@ MediaRef с готовым content-part для модели (part). content пр
 истории и интерфейса: подпись пользователя или пометка вида «[фото]». Модель получает и то,
 и другое: [{"type": "text", "text": content}, part] — так фото видно и на следующих
 репликах чата, без повторной загрузки.
+
+Production-обвязка (блок 4.4): оценки ответов (Feedback), инциденты модерации
+(ModerationIncident), очередь рассылки (Broadcast) и сводки для /chats/admin/* (ChatStats,
+UserActivity) — их тоже хранят репозитории (OpsRepository в app/chat/repository.py).
 """
 from __future__ import annotations
 
@@ -80,6 +84,93 @@ class Chat(BaseModel):
     interface: str
     system_prompt: str | None = None
     created_at: AwareDatetime = Field(default_factory=utc_now)
+
+
+FeedbackValue = Literal["up", "down"]
+BroadcastStatus = Literal["pending", "sending", "sent", "failed"]
+
+
+class FeedbackResult(BaseModel):
+    """Итог оценки ответа: saved=False — этот пользователь уже оценил ответ, value — его оценка."""
+
+    saved: bool
+    value: FeedbackValue
+
+
+class ModerationIncident(BaseModel):
+    """Заблокированный вопрос или ответ (блок 4.4) — без текста: только отпечаток."""
+
+    chat_id: UUID | None = None
+    direction: Literal["input", "output"]
+    blocked_by: str
+    categories: list[str] = Field(default_factory=list)
+    text_hash: str
+    created_at: AwareDatetime = Field(default_factory=utc_now)
+
+
+class Broadcast(BaseModel):
+    """Рассылка из POST /chats/admin/broadcast. pending — ждёт бота, sending — бот рассылает,
+    sent / failed — готово (failed — ни одно сообщение не дошло)."""
+
+    id: int
+    message: str
+    interface: str
+    status: BroadcastStatus = "pending"
+    recipients: int | None = None
+    sent: int | None = None
+    failed: int | None = None
+    created_at: AwareDatetime = Field(default_factory=utc_now)
+    claimed_at: AwareDatetime | None = None
+    finished_at: AwareDatetime | None = None
+
+
+class UserActivity(BaseModel):
+    owner_external_id: str
+    interface: str
+    chats: int
+    last_seen_at: AwareDatetime
+
+
+class TopQuestion(BaseModel):
+    question: str
+    count: int
+
+
+class ChatStats(BaseModel):
+    """Сводка за период для GET /chats/admin/stats; определения — в app/admin/routes.py."""
+
+    since: AwareDatetime
+    total_messages: int = 0
+    user_messages: int = 0
+    active_users: int = 0
+    avg_latency_ms: float | None = None
+    moderation_blocks: int = 0
+    moderation_input_blocks: int = 0
+    feedback_up: int = 0
+    feedback_down: int = 0
+    top_questions: list[TopQuestion] = Field(default_factory=list)
+
+    @property
+    def moderation_block_rate(self) -> float:
+        """Доля вопросов, закончившихся блокировкой: блокировки / (принятые вопросы + отклонённые)."""
+        asked = self.user_messages + self.moderation_input_blocks
+        return round(self.moderation_blocks / asked, 4) if asked else 0.0
+
+    @property
+    def feedback_up_ratio(self) -> float | None:
+        votes = self.feedback_up + self.feedback_down
+        return round(self.feedback_up / votes, 4) if votes else None
+
+
+class BroadcastNotClaimedError(Exception):
+    """Итог рассылки, которую сейчас никто не отправляет (не забрана или уже завершена).
+    В HTTP — 409 broadcast_not_sending."""
+
+    code = "broadcast_not_sending"
+
+    def __init__(self, broadcast_id: int, status: str) -> None:
+        self.broadcast_id, self.status = broadcast_id, status
+        super().__init__(f"рассылка {broadcast_id} в статусе {status}")
 
 
 class ChatNotFoundError(LookupError):

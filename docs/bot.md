@@ -1,4 +1,4 @@
-# Telegram-бот — тонкий клиент чата (блоки 4.2–4.3)
+# Telegram-бот — тонкий клиент чата (блоки 4.2–4.4)
 
 Бот на aiogram 3 в папке `bot/`. Вся работа с моделью — в chat-сервисе блока 4.1 ([`docs/chat.md`](chat.md)): бот не знает про LLM и не хранит историю. На каждое сообщение он:
 1. находит чат клиента — `POST /chats`;
@@ -7,10 +7,12 @@
 
 С блока 4.3 у бота есть и обратный канал: сервис пишет пользователю первым через HTTP-API бота `POST /notify` (раздел «Уведомления из сервиса»).
 
+С блока 4.4 — admin-команды `/stats`, `/users`, `/broadcast`, кнопки оценки 👍/👎 под ответами, рассылки из очереди сервиса и понятные тексты, когда вопрос или ответ не прошёл модерацию. Модерирует сервис: в боте нет ни вызова OpenAI Moderation, ни ограничения частоты запросов (раздел [«Admin-команды, оценки и рассылки»](#admin-команды-оценки-и-рассылки-блок-44)).
+
 | | Бот (`bot/`) | Сервис (`app/`) |
 |---|---|---|
 | Хранит | состояние сценария `/ask` в памяти процесса | историю чатов (JSONL или Postgres), вложения в `media_refs` |
-| Решает | какую команду выполнить, как показать ответ в Telegram; скачивает файл из Telegram | контекст и бюджет токенов, системный промпт, проверка входа и ответа, вызов модели; разбирает файл: картинка, Whisper, PDF, DOCX |
+| Решает | какую команду выполнить, как показать ответ в Telegram; скачивает файл из Telegram; кто администратор (`BOT_ADMIN_IDS`) | контекст и бюджет токенов, системный промпт, проверка входа и ответа, модерация, лимит запросов, вызов модели; разбирает файл: картинка, Whisper, PDF, DOCX; статистика и очередь рассылок |
 | Падает | история цела, начатый сценарий `/ask` забыт | бот отвечает «сервис недоступен», без трассировки |
 
 ## Как устроено
@@ -41,25 +43,27 @@ sequenceDiagram
 | Файл | Что делает |
 |---|---|
 | `bot/__main__.py` | точка входа `python -m bot`: настройки, `Bot`, `Dispatcher(storage=MemoryStorage())`, роутеры, `dp["backend"]`, один `httpx.AsyncClient` на приложение (закрывается в `finally`), HTTP-API `/notify` рядом с polling, проверки, polling |
-| `bot/config.py` | `BotSettings` (pydantic-settings): `BOT_TOKEN`, `BACKEND_URL`, `BOT_ADMIN_IDS` и необязательные настройки, с блока 4.3 — `INTERNAL_TOKEN`, `BOT_API_PORT`, `BOT_STREAMING`, `BACKEND_STREAM_TIMEOUT`, `BOT_DEFAULT_USER_NAME` |
-| `bot/services/backend_client.py` | `BackendClient` на httpx: `get_or_create_chat`, `send_message(chat_id, content, media=None, mime=None)` — один метод для текста и файлов, поток SSE; `clear_messages`, `health`; таймауты и повтор при ошибке подключения |
+| `bot/config.py` | `BotSettings` (pydantic-settings): `BOT_TOKEN`, `BACKEND_URL`, `BOT_ADMIN_IDS` и необязательные настройки, с блока 4.3 — `INTERNAL_TOKEN`, `BOT_API_PORT`, `BOT_STREAMING`, `BACKEND_STREAM_TIMEOUT`, `BOT_DEFAULT_USER_NAME`; с блока 4.4 — `ADMIN_TOKEN`, `BOT_BROADCAST_POLL` |
+| `bot/services/backend_client.py` | `BackendClient` на httpx: `get_or_create_chat`, `send_message(chat_id, content, media=None, mime=None)` — один метод для текста и файлов, поток SSE (с блока 4.4 — `AnswerStream` с `message_id` и `replacement`); `clear_messages`, `health`; блок 4.4: `send_feedback`, `admin_stats`, `admin_users`, `admin_broadcast`, `claim_broadcast`, `finish_broadcast`; таймауты и повтор при ошибке подключения |
+| `bot/services/broadcast.py` | блок 4.4: `BroadcastWorker` — фоновая задача, забирает рассылки из очереди сервиса и отправляет их |
 | `bot/services/sse.py` | разбор Server-Sent Events: `event:`, многострочные `data:`, комментарии; концы строк — только `\r\n`, `\r`, `\n` |
 | `bot/services/chat_queue.py` | `ChatQueue`: вопросы и `/clear` одного чата Telegram — по очереди |
 | `bot/services/streaming.py` | показ ответа потоком: «печатает…», черновик `sendMessageDraft` (`DraftRenderer`) или правки (`StreamRenderer`), длинные ответы, ошибки |
 | `bot/services/telegram.py` | `TelegramSession`: HTTPS до Telegram по хранилищу сертификатов ОС, прокси |
-| `bot/handlers/` | `commands.py`, `fsm.py`, `media.py` (блок 4.3: фото, голос, аудио, документы), `text.py`, `errors.py`; `__init__.py` подключает их по порядку |
+| `bot/handlers/` | `commands.py`, `fsm.py`, `media.py` (блок 4.3: фото, голос, аудио, документы), `text.py`, `errors.py`; блок 4.4: `admin.py` (`/stats`, `/users`, `/broadcast`, `/status`), `feedback.py` (👍/👎); `__init__.py` подключает их по порядку |
 | `bot/web.py` | блок 4.3: HTTP-API бота на FastAPI — `POST /notify` с `X-Internal-Token`, `GET /health` |
-| `bot/states.py`, `bot/keyboards/inline.py` | сценарий `AskFlow` и клавиатура разделов |
+| `bot/states.py`, `bot/keyboards/inline.py` | сценарий `AskFlow`, клавиатура разделов; блок 4.4 — кнопки 👍/👎 (`feedback_kb`, `parse_feedback`) |
 | `bot/texts.py` | все тексты бота и перевод ошибок в сообщения пользователю |
 
 **Зависимости в handlers.** `BackendClient` лежит в `dp["backend"]`, настройки — в `dp["settings"]`, очередь вопросов — в `dp["chat_queue"]`. aiogram передаёт данные диспетчера в handlers и фильтры параметрами с теми же именами (`backend: BackendClient`, `settings: BotSettings`, `chat_queue: ChatQueue`), поэтому свой middleware не нужен. Один `BackendClient` (и один пул соединений httpx) работает на весь процесс и закрывается при остановке.
 
 **Порядок роутеров** (`bot/handlers/__init__.py`) — aiogram отдаёт сообщение первому подходящему handler:
+0. **`admin`** и **`feedback`** (блок 4.4). У `admin` фильтр `IsAdmin` стоит на самом роутере: сообщение не-администратора роутер пропускает дальше, и `/stats` такого пользователя забирает `commands` с ответом «только для администраторов». `feedback` — нажатия 👍/👎 (`callback_query` с `fb:`), с сообщениями не пересекается.
 1. **`commands`**. Первый в нём — `/cancel`: он сбрасывает сценарий на любом шаге. Если бы handler сценария стоял раньше, «/cancel» в ожидании вопроса ушёл бы в сервис как текст. Остальные команды тоже работают посреди сценария и не сбрасывают его.
 2. **`fsm`** — `/ask` и шаги сценария.
 3. **`media`** (блок 4.3) — фото, голос, аудио, PDF и DOCX уходят в сервис файлом. В сценарии `/ask` на шаге вопроса файл — вопрос по теме, на шаге выбора раздела — подсказка выбрать раздел.
 4. **`text`** — остальной текст уходит в сервис как вопрос. Неизвестная команда получает подсказку `/help`, стикеры и видео — подсказку, что бот понимает.
-5. **`errors`** — последний рубеж. Исключение, которое handler не обработал сам, попадает в лог с трассировкой, а пользователь видит «что-то пошло не так».
+5. **`errors`** — последний рубеж. Исключение, которое handler не обработал сам, попадает в лог с трассировкой, а пользователь видит «что-то пошло не так». Сбой связи с Telegram (`TelegramNetworkError`, блок 4.4) — одна строка `telegram_network_error` в логе и ответ «связь прервалась, команда могла уже выполниться».
 
 ## Один чат на клиента — идемпотентный `POST /chats`
 
@@ -178,6 +182,70 @@ Invoke-RestMethod -Method Post http://127.0.0.1:9000/notify -Headers @{"X-Intern
 curl.exe -s -o NUL -w "%{http_code}\n" -X POST http://127.0.0.1:9000/notify -H "Content-Type: application/json" -d "{}"
 ```
 
+## Admin-команды, оценки и рассылки (блок 4.4)
+
+**Доступ.** `bot/handlers/admin.py` — роутер с фильтром на уровне роутера, а не проверкой внутри каждого handler:
+
+```python
+router = Router(name="admin")
+router.message.filter(IsAdmin())          # IsAdmin: message.from_user.id in settings.bot_admin_ids
+```
+
+Второй фильтр того же роутера — личный чат (`F.chat.type == ChatType.PRIVATE`): в группе ответ `/stats` и `/users` увидели бы все участники, а там чужие Telegram id и тексты вопросов. Администратору в группе бот отвечает «Команды администратора работают только в личном чате с ботом», остальным — «Команда доступна только администраторам». Данные бот берёт из admin API сервиса с заголовком `X-Admin-Token` — `ADMIN_TOKEN` в `.env`, тот же, что у сервиса. Сам бот ничего не считает и не хранит.
+
+| Команда | Ответ |
+|---|---|
+| `/stats` | HTML: сообщения, DAU, средняя задержка, доля блокировок модерации, доля 👍, частые вопросы. Текст вопросов пользователей экранируется (`html.escape`) — разметка из вопроса не сработает — и укорачивается до 80 знаков: сводка из пяти вопросов в целое сообщение каждый не влезла бы в 4096 символов |
+| `/users` | первые 10 из `GET /chats/admin/users` — таблица моноширинным шрифтом в `<pre>`: id (до 12 знаков), канал, число чатов, время последнего сообщения (UTC). Ширина строки — до 40 символов: шире на телефоне строки переносятся |
+| `/broadcast <текст>` | `POST /chats/admin/broadcast` → «Рассылка №N поставлена в очередь: получателей — K…»; без текста — подсказка |
+
+**Ошибки** — текстом, без трассировки: `401` — «Сервис не принял ADMIN_TOKEN бота…» (токены бота и сервиса разные), `503 admin_token_not_configured` — «В сервисе не задан ADMIN_TOKEN…», нет `ADMIN_TOKEN` у бота — «…admin-команды не работают», сервис недоступен — как у обычных вопросов.
+
+**Оценки.** Под последним сообщением ответа — кнопки 👍 и 👎, `callback_data` — `fb:up:<message_id>` и `fb:down:<message_id>`. `message_id` — id ответа в сервисе из события `done`, не id сообщения Telegram; вместе с префиксом — 44 байта при пределе Telegram 64. Нажатие (`bot/handlers/feedback.py`):
+1. `parse_feedback` разбирает данные; чужой формат — «Этот ответ уже нельзя оценить»;
+2. `POST /chats/{chat_id}/messages/{message_id}/feedback {"value": "up" | "down"}`;
+3. кнопки убираются — `edit_reply_markup(reply_markup=None)`, всплывает «Спасибо за оценку!» или «Оценка уже учтена».
+
+Сервис недоступен — кнопки остаются, нажать можно ещё раз. Сервис ответил `404`/`422` (ответа нет в этом чате — например, чат удалён) — кнопки убираются. После `/clear` ответ оценить можно: история скрыта, но ответ был. Под отказом модерации и под ответом, прерванным ошибкой, кнопок нет.
+
+**Модерация глазами бота** — только тексты (`bot/texts.py`):
+- вопрос не прошёл (`403 moderation_blocked`) — «Сообщение не прошло модерацию: угрозы и насилие. Переформулируйте вопрос — я помогу с личным кабинетом.» Название темы — по категории сервиса;
+- категория «самоповреждение» — не отказ, а слова поддержки и номер 112: человеку в беде формальный отказ не поможет;
+- ответ не прошёл (событие `moderation`) — уже показанные части ответа удаляются, вместо них — текст сервиса «Не могу показать ответ — он мог нарушить правила.» (для самоповреждения — те же слова поддержки). Черновик `sendMessageDraft` эфемерный и исчезает сам.
+
+**Рассылки** — `bot/services/broadcast.py`, фоновая задача рядом с polling. Запускается, если задан `ADMIN_TOKEN` (в логе `broadcast_worker_started poll=5.0s`), и отменяется при остановке бота.
+1. Раз в `BOT_BROADCAST_POLL` секунд (5) — `POST /chats/admin/broadcast/claim?interface=telegram`: только рассылки для Telegram. `204` — очередь пуста.
+2. Текст уходит каждому получателю как есть, без HTML-разметки, с паузой `SEND_PAUSE` (0,05 с) между сообщениями: Telegram принимает от бота около 30 сообщений в секунду. Ответ `RetryAfter` — бот ждёт указанное время и повторяет (дольше минуты — получатель недоставлен). Бот заблокирован или чат удалён — недоставлен.
+3. Итог — `POST /chats/admin/broadcast/{id}/result {sent, failed}`; сервис недоступен — ещё две попытки, иначе через 15 минут рассылку выдадут снова. `409` (рассылку уже завершили или выдали заново) — без повторов.
+4. Администраторам — «Рассылка №N отправлена: доставлено X, не доставлено Y.»
+
+Ошибки очереди (сервис недоступен, токен не тот) в лог — одной строкой на смену состояния, а не каждые 5 секунд. Пустые опросы (`204`) не попадают ни в лог бота (фильтр `QuietEmptyPolls` на логгере httpx), ни в лог сервиса (`http_request` для `/broadcast/claim` — только на DEBUG, как у `/health`).
+
+### Бот в Docker
+
+Бот — сервис `bot` в `compose.yaml` из того же образа, что и сервис: `python -m bot`, `BACKEND_URL=http://app:8000`, `BOT_API_HOST=0.0.0.0`. `/notify` доступен только внутри сети compose (`BOT_URL=http://bot:9000` у сервиса), портов наружу нет. Стартует, когда сервис стал healthy. Перед `docker compose up` бота, запущенного на компьютере, нужно остановить: два процесса с одним токеном мешают друг другу получать апдейты.
+
+**Сертификаты сети.** На Windows бот проверяет HTTPS до Telegram по хранилищу сертификатов Windows (truststore). У контейнера хранилище своё, Linux. Если сеть или антивирус подменяют HTTPS своим сертификатом, его в контейнере нет, и бот не стартует:
+
+```
+Нет связи с api.telegram.org: … CERTIFICATE_VERIFY_FAILED … self-signed certificate in certificate chain
+```
+
+Проверку отключать нельзя, поэтому контейнеру передаются те же корневые сертификаты, что у Windows. Выгрузить их в `certs/windows-roots.pem` (папка `certs/` — в `.gitignore` и `.dockerignore`, в git и в образ не попадает; сертификаты открытые, но у каждой сети свои):
+
+```powershell
+New-Item -ItemType Directory -Force certs | Out-Null
+$roots = Get-ChildItem Cert:\LocalMachine\Root, Cert:\LocalMachine\AuthRoot, Cert:\CurrentUser\Root -ErrorAction SilentlyContinue
+$pem = foreach ($c in $roots) {
+    "-----BEGIN CERTIFICATE-----"
+    [Convert]::ToBase64String($c.RawData, "InsertLineBreaks")
+    "-----END CERTIFICATE-----"
+}
+[IO.File]::WriteAllLines("$PWD\certs\windows-roots.pem", [string[]]$pem, (New-Object System.Text.UTF8Encoding $false))
+```
+
+В `.env` — `BOT_EXTRA_CA_FILE=certs/windows-roots.pem`. Путь — от корня проекта: в контейнере это `/app/certs/…`, папку подключает том `./certs:/app/certs:ro`. Сертификаты из файла добавляются к хранилищу, а не заменяют его; на Windows (без Docker) строка тоже работает и ничего не меняет. При старте в логе — `extra_ca_loaded file=windows-roots.pem`. Нет файла или в нём нет сертификатов — бот не стартует и пишет, что не так.
+
 ## Сценарий `/ask`
 
 ```mermaid
@@ -205,7 +273,12 @@ stateDiagram-v2
 | `/ask` | вопрос по разделу: кнопка, затем текст |
 | `/clear` | `DELETE /chats/{id}/messages` — следующее сообщение начинает разговор с чистого листа |
 | `/cancel` | сбрасывает сценарий `/ask` на любом шаге |
-| `/status` | только для `BOT_ADMIN_IDS`: отвечает ли сервис (`GET /health`) и за сколько; в меню команд не показывается |
+| `/status` | только для `BOT_ADMIN_IDS`: отвечает ли сервис (`GET /health`) и за сколько |
+| `/stats` | блок 4.4, только для `BOT_ADMIN_IDS`: сводка за сутки из `GET /chats/admin/stats` |
+| `/users` | блок 4.4, только для `BOT_ADMIN_IDS`: последние 10 пользователей таблицей |
+| `/broadcast <текст>` | блок 4.4, только для `BOT_ADMIN_IDS`: рассылка всем чатам Telegram через очередь сервиса |
+
+Admin-команды видны в меню только администраторам: для их личных чатов бот записывает своё меню (`setMyCommands` с областью `BotCommandScopeChat`). Если администратор ещё не писал боту, Telegram не знает его чат — меню появится после следующего запуска бота.
 
 ## Запуск
 
@@ -224,7 +297,8 @@ python -m bot                                   # терминал 2: бот
 - проверяет сервис (`GET /health`). Если сервис недоступен, это только предупреждение в логе: сервис можно поднять и после бота;
 - записывает меню команд (`setMyCommands`);
 - если задан `INTERNAL_TOKEN`, поднимает HTTP-API: в логе `notify_api_started url=http://127.0.0.1:9000/notify`;
-- начинает long polling: `bot_started … streaming=draft default_user_name=on`.
+- если задан `ADMIN_TOKEN`, запускает рассылки: `broadcast_worker_started` (блок 4.4);
+- начинает long polling: `bot_started … streaming=draft default_user_name=on admins=1 admin_api=on`.
 
 Остановка — Ctrl+C.
 
@@ -247,7 +321,8 @@ python -m pytest tests/bot -v
   - событие `error` и поток без `done`;
   - повтор при `ConnectError`/`ConnectTimeout` (и с файлом), без повтора на 4xx/5xx, `ReadTimeout` и начавшийся поток;
   - таймауты клиента и потока, `trust_env=False`;
-  - тело ошибки сохраняется, перевод ошибок в тексты задания, текст ошибки вложения — от сервиса.
+  - тело ошибки сохраняется, перевод ошибок в тексты задания, текст ошибки вложения — от сервиса;
+  - блок 4.4: `message_id` из `done`, событие `moderation` → `replacement`, `403 moderation_blocked` → текст, оценка, admin-запросы с `X-Admin-Token`; без `ADMIN_TOKEN` запрос в сервис не уходит.
 - **`test_bot_media.py`** (блок 4.3) — фото (размер до 2 МБ), голос как ogg, аудио, PDF и DOCX, картинка файлом, отказы по типу и размеру, файл в сценарии `/ask`, ошибка скачивания, текст ошибки сервиса; бот не импортирует `openai`, `pypdf`, `docx`.
 - **`test_notify.py`** (блок 4.3) — `/notify`: 200 и сообщение в Telegram, 401 без токена и с чужим (и раньше 422), проверка тела, ответы Telegram 403/404/429/502; API поднимается на свободном порту рядом с polling и останавливается штатно, занятый порт не роняет бота; общий `httpx.AsyncClient` закрывается в `finally`.
 - **`test_fsm.py`** — сценарий `/ask` через настоящий `Dispatcher`: апдейты подаются в `dp.feed_update`, Bot API подменён сессией без HTTP (`MockedSession` в `bot_fakes.py`). Проверяются:
@@ -269,6 +344,9 @@ python -m pytest tests/bot -v
   - длинный ответ в нескольких сообщениях;
   - «message is not modified» и «Too Many Requests» от Telegram: пауза соблюдается, новое сообщение повторяется;
   - ответ из одних пробелов.
+- **`test_bot_admin.py`** (блок 4.4) — фильтр `IsAdmin` на роутере, а не в handlers; не-администратору — отказ без обращения к сервису; `/stats` HTML с экранированием, `/users` — первые 10, `/broadcast` в очередь; `401`, `503`, сеть, нет токена — тексты; меню команд администраторов; в `bot/` нет `openai`, `moderations` и ограничителей частоты.
+- **`test_bot_feedback.py`** (блок 4.4) — кнопки 👍/👎 под последним сообщением ответа (черновик и правки, длинный ответ), нажатие → `/feedback` и `edit_reply_markup(None)`, повтор, ошибки сервиса; модерация: тексты на `403`, самоповреждение, замена ответа с удалением показанных частей.
+- **`test_broadcast.py`** (блок 4.4) — `BroadcastWorker`: доставка и итог, заблокировавшие бота, `RetryAfter`, повтор итога, лог ошибок очереди, задача переживает неожиданный ответ; от `/broadcast` администратора до сообщений пользователям.
 - **`test_bot_config.py`**:
   - `.env`, `BOT_ADMIN_IDS` в разных форматах;
   - нет токена или он неверного вида — понятная ошибка;

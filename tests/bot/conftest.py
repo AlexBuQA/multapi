@@ -33,7 +33,8 @@ from bot_fakes import ADMIN_ID, FakeBackend, MockedSession  # noqa: E402
 
 BOT_ENV = ("BOT_TOKEN", "BACKEND_URL", "BOT_ADMIN_IDS", "BACKEND_TIMEOUT", "BOT_USE_SYSTEM_CERTS",
            "BOT_PROXY_URL", "BOT_PRODUCT_NAME", "BACKEND_STREAM_TIMEOUT", "BOT_STREAMING", "INTERNAL_TOKEN",
-           "BOT_API_HOST", "BOT_API_PORT")
+           "BOT_API_HOST", "BOT_API_PORT", "BOT_DEFAULT_USER_NAME", "ADMIN_TOKEN", "BOT_BROADCAST_POLL",
+           "BOT_EXTRA_CA_FILE")
 
 
 @pytest.fixture(autouse=True)

@@ -28,7 +28,9 @@ from app.observability.logging import get_logger
 
 REQUEST_ID_HEADER = "X-Request-ID"
 USER_ID_HEADER = "X-User-ID"
-QUIET_PATHS = frozenset({"/health", "/ready"})   # healthcheck каждые 15 с — в лог только на DEBUG
+# healthcheck каждые 15 с и опрос очереди рассылок ботом каждые 5 с (блок 4.4) — в лог только
+# на DEBUG; ошибки (4xx/5xx) — как обычно. Забранную рассылку видно по admin_broadcast_claimed.
+QUIET_PATHS = frozenset({"/health", "/ready", "/chats/admin/broadcast/claim"})
 _VALID_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")  # чужой ID не должен ломать строку лога
 
 log = get_logger()

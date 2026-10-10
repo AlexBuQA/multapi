@@ -1,5 +1,7 @@
 """
-Команды (блок 4.2): /cancel, /start, /help, /clear и /status для администраторов.
+Команды (блок 4.2): /cancel, /start, /help, /clear. Команды администраторов — /status, /stats,
+/users, /broadcast — с блока 4.4 в bot/handlers/admin.py под фильтром роутера; здесь — ответ
+«только для администраторов» всем остальным.
 
 Роутер подключается первым (bot/handlers/__init__.py), а /cancel — первый handler в нём:
 иначе в сценарии /ask текст «/cancel» в состоянии waiting_for_question забрал бы handler
@@ -9,7 +11,6 @@ FSM и отправил его в сервис как вопрос. Осталь
 from __future__ import annotations
 
 import logging
-import time
 
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandStart
@@ -18,7 +19,7 @@ from aiogram.types import Message
 
 from bot import texts
 from bot.config import BotSettings
-from bot.handlers.common import IsAdmin, backend_chat_id
+from bot.handlers.common import backend_chat_id
 from bot.handlers.fsm import drop_menu
 from bot.services.backend_client import BACKEND_ERRORS, BackendClient
 from bot.services.chat_queue import ChatQueue
@@ -67,17 +68,9 @@ async def cmd_clear(message: Message, backend: BackendClient, chat_queue: ChatQu
     await message.answer(texts.HISTORY_CLEARED)
 
 
-@router.message(Command("status"), IsAdmin())
-async def cmd_status(message: Message, backend: BackendClient) -> None:
-    started = time.perf_counter()
-    try:
-        health = await backend.health()
-        state = f"отвечает: {health.get('status', '?')}, {(time.perf_counter() - started) * 1000:.0f} мс"
-    except BACKEND_ERRORS as exc:
-        state = f"недоступен ({type(exc).__name__})"
-    await message.answer(f"Сервис {backend.base_url} — {state}.")
-
-
-@router.message(Command("status"))
-async def cmd_status_denied(message: Message) -> None:
-    await message.answer(texts.ADMIN_ONLY)
+@router.message(Command("status", "stats", "users", "broadcast"))
+async def cmd_admin_denied(message: Message, settings: BotSettings) -> None:
+    """Сюда доходят не-администраторы и администраторы в группе: личные чаты администраторов
+    забирает роутер admin."""
+    is_admin = message.from_user is not None and message.from_user.id in settings.bot_admin_ids
+    await message.answer(texts.ADMIN_PRIVATE_ONLY if is_admin else texts.ADMIN_ONLY)
