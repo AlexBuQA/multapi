@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8 и 4.1–4.3
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8 и 4.1–4.4
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -19,6 +19,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 4.1 — Архитектура чата и хранение истории:** модуль `app/chat/` — чат с историей на сервере, хранилище JSONL или Postgres за одним контрактом `ChatRepository`, скользящее окно контекста с бюджетом токенов, ответ потоком SSE, миграция Alembic — см. раздел [«Блок 4.1»](#блок-41--архитектура-чата-и-хранение-истории) и [`docs/chat.md`](docs/chat.md).
 - **Блок 4.2 — Telegram-бот как тонкий клиент:** бот на aiogram 3 в `bot/` ходит в чат блока 4.1 за всей работой с моделью — `/start`, `/help`, `/clear`, `/cancel`, сценарий `/ask` с выбором раздела, ответ потоком правками сообщения; `POST /chats` стал идемпотентным — см. раздел [«Блок 4.2»](#блок-42--telegram-бот-как-тонкий-клиент) и [`docs/bot.md`](docs/bot.md).
 - **Блок 4.3 — Мультимодальность и streaming:** бот принимает фото, голосовые, PDF и DOCX и отправляет их в сервис тем же `send_message`; сервис превращает файл в content-part (картинка — `image_url` прямо в `chat.completions`, голос — Whisper, документ — текст) и хранит его в истории; ответ в Telegram — нативным черновиком `sendMessageDraft`; обратный канал сервис → бот `POST /notify` — см. раздел [«Блок 4.3»](#блок-43--мультимодальность-и-streaming).
+- **Блок 4.4 — Production-обвязка:** модерация вопросов и ответов в сервисе (`app/moderation/`: ключевые слова из YAML и OpenAI Moderation, `403 moderation_blocked`, замена ответа событием `moderation`), admin API `/chats/admin/*` под `X-Admin-Token` — статистика, пользователи, очередь рассылок; в боте — `/stats`, `/users`, `/broadcast` для `BOT_ADMIN_IDS` и оценки ответов 👍/👎; `docker compose up` поднимает app, бот и Postgres одной командой — см. раздел [«Блок 4.4»](#блок-44--production-обвязка).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -66,9 +67,11 @@ multapi/
 ├── uv.lock                  # блок 3.5: закреплённые версии для образа
 ├── Dockerfile               # блок 3.5: multi-stage образ сервиса, non-root
 ├── .dockerignore            # блок 3.5: что не уходит в контекст сборки
-├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix; 4.1: + postgres
+├── compose.yaml             # блок 3.5: app + redis, healthcheck-и; блок 3.6: + phoenix; 4.1: + postgres;
+│                            #   4.4: + migrate (alembic) и bot из того же образа, том pg-data
 ├── alembic.ini              # блок 4.1: настройки Alembic (адрес базы — DATABASE_URL)
-├── migrations/              # блок 4.1: env.py (async), versions/ — миграция chat tables
+├── migrations/              # блок 4.1: env.py (async), versions/ — миграция chat tables;
+│                            #   4.4: message_feedback, broadcast_queue, moderation_incidents
 ├── eval/                    # блок 3.7: golden_dataset.json, run_evaluation.py, judge.py,
 │   │                        #   thresholds.yaml, check_thresholds.py, runs/ (артефакты прогонов)
 │   └── security/            # блок 3.8: rest_config.json (таргет garak), garak_report.py,
@@ -84,10 +87,13 @@ multapi/
 │   ├── vision.py            # вариант А: base64 + Vision (vision-модель)
 │   ├── voice.py             # вариант Б: Whisper -> classify -> LLM -> TTS
 │   └── utils.py             # логирование, base64, валидация файлов, UsageTracker
-├── app/                     # блоки 3.1, 3.3–3.8, 4.1–4.3
+├── app/                     # блоки 3.1, 3.3–3.8, 4.1–4.4
 │   ├── chat/                # блок 4.1: domain.py, repository.py (Protocol), repositories/ (JSONL, Postgres),
 │   │                        #   context.py (окно, токены), service.py, routes.py (/chats, SSE), deps.py;
-│   │                        #   4.3: media.py (фото, Whisper, PDF/DOCX -> content-part)
+│   │                        #   4.3: media.py (фото, Whisper, PDF/DOCX -> content-part);
+│   │                        #   4.4: feedback.py (оценки 👍/👎)
+│   ├── moderation/          # блок 4.4: keywords.py + moderation_keywords.yaml, openai_layer.py, service.py
+│   ├── admin/               # блок 4.4: /chats/admin/* — stats, users, broadcast (X-Admin-Token)
 │   ├── main.py              # блок 3.4: FastAPI — lifespan, middleware, CORS, обработчики ошибок
 │   ├── observability/       # блок 3.6: tracing.py (Phoenix), logging.py (structlog), middleware.py
 │   │                        #   (request_id), pii.py (маскирование), pii_presidio.py (опционально)
@@ -118,10 +124,12 @@ multapi/
 ├── bot/                     # блок 4.2: Telegram-бот (python -m bot) — тонкий клиент /chats
 │   ├── __main__.py          # Bot, Dispatcher + MemoryStorage, роутеры, dp["backend"], polling
 │   ├── config.py            # BOT_TOKEN, BACKEND_URL, BOT_ADMIN_IDS (pydantic-settings, .env)
-│   ├── handlers/            # commands.py, fsm.py (/ask), media.py (4.3: фото, голос, документы), text.py, errors.py
-│   ├── services/            # backend_client.py (httpx, SSE), streaming.py (черновик или правки), telegram.py
+│   ├── handlers/            # commands.py, fsm.py (/ask), media.py (4.3: фото, голос, документы), text.py, errors.py;
+│   │                        #   4.4: admin.py (/stats, /users, /broadcast), feedback.py (👍/👎)
+│   ├── services/            # backend_client.py (httpx, SSE), streaming.py (черновик или правки), telegram.py;
+│   │                        #   4.4: broadcast.py (рассылки из очереди сервиса)
 │   ├── web.py               # блок 4.3: HTTP-API бота POST /notify (X-Internal-Token)
-│   ├── keyboards/inline.py  # разделы руководства для /ask
+│   ├── keyboards/inline.py  # разделы руководства для /ask; 4.4: кнопки 👍/👎
 │   ├── states.py            # AskFlow
 │   └── texts.py             # тексты бота и ошибки для пользователя
 ├── data/
@@ -162,8 +170,9 @@ multapi/
 │   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
-│   │                        #   4.3: медиа, черновики, /notify
+│   │                        #   4.3: медиа, черновики, /notify; 4.4: admin-команды, оценки, рассылки
 │   ├── app/chat/            # блок 4.3: test_media.py (PDF, DOCX, картинки), test_whisper.py (голос)
+│   ├── app/moderation/      # блок 4.4: test_moderation_layers.py — ключевые слова, OpenAI Moderation, лог
 │   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm)
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav;
 │                            #   блок 4.3: support_rules.docx/.pdf — регламент поддержки для бота и тестов
@@ -2143,6 +2152,196 @@ BACKEND_STREAM_TIMEOUT=600      # столько же ждёт бот; по за
 | Ошибки backend — текстом пользователю, не трейсбеком | `bot/texts.py`; `test_spec_error_texts`, `test_status_errors_become_user_messages` |
 | SSE-парсинг через `httpx.MockTransport` | `test_send_message_parses_sse_through_mock_transport` |
 
+## Блок 4.4 — Production-обвязка
+
+Связка бот + сервис получила то, без чего её не выпускают к пользователям: модерацию, админку, оценки ответов и запуск одной командой. Граница ответственности прежняя — вся логика в сервисе. Бот не модерирует и не ограничивает частоту запросов, он показывает результат: понятный текст вместо `403`, замену ответа, кнопки оценки. Подробно — [`docs/chat.md`](docs/chat.md#модерация-оценки-и-admin-api-блок-44) (сервис) и [`docs/bot.md`](docs/bot.md#admin-команды-оценки-и-рассылки-блок-44) (бот).
+
+```mermaid
+sequenceDiagram
+    actor U as Пользователь
+    participant B as Бот
+    participant S as Сервис /chats
+    participant Mod as ModerationService
+    participant M as Модель
+    participant DB as Postgres
+    U->>B: вопрос
+    B->>S: POST /chats/{id}/messages
+    S->>Mod: check_input: ключевые слова, затем OpenAI Moderation
+    alt вопрос не прошёл
+        Mod-->>S: blocked
+        S->>DB: moderation_incidents
+        S-->>B: 403 {"detail": {"code": "moderation_blocked", "categories": [...]}}
+        B-->>U: «Сообщение не прошло модерацию: угрозы и насилие…»
+    else прошёл
+        S->>M: chat.completions (stream)
+        loop фрагменты
+            M-->>S: фрагмент
+            S->>Mod: ключевые слова: хвост ответа + фрагмент
+            S-->>B: {"type": "token"}
+        end
+        S->>Mod: check_output: ответ целиком (и OpenAI)
+        alt ответ не прошёл
+            S-->>B: {"type": "moderation", "message": "Не могу показать ответ…"}
+            B-->>U: части ответа удалены, вместо них — отказ
+        end
+        S->>DB: ответ (или отказ) в историю
+        S-->>B: {"type": "done", "message_id": "…"}
+        B-->>U: ответ + кнопки 👍 / 👎
+    end
+    U->>B: 👍
+    B->>S: POST /chats/{id}/messages/{message_id}/feedback {"value": "up"}
+    S->>DB: message_feedback (UNIQUE owner + message)
+    B-->>U: кнопки убраны, «Спасибо за оценку!»
+```
+
+### Что сделано
+
+- **Модерация — `app/moderation/`, `ModerationService.check_input` / `check_output` → `ModerationResult(allowed, categories, reasons, blocked_by)`.** Два слоя, дешёвый первым:
+  - **ключевые слова** — регулярные выражения по категориям из `app/moderation/moderation_keywords.yaml` (насилие, самоповреждение, оружие, наркотики, взлом чужого). Текст перед проверкой нормализуется: невидимые символы, регистр, «ё», переводы строк. Шаблоны написаны так, чтобы не задевать вопросы поддержки: «как убить зависший процесс», «мой аккаунт взломали» проходят — это проверяют тесты. Свой словарь — `MODERATION__KEYWORDS_FILE`;
+  - **OpenAI Moderation** (`omni-moderation-latest`, бесплатный) — включается `MODERATION__OPENAI_ENABLED=true`, ключ — `MODERATION__OPENAI_API_KEY` или `AUDIO_API_KEY`. Решение — `flagged`, свои пороги по категориям — `MODERATION__THRESHOLDS` (строже и мягче). OpenAI недоступен — по умолчанию вопрос пропускается (ключевые слова уже проверены), `MODERATION__FAIL_CLOSED=true` — блокируется.
+- **Вопрос.** Проверяются подпись и текст вложения — документа и расшифровки голоса. Не прошёл — `403` с `{"detail": {"code": "moderation_blocked", "categories": [...]}}`. Модель не вызывается, в историю вопрос не попадает. В теле ответа есть и общее для сервиса поле `error` — по нему бот выбирает текст.
+- **Ответ.** Слой ключевых слов проверяет каждый фрагмент вместе с хвостом уже отданного текста — фраза, разрезанная между фрагментами, тоже ловится. Генерация останавливается на первом совпадении: фрагмент с угрозой клиенту не уходит. В конце ответ целиком проверяют оба слоя. Не прошёл — событие `{"type": "moderation", "code": "moderation_blocked", "categories": [...], "message": "Не могу показать ответ — он мог нарушить правила."}`, в историю сохраняется отказ, в логе `chat_turn_finished` — `outcome: moderated`. Оборванный ответ (клиент ушёл до проверки целиком) проверяется перед записью в историю — под щитом от отмены, не дольше `MODERATION__TIMEOUT`.
+- **Инцидент** — строка лога structlog `moderation_blocked` (уровень warning): направление, слой, категории, `text_hash` (sha256, 16 знаков) и `text_masked` — текст с замаскированными персональными данными, до 300 знаков. Сырого текста в логе нет. Для статистики то же без текста пишется в таблицу `moderation_incidents`.
+- **Оценки — `POST /chats/{chat_id}/messages/{message_id}/feedback {"value": "up" | "down"}`** (`app/chat/feedback.py`). Таблица `message_feedback` с `UNIQUE (owner_external_id, message_id)`: вторая оценка не перезаписывает первую, ответ — `saved: false`. Оценить можно только ответ ассистента своего чата: чужой — `404`, вопрос — `422`. `message_id` ответа приходит в событии `done`.
+- **Admin API — `/chats/admin/*`, `Depends(require_admin)`: заголовок `X-Admin-Token` == `ADMIN_TOKEN`.** Неверный токен — `401` (сравнение `hmac.compare_digest`); `ADMIN_TOKEN` не задан — `503`, API выключено. Роутер подключён раньше `/chats/{chat_id}`, иначе `admin` разбиралось бы как id чата.
+  - `GET /stats?hours=24&top=5`: `total_messages`, `active_users` (DAU), `avg_latency_ms` (от вопроса до записи ответа — оконная функция `LAG`), `moderation_block_rate` (блокировки / (принятые вопросы + отклонённые)), `feedback_up_ratio`, `top_questions` — `lower(regexp_replace(...))` + `GROUP BY`, «Как сбросить пароль?» и «как сбросить ПАРОЛЬ!» — один вопрос;
+  - `GET /users?limit=50` — последние клиенты: канал, число чатов, `last_seen_at`;
+  - `POST /broadcast {"message", "interface_filter": "telegram"}` → `202`, запись в `broadcast_queue` со статусом `pending`.
+  - JSON-хранилище тоже поддерживает всё это: контрактные тесты идут на обоих хранилищах.
+- **Рассылки.** Сервис в Telegram сам не пишет: бот раз в `BOT_BROADCAST_POLL` секунд (5) забирает рассылку для Telegram из очереди — `POST /chats/admin/broadcast/claim?interface=telegram` (Postgres: `FOR UPDATE SKIP LOCKED`, две копии бота одновременно одну рассылку не получат), отправляет её с паузой 0,05 с между сообщениями и отчитывается `POST .../{id}/result {sent, failed}`. Telegram ответил `RetryAfter` — бот ждёт и повторяет; заблокировавший бота получатель — недоставлен. Итог приходит администраторам. Рассылка, которую бот не закончил (упал), через 15 минут выдаётся снова; итог принимается только за забранную рассылку (иначе `409`).
+- **Бот:**
+  - `bot/handlers/admin.py` — `/stats` (HTML, текст пользователей экранирован и укорочен), `/users` (первые 10 таблицей в `<pre>`), `/broadcast <текст>`, туда же переехал `/status`. Фильтр `IsAdmin` (`BOT_ADMIN_IDS`) — на уровне роутера: `admin_router.message.filter(IsAdmin(), …)`; второй фильтр роутера — личный чат: в группе сводку с чужими id и вопросами увидели бы все. Остальным на эти команды — «Команда доступна только администраторам», администратору в группе — «только в личном чате с ботом». Ошибки сервиса — текстом: токены не совпадают, admin API выключено, сервис недоступен. Администраторам — своё меню команд (`setMyCommands` для их чатов).
+  - `bot/handlers/feedback.py` — под последним сообщением ответа кнопки 👍 / 👎 с `callback_data` `fb:up:<message_id>` (44 байта при пределе 64). Нажатие → `POST .../feedback` → `edit_reply_markup(reply_markup=None)` и «Спасибо за оценку!». Сервис недоступен — кнопки остаются. Под отказом модерации и под ответом с ошибкой кнопок нет.
+  - Модерация в боте — только тексты (`bot/texts.py`): какая тема не принята; на самоповреждение — не отказ, а слова поддержки и номер 112. Заменённый ответ: уже показанные части удаляются, вместо них — текст сервиса.
+  - `bot/services/broadcast.py` — фоновая задача рассылок; запускается, если задан `ADMIN_TOKEN`, и отменяется при остановке бота.
+- **Docker — `docker compose up -d --build` поднимает всё:** `postgres` → `migrate` (одноразовый `alembic upgrade head`) → `app` → `bot`. Бот — из того же образа (`COPY bot/ ./bot/`, aiogram и `aiohttp-socks` добавлены в `pyproject.toml` и `uv.lock`), `command: python -m bot`, сервис — по имени `http://app:8000`, `/notify` бота — `http://bot:9000` внутри сети compose, без портов наружу. В compose `CHAT_REPOSITORY=postgres`, данные — в томе **`pg-data`** (в блоке 4.1 том назывался `pg_data`). Заодно в зависимости образа попал `pyyaml`: без него сервис в контейнере не прочитал бы словарь модерации.
+- **Новые переменные** (`.env.example`): `ADMIN_TOKEN` — общий для сервиса и бота, не короче 16 символов; `BOT_BROADCAST_POLL`; `MODERATION__*`.
+- **`.env` для Docker** (найдено на Windows). `docker compose` берёт переменные из `.env` (`env_file`) своим разбором: строку «`КЛЮЧ=   # комментарий`» он читает как значение «`# комментарий`», а Python (python-dotenv) — как пустое. В `.env.example` таких строк было 68, начиная с блока 2: сервис в контейнере падал на разборе `MODERATION__THRESHOLDS`, а строковые настройки молча получили бы текст комментария. Теперь пустое значение с комментарием записано как `КЛЮЧ=""   # комментарий` — оба разбора дают пустую строку, это проверяет тест. А если такая строка всё же попала в окружение, сервис и бот не стартуют с понятной ошибкой: какие переменные и как их исправить.
+- **Бот в Docker и сертификаты сети** (найдено на Windows). На Windows бот проверяет HTTPS до Telegram по хранилищу сертификатов Windows, а у контейнера хранилище своё, Linux. Рабочая сеть подменяет HTTPS своим сертификатом, его в контейнере нет — бот падал с `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`. Проверку отключать нельзя, поэтому контейнер получает те же корневые сертификаты, что и Windows: их выгружает одна команда PowerShell в `certs/windows-roots.pem` (папка — в `.gitignore` и `.dockerignore`), compose подключает `certs/` томом, а новая настройка `BOT_EXTRA_CA_FILE` добавляет файл к хранилищу. В контейнере бот на такую ошибку подсказывает именно это ([`docs/bot.md`](docs/bot.md#бот-в-docker)).
+- **`LOG_FILE` в контейнере** (найдено на Windows). С `LOG_FILE=logs/service.jsonl` из `.env` сервис в контейнере падал при старте: `/app` в образе принадлежит root, и создать `logs/` от имени `appuser` нельзя. Теперь папка `/app/logs` создаётся при сборке образа, а если файл лога всё равно не открылся, сервис пишет предупреждение `log_file_unavailable` и продолжает с логом в консоль — копия лога не повод не стартовать.
+- **Миграция** `7c1d2e4f5a6b` — таблицы `message_feedback`, `broadcast_queue`, `moderation_incidents`.
+- **Тесты:** 984 вместо 790.
+  - `tests/app/moderation/test_moderation_layers.py` — 39: блокировки и безобидные вопросы поддержки, нормализация, OpenAI на `AsyncMock` (категории, свои пороги, fail-open и fail-closed), лог инцидента без сырого текста.
+  - `tests/chat/test_moderation_chat.py` — 13: `403` без вызова модели, текст документа, остановка генерации на фрагменте с угрозой, фраза на стыке фрагментов, OpenAI по ответу целиком, оборванный ответ проверяется перед записью в историю.
+  - `tests/chat/test_ops_repository.py` — 27 контрактных тестов на JSON и Postgres: оценки и `UNIQUE`, очередь рассылок (своя для каждого интерфейса, итог только за забранную), статистика, одинаковая нормализация вопросов в SQL и Python, пользователи.
+  - `tests/chat/test_admin_api.py` — 18: токен, порядок роутеров, `stats` после настоящих диалогов, рассылка по HTTP, оценки, пустые опросы очереди не в логе.
+  - `tests/bot` — 245 вместо 156: admin-команды через `Dispatcher`, фильтр на уровне роутера и только личный чат, кнопки 👍/👎 и их нажатие, замена ответа, рассылки (`RetryAfter`, заблокировавшие бота), `AnswerStream`. Тест `test_bot_does_not_moderate_or_rate_limit` проверяет, что в `bot/` нет `openai`, `moderations` и ограничителей частоты.
+  - `tests/test_docker_files.py` — сервисы `bot` и `migrate`, том `pg-data`, бот и его пакеты в образе, в `.env.example` нет строк «КЛЮЧ=   # комментарий»; `tests/unit/test_env_comments.py` — понятная ошибка, если такая строка попала в контейнер.
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt                 # новых пакетов нет
+alembic upgrade head                            # Postgres: три таблицы блока 4.4 (для JSON не нужно)
+python -m pytest -q                             # 984 passed
+```
+
+В `.env` добавить (значение — только в `.env`):
+
+```
+ADMIN_TOKEN=<python -c "import secrets; print(secrets.token_urlsafe(32))">
+```
+
+**Без Docker** — `uvicorn app.main:app --port 8000` и `python -m bot`. В логе сервиса `service_started` с `admin_api: true`, в логе бота — `admin_api=on` и `broadcast_worker_started`. В Telegram:
+1. «Я тебя убью» — «Сообщение не прошло модерацию: угрозы и насилие…», модель не вызывалась; в логе сервиса `moderation_blocked` с `text_hash`.
+2. «Не хочу жить» — не отказ, а слова поддержки и номер 112.
+3. Обычный вопрос — ответ и под ним 👍 / 👎. Нажать 👍 — «Спасибо за оценку!», кнопки исчезли.
+4. `/stats` и `/users` от администратора в личном чате — сводка и таблица; от другого аккаунта (или с пустым `BOT_ADMIN_IDS`) — «Команда доступна только администраторам».
+5. `/broadcast Плановые работы в 23:00` — «Рассылка №1 поставлена в очередь…», через несколько секунд — само сообщение и «Рассылка №1 отправлена: доставлено 1…».
+6. Замена ответа: в `.env` `MODERATION__KEYWORDS_FILE=samples/moderation_demo.yaml` (словарь блокирует слово «пароль»), перезапустить сервис и спросить «Не могу войти в личный кабинет, что делать?». Вопрос пройдёт, ответ начнёт расти, а затем будет заменён на «Не могу показать ответ — он мог нарушить правила.». Строку потом убрать.
+
+Admin API из PowerShell (токен читается из `.env` и на экран не выводится):
+
+```powershell
+$h = @{ "X-Admin-Token" = ((Select-String -Path .env -Pattern '^ADMIN_TOKEN=(.+)$').Matches[0].Groups[1].Value.Trim()) }
+Invoke-RestMethod http://127.0.0.1:8000/chats/admin/stats -Headers $h | Format-List
+Invoke-RestMethod "http://127.0.0.1:8000/chats/admin/users?limit=5" -Headers $h | Format-Table
+try { Invoke-RestMethod http://127.0.0.1:8000/chats/admin/stats } catch { $_.Exception.Response.StatusCode.value__ }   # 401
+```
+
+**В Docker** — сначала остановить `uvicorn` и `python -m bot` (Ctrl+C): порт 8000 нужен контейнеру, а два бота с одним токеном мешают друг другу в Telegram. Если сеть подменяет HTTPS-сертификат (на рабочем компьютере — так), выгрузить корневые сертификаты Windows для бота и указать их в `.env` — команды в [`docs/bot.md`](docs/bot.md#бот-в-docker), раздел «Бот в Docker»:
+
+```
+BOT_EXTRA_CA_FILE=certs/windows-roots.pem
+```
+
+```powershell
+docker compose up -d --build
+docker compose ps                                # app и postgres — healthy, bot — Up, migrate — Exited (0)
+docker compose logs bot --tail 20                # bot_started … admin_api=on
+docker compose down; docker compose up -d        # данные на месте: /stats показывает прежние числа
+docker volume ls                                 # …_pg-data
+```
+
+Если в `.env` есть строки вида «`КЛЮЧ=   # комментарий`» с пустым значением (так было в `.env.example` до блока 4.4), `app` не стартует и пишет, какие переменные исправить. Убрать комментарии у пустых значений можно одной командой (копия `.env` — вне папки проекта, чтобы не попасть в git):
+
+```powershell
+Copy-Item .env "$HOME\multapi-env-backup.txt"
+$lines = [IO.File]::ReadAllLines("$PWD\.env") -replace '^([A-Z0-9_]+)=\s+#.*$', '$1='
+[IO.File]::WriteAllLines("$PWD\.env", $lines, (New-Object System.Text.UTF8Encoding $false))
+```
+
+Том переименован, поэтому Postgres в compose стартует с пустой базой, а история блоков 4.1–4.3 остаётся в старом томе `…_pg_data`. Если она не нужна — `docker volume rm <имя_папки>_pg_data`.
+
+### Результаты
+
+**Песочница (Linux).**
+- **Тесты:** `pytest` — 984 passed, с `-W error` тоже; Postgres-тесты — на настоящем Postgres 16.
+- **Образ и compose.** Образ собран из `uv.lock` с ботом внутри. Docker Hub из песочницы недоступен, поэтому `postgres` и `phoenix` подменены Postgres хоста; `migrate`, `app`, `bot` и `redis` — из `compose.yaml` как есть, в сети хоста.
+  - `docker compose up`: `migrate` применил четыре миграции до `7c1d2e4f5a6b` и завершился с кодом 0, затем `app` стал healthy, затем стартовал `bot`;
+  - вопрос «Я тебя убью, пиши ivan@example.com» — `403`, `detail.code: moderation_blocked`, `categories: [violence]`; в логе — `text_hash` и `text_masked` с `[EMAIL]`, адреса в логе нет;
+  - обычный вопрос — поток и `done` с `message_id`; 👍 — `saved: true`, повтор 👎 — `saved: false`, оценка осталась `up`;
+  - `/chats/admin/stats` без токена и с чужим — `401`; с токеном — `total_messages: 4`, `active_users: 2`, `moderation_block_rate: 0.3333`, `feedback_up_ratio: 1.0`;
+  - рассылка: `202 pending` → `claim` с получателями `1001`, `1002` → `result` → `status: sent`; пустая очередь — `204`;
+  - код бота в контейнере бота (`docker compose run bot python -c …`) с `ADMIN_TOKEN` из `.env`: `/stats` и `/users` в виде сообщений бота, постановка и выдача рассылки, вопрос с `message_id` и оценка;
+  - `docker compose down` и снова `up`: `migrate` ничего не применял (схема актуальна), статистика сохранилась.
+- **Бот в контейнере** до Telegram из песочницы не достучался (сети нет) и вышел с подсказкой про `BOT_PROXY_URL`; `restart: unless-stopped` поднимает его снова.
+- **Сертификаты сети** (после проверки на Windows): тестовый HTTPS-сервер с сертификатом от своего корневого — без `BOT_EXTRA_CA_FILE` та же ошибка `CERTIFICATE_VERIFY_FAILED`, что на Windows, с файлом в формате выгрузки PowerShell (строки по 76 символов, CRLF) — соединение проходит; в собранном контейнере бот загружает файл (`extra_ca_loaded`).
+- **Что песочница не проверяет:** настоящий Telegram (кнопки, `edit_reply_markup`, рассылка), ответ `llama3.2` под модерацией, OpenAI Moderation с настоящим ключом — это проверка на Windows.
+
+**Windows (Ollama на CPU; без Docker — JSON-история, в Docker — Postgres).**
+- **Тесты:** первый прогон — 964 passed и 1 failed: тест «admin API выключено без `ADMIN_TOKEN`» увидел `ADMIN_TOKEN` из `.env` разработчика (`src/config.py` загружает `.env` в окружение). Тестовые настройки теперь задают `ADMIN_TOKEN` и модерацию явно. Итог — 984 passed.
+- **Миграция:** `alembic upgrade head` применил `7c1d2e4f5a6b`.
+- **Без Docker, в Telegram:**
+  - «Я тебя убью» — «Сообщение не прошло модерацию: угрозы и насилие…», модель не вызывалась;
+  - «Не хочу жить» — **дефект: прошло модерацию**, и `llama3.2` ответила вперемешку с английскими словами. Шаблоны ловили «хочу умереть», а не самую частую формулировку. Добавлены «не хочу жить», «больше не хочу жить», «жить не хочется», «незачем жить»; в Docker после исправления — слова поддержки и 112, без кнопок оценки;
+  - обычный вопрос — ответ и 👍/👎, нажатие — «Спасибо за оценку!», кнопки исчезли;
+  - `/stats` — HTML-сводка: 86 сообщений, DAU 10, средняя задержка 3,9 с, блокировок 1, оценок 3 (100% 👍), частые вопросы; `/users` — таблица, **но на телефоне строки переносились** (до 46 символов). Таблица сужена до 40 символов, в Docker — в одну строку;
+  - `/broadcast Сегодня с 23:24 — плановые работы.` — «Рассылка №1 поставлена в очередь…», через 4 с — сам текст и «Рассылка №1 отправлена: доставлено 1, не доставлено 0»;
+  - замена ответа с `samples/moderation_demo.yaml`: «Не могу войти в личный кабинет, что делать?» — слой ключевых слов нашёл «пароль» в ответе на 17-й секунде, генерация остановлена (`llm_stream_cancelled`), `outcome: moderated`, в истории и в Telegram — «Не могу показать ответ — он мог нарушить правила.».
+- **Admin API из PowerShell:** `stats` — `total_messages: 88`, `active_users: 10`, `moderation_block_rate: 0,0444`, `feedback_up_ratio: 1,0`, топ вопросов; `users?limit=5`; без токена — `401`.
+- **Логи — недочёт:** бот опрашивает очередь рассылок каждые 5 с, и пустые ответы заняли 319 строк лога бота и 214 строк лога сервиса. Теперь пустой опрос в лог не пишется (фильтр у бота, DEBUG у сервиса).
+- **Docker — найдено и исправлено по очереди:**
+  1. `app` перезапускался с `SettingsError` для `moderation`: `docker compose` прочитал строку «`MODERATION__THRESHOLDS=   # пусто => …`» как значение-комментарий. Исправлены 68 таких строк в `.env.example` (`КЛЮЧ=""`), добавлены понятная ошибка и тест; комментарии в `.env` убраны командой из раздела «Проверка на Windows»;
+  2. `app` падал с `PermissionError: '/app/logs'` — `LOG_FILE=logs/service.jsonl` из `.env`. Папка теперь создаётся в образе, а недоступный файл лога больше не останавливает сервис;
+  3. бот не подключался к Telegram: `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain` — рабочая сеть подменяет HTTPS, а сертификата сети в хранилище контейнера нет. Корневые сертификаты Windows выгружены в `certs/windows-roots.pem`, `BOT_EXTRA_CA_FILE` — после этого `extra_ca_loaded`, `bot_started … admin_api=on`, `broadcast_worker_started`, `notify_api_started`.
+- **Docker, итог:** `docker compose up -d --build` — `migrate` применил все четыре миграции к новой базе в томе `pg-data` и завершился с кодом 0, `app` — healthy, `bot` — запущен.
+  - «Не хочу жить» — слова поддержки и 112, без кнопок; в логе бота — `403`, модель не вызывалась;
+  - «Как сменить пароль?» — ответ `llama3.2` (первый — за 45 с: Ollama загружала модель) и 👍/👎;
+  - `/stats` — 2 сообщения, блокировок 1 (50% вопросов), частый вопрос «как сменить пароль»; `/users` — одна строка без переносов;
+  - `docker compose down` и `up -d` — `/stats` прежний (2 сообщения), 👍 под ответом, полученным до перезапуска, сохранился (`Оценок: 1, доля 👍: 100%`); `docker volume ls` — `multapi_pg-data` рядом со старым `multapi_pg_data`.
+- **Сбой связи с Telegram:** однажды ответ на `/clear` не ушёл — запрос к Telegram через прокси не уложился в 60 с (`TelegramNetworkError: Request timeout error`), хотя история уже была очищена; бот ответил «Что-то пошло не так» и записал в лог длинную трассировку. Теперь на сбой связи бот отвечает, что ответ не дошёл и команда могла уже выполниться, а в лог пишет одну строку `telegram_network_error`. Отказ модерации в логе бота — тоже одна строка `question_blocked … categories=…`, а не предупреждение `backend_error` о `403`.
+- **Качество ответов:** `llama3.2` (3B) отвечает по руководству, но вставляет английские слова и иногда выдумывает пункты меню — предел маленькой модели на CPU, не обвязки.
+
+### Соответствие критериям блока 4.4
+
+| Критерий | Реализация |
+|---|---|
+| Запрещённый вопрос — `403`, `detail.code == "moderation_blocked"` | `ModerationBlocked` → обработчик в `app/main.py`; `test_blocked_question_is_403_without_model_call`, `test_stats_after_real_dialogs` |
+| Ответ модели проверяется; не прошёл — заменяется («Не могу показать ответ…» или событие SSE) | `ChatService._turn`, событие `moderation`; `test_answer_stops_on_blocked_fragment`, `test_openai_checks_whole_answer_at_the_end` |
+| Слои: ключевые слова из YAML + OpenAI `omni-moderation-latest`, `flagged` и свои пороги | `app/moderation/keywords.py`, `openai_layer.py`; `test_openai_custom_thresholds_both_ways` |
+| Инцидент — structlog: sha256[:16], маскированный текст, категории, слой; без сырого текста | `log_incident`; `test_incident_log_has_hash_and_masked_text_only` |
+| Бот показывает понятный текст в обоих случаях | `bot/texts.py`, `streaming.py`; `test_blocked_question_is_a_friendly_text`, `test_replaced_answer_removes_shown_parts`; на Windows — отказ на угрозу, слова поддержки на «Не хочу жить», замена ответа с демо-словарём |
+| В боте нет `openai.moderations.create` и rate-limit кода | `test_bot_does_not_moderate_or_rate_limit` |
+| `/chats/admin/*` под `X-Admin-Token` через `Depends(require_admin)` | `app/admin/`; `test_every_admin_endpoint_needs_token` |
+| `GET /stats`: сообщения за 24 ч, DAU, задержка, доля блокировок, доля 👍, топ вопросов через `lower(regexp_replace)` + `GROUP BY` | `PostgresChatRepository.stats`; `test_ops_repository.py`, `test_stats_after_real_dialogs` |
+| `GET /users?limit=50`, `POST /broadcast` → `broadcast_queue` со статусом `pending`, бот забирает в фоне | `app/admin/routes.py`, `bot/services/broadcast.py`; `test_broadcast_queue_over_http`, `test_broadcast.py` |
+| Admin-команды бота только для `BOT_ADMIN_IDS`, `IsAdmin` на уровне роутера | `bot/handlers/admin.py`; `test_is_admin_filter_is_on_the_router_not_inside_handlers`, `test_non_admin_gets_refusal_and_backend_is_not_called` |
+| `/stats` — HTML, `/users` — первые 10 таблицей, `/broadcast <текст>`; `HTTPStatusError` — текстом | `test_stats_is_html_with_escaped_questions`, `test_users_table_shows_first_ten`, `test_backend_errors_are_messages_not_tracebacks` |
+| 👍/👎 после ответа, `fb:<vote>:<message_id>`, сохранение с `UNIQUE`, кнопки убираются `edit_reply_markup(reply_markup=None)` | `bot/handlers/feedback.py`, `message_feedback`; `test_vote_is_saved_and_buttons_removed`, `test_feedback_flow` |
+| `docker compose up` поднимает app + bot + postgres одной командой | `compose.yaml`: `migrate`, `bot`; `TestProductionCompose`; прогон в песочнице и на Windows (после исправлений `.env`, `LOG_FILE` и сертификатов) |
+| Том `pg-data` сохраняет данные | `compose.yaml`; `test_postgres_service`; `down` / `up` в песочнице и на Windows — `/stats` и оценка сохранились |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -2185,6 +2384,8 @@ LLM__MAX_RETRIES=2
 Для безопасности (блок 3.8): `SECURITY__ENABLED` (пусто — `true`; `false` — «голый» сервис только для прогона garak baseline), `SECURITY__MAX_INPUT_CHARS` (4000), `RATE_LIMIT_PER_MIN` (лимит запросов к `/chat` в минуту на `X-User-ID` или IP; 0 — без лимита) и `LOG_FILE` (копия JSON-лога в файл, например `logs/service.jsonl`).
 
 Для медиа и уведомлений (блок 4.3): `CHAT_VISION_MODEL` (модель для фото, например `gemma3:4b`), `AUDIO_API_KEY` / `AUDIO_BASE_URL` / `WHISPER_MODEL` / `AUDIO_LANGUAGE` (Whisper), `MEDIA__*` (пределы файлов и токены картинки), `INTERNAL_TOKEN` (общий секрет сервиса и бота), `BOT_URL` (адрес HTTP-API бота); у бота — `BOT_API_HOST`, `BOT_API_PORT`, `BOT_STREAMING`, `BACKEND_STREAM_TIMEOUT`.
+
+Для production-обвязки (блок 4.4): `ADMIN_TOKEN` (заголовок `X-Admin-Token` admin API; тот же токен у бота для `/stats`, `/users`, `/broadcast` и рассылок), `MODERATION__ENABLED`, `MODERATION__KEYWORDS_FILE`, `MODERATION__OPENAI_ENABLED` / `MODERATION__OPENAI_API_KEY` / `MODERATION__OPENAI_MODEL` / `MODERATION__THRESHOLDS` / `MODERATION__FAIL_CLOSED`; у бота — `BOT_BROADCAST_POLL`.
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 

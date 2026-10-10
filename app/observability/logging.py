@@ -61,23 +61,29 @@ def _shared_processors() -> list:
     ]
 
 
-def _output(stream: TextIO | None, log_file: Path | None) -> TextIO:
+def _output(stream: TextIO | None, log_file: Path | None) -> tuple[TextIO, OSError | None]:
+    """Куда писать лог. Файл LOG_FILE не открылся (нет прав, путь занят файлом) — лог идёт
+    только в консоль, а ошибка возвращается: сервис из-за копии лога не падает (блок 4.4,
+    Docker на Windows: LOG_FILE=logs/… из .env, а /app в образе принадлежит root)."""
     global _log_file
     if _log_file is not None:      # повторная настройка: прежний файл закрываем
         _log_file.close()
         _log_file = None
     stream = stream or sys.stdout
     if log_file is None:
-        return stream
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    _log_file = open(log_file, "a", encoding="utf-8", buffering=1)   # noqa: SIM115 — живёт до конца процесса
-    return _Tee(stream, _log_file)   # type: ignore[return-value]
+        return stream, None
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        _log_file = open(log_file, "a", encoding="utf-8", buffering=1)   # noqa: SIM115 — живёт до конца процесса
+    except OSError as exc:
+        return stream, exc
+    return _Tee(stream, _log_file), None   # type: ignore[return-value]
 
 
 def setup_logging(level: str = "INFO", stream: TextIO | None = None, log_file: Path | None = None) -> None:
     """Настраивает structlog и стандартный logging. Повторный вызов перенастраивает
     вывод (тесты направляют лог в StringIO). log_file — копия лога в файл (LOG_FILE)."""
-    stream = _output(stream, log_file)
+    stream, file_error = _output(stream, log_file)
     level_no = logging.getLevelName(level.upper())
     if not isinstance(level_no, int):
         level_no = logging.INFO
@@ -121,6 +127,9 @@ def setup_logging(level: str = "INFO", stream: TextIO | None = None, log_file: P
     #   то есть сырой промпт с персональными данными в обход redact_pii.
     for name in ("httpx", "httpcore", "openai"):
         logging.getLogger(name).setLevel(max(level_no, logging.WARNING))
+    if file_error is not None:
+        get_logger().warning("log_file_unavailable", path=str(log_file), error=str(file_error),
+                             detail="лог пишется только в консоль")
 
 
 def get_logger() -> structlog.typing.FilteringBoundLogger:

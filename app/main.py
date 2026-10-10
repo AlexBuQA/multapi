@@ -32,6 +32,11 @@ Swagger: http://localhost:8000/docs
 - медиа в чатах (блок 4.3): если задан AUDIO_API_KEY, lifespan создаёт второй AsyncOpenAI —
   для Whisper на AUDIO_BASE_URL (app.state.audio), с тем же прокси и сертификатами, что у
   клиента модели; ошибки вложений (MediaError) и служебных запросов — JSON с кодом 401–504;
+- production-обвязка (блок 4.4): lifespan собирает модерацию (app.state.moderation —
+  шаблоны и, если включён, клиент OpenAI Moderation); вопрос, не прошедший модерацию, —
+  403 с detail.code = moderation_blocked; роутеры /chats/admin/* (X-Admin-Token) и оценки
+  ответов POST /chats/{id}/messages/{message_id}/feedback. Роутер admin подключается раньше
+  роутера чатов: иначе /chats/admin/stats совпал бы с /chats/{chat_id};
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -52,6 +57,8 @@ from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from redis.asyncio import Redis
 
+from app.admin import routes as admin_routes
+from app.chat import feedback as chat_feedback
 from app.chat import routes as chat_routes
 from app.chat.context import make_strategy
 from app.chat.deps import close_chat_storage, init_chat_storage
@@ -67,6 +74,7 @@ from app.core.config import (
     proxy_for,
 )
 from app.core.exceptions import LLMError, LLMRateLimitError
+from app.moderation import ModerationBlocked, build_moderation
 from app.observability.logging import get_logger, setup_logging
 from app.observability.middleware import REQUEST_ID_HEADER, USER_ID_HEADER, RequestContextMiddleware
 from app.observability.pii_presidio import load_redactor
@@ -115,6 +123,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             max_retries=2,
             http_client=DefaultAsyncHttpxClient(**audio_options) if audio_options else None,
         )
+    # Модерация (блок 4.4): шаблоны — сразу (ошибка в YAML — ошибка старта), OpenAI Moderation —
+    # если включена и есть ключ (MODERATION__OPENAI_API_KEY или AUDIO_API_KEY).
+    app.state.moderation_client = None
+    moderation_key = cfg.moderation.openai_api_key or cfg.audio_api_key
+    if cfg.moderation.enabled and cfg.moderation.openai_enabled:
+        if moderation_key is None:
+            log.warning("moderation_openai_disabled", note="MODERATION__OPENAI_ENABLED=true, но нет ключа: "
+                                                           "задайте MODERATION__OPENAI_API_KEY")
+        else:
+            mod_proxy = proxy_for(cfg.moderation.openai_base_url, cfg.llm.proxy_url)
+            mod_options = http_client_options(
+                mod_proxy, cfg.llm.use_system_certs and not is_local_url(cfg.moderation.openai_base_url))
+            app.state.moderation_client = AsyncOpenAI(
+                api_key=moderation_key.get_secret_value(), base_url=cfg.moderation.openai_base_url or None,
+                timeout=cfg.moderation.timeout, max_retries=1,
+                http_client=DefaultAsyncHttpxClient(**mod_options) if mod_options else None)
+    app.state.moderation = build_moderation(cfg, app.state.moderation_client)
+    app.state.moderation_config = cfg.moderation
     # Канарейка (блок 3.8): новая при каждом старте; само значение в лог не пишем.
     app.state.canary = new_canary() if cfg.security.enabled else None
     # Presidio (опционально): модель грузится несколько секунд — один раз здесь, в потоке.
@@ -141,7 +167,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
              security_enabled=cfg.security.enabled, rate_limit_per_min=cfg.rate_limit_per_min,
              chat_repository=cfg.chat_repository, vision_model=cfg.chat_vision_model,
              audio=(cfg.audio_base_url or "https://api.openai.com/v1") if app.state.audio else None,
-             notify=cfg.bot_url if cfg.internal_token else None)
+             notify=cfg.bot_url if cfg.internal_token else None,
+             moderation=("keywords+openai" if app.state.moderation.openai else "keywords")
+             if cfg.moderation.enabled else None,
+             admin_api=cfg.admin_token is not None)
     if not cfg.security.enabled:
         log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
                                               "(только для прогона garak baseline)")
@@ -150,6 +179,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.openai.close()
     if app.state.audio is not None:
         await app.state.audio.close()
+    if app.state.moderation_client is not None:
+        await app.state.moderation_client.close()
     await app.state.cache.aclose()
     await close_chat_storage(app.state)
     if app.state.pii_redactor is not None:
@@ -247,6 +278,20 @@ async def handle_request_error(request: Request, exc: RequestError) -> JSONRespo
     return _error(request, exc.status, exc.code, exc.message)
 
 
+@app.exception_handler(ModerationBlocked)
+async def handle_moderation_blocked(request: Request, exc: ModerationBlocked) -> JSONResponse:
+    # Блок 4.4: формат из задания — detail.code, как у HTTPException(403, detail={...}); рядом —
+    # общий формат ошибок сервиса error.code, его читает бот. Текст вопроса в ответ не попадает.
+    request_id = _request_id(request)
+    return JSONResponse(
+        status_code=403,
+        content={"detail": {"code": exc.code, "categories": exc.categories, "message": exc.message},
+                 "error": {"code": exc.code, "message": exc.message, "categories": exc.categories,
+                           "request_id": request_id}},
+        headers={REQUEST_ID_HEADER: request_id} if request_id else None,
+    )
+
+
 @app.exception_handler(BodyTooLarge)
 async def handle_body_too_large(request: Request, exc: BodyTooLarge) -> JSONResponse:
     # Тело без Content-Length оказалось больше предела уже при разборе формы.
@@ -281,6 +326,9 @@ async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
 
 
 app.include_router(chat.router)
+# /chats/admin/* — раньше /chats/{chat_id}: иначе GET /chats/admin/stats ушёл бы в get_chat с chat_id="admin".
+app.include_router(admin_routes.router)
 app.include_router(chat_routes.router)
+app.include_router(chat_feedback.router)
 app.include_router(models.router)
 app.include_router(health.router)

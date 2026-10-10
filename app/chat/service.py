@@ -55,6 +55,21 @@ send_message(chat_id, текст):
 сообщений в начале диалога (name_priming) — «Меня зовут Александра.» и ответ на него.
 Пара нужна llama3.2: системной подсказке она следовала через раз, а имя из истории помнит
 надёжно. Имя присылает Telegram-бот (BOT_DEFAULT_USER_NAME); без user_name запрос как в 4.1.
+
+Модерация (блок 4.4, app/moderation/):
+- вопрос — до записи в историю и вызова модели: check_input по тексту вопроса и тексту
+  вложения (документ, расшифровка голоса). Не прошёл — ModerationBlocked (в HTTP 403
+  moderation_blocked), в историю вопрос не попадает, модель не вызывается;
+- ответ — по ходу потока слоем ключевых слов (на каждом фрагменте, по хвосту текста: фраза
+  могла начаться в прошлом фрагменте) и целиком в конце — всеми слоями. Не прошёл —
+  генерация останавливается, в поток уходит AnswerReplaced (событие moderation), в историю
+  сохраняется OUTPUT_REFUSAL вместо ответа. Фрагмент, на котором сработал слой ключевых
+  слов, клиенту не уходит.
+Инцидент — в лог (log_incident) и в хранилище (record_moderation), если оно его умеет.
+
+stream_message — поток для POST /chats/{id}/messages: фрагменты текста (str), AnswerReplaced
+и в конце AnswerSaved(message_id) — id сохранённого ответа, для оценки 👍/👎 (блок 4.4).
+send_message — только фрагменты текста, как раньше: для тестов и скриптов.
 """
 from __future__ import annotations
 
@@ -65,6 +80,7 @@ import time
 import unicodedata
 import weakref
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -80,11 +96,13 @@ from app.chat.context import (
     model_content,
     text_tokens,
 )
-from app.chat.domain import Chat, ChatInputError, ChatMessage, ChatNotFoundError, ChatStorageError, MediaError, MediaRef
+from app.chat.domain import (Chat, ChatInputError, ChatMessage, ChatNotFoundError, ChatStorageError, FeedbackResult,
+                             FeedbackValue, MediaError, MediaRef, ModerationIncident, RequestError)
 from app.chat.media import placeholder
-from app.chat.repository import ChatRepository
+from app.chat.repository import ChatRepository, OpsRepository
 from app.core.config import Settings
 from app.core.exceptions import LLMContentFiltered
+from app.moderation import OUTPUT_REFUSAL, ModerationBlocked, ModerationResult, ModerationService, log_incident, text_hash
 from app.observability.logging import get_logger
 from app.schemas.chat import ChatDelta, ChatRequest, MediaChatRequest, Usage, content_parts, has_image, map_text
 from app.schemas.models import supports_images
@@ -96,6 +114,25 @@ from app.services.security.input_validator import validate_document, validate_in
 log = get_logger()
 
 IMAGE_HIDDEN = "[картинка не показана модели: {model} не видит изображений]"
+MODERATION_TAIL = 300        # символов ответа, которые слой ключевых слов перепроверяет с новым фрагментом
+
+
+@dataclass(frozen=True)
+class AnswerReplaced:
+    """Ответ не прошёл модерацию: клиент заменяет показанный текст на text (блок 4.4)."""
+
+    text: str
+    categories: list[str]
+
+
+@dataclass(frozen=True)
+class AnswerSaved:
+    """Последнее событие хода: id сохранённого ответа (None — сохранять было нечего)."""
+
+    message_id: UUID | None
+
+
+StreamItem = str | AnswerReplaced | AnswerSaved
 
 # Имя по умолчанию (блок 4.3). Оно попадает в системный промпт, поэтому строже вопроса: одно-три
 # слова из букв (дефис, апостроф), до 40 знаков и без шаблонов инъекции.
@@ -166,12 +203,39 @@ def _elapsed_ms(started: float) -> float:
 
 class ChatService:
     def __init__(self, repository: ChatRepository, llm_client: LLMClient, settings: Settings,
-                 *, strategy: ContextStrategy | None = None, locks: ChatLocks | None = None) -> None:
+                 *, strategy: ContextStrategy | None = None, locks: ChatLocks | None = None,
+                 moderation: ModerationService | None = None) -> None:
         self.repo = repository
         self.llm = llm_client
         self.settings = settings
         self.strategy = strategy or make_strategy(settings.chat_context_strategy, settings.chat_context_window)
         self.locks = locks or ChatLocks()
+        self.moderation = moderation
+
+    async def _incident(self, direction: str, result: ModerationResult, text: str, chat_id: UUID) -> None:
+        """Инцидент модерации — в лог и, если хранилище умеет, в счётчики /chats/admin/stats.
+        Ошибка записи счётчика ответ не ломает: инцидент уже в логе."""
+        log_incident(direction, result, text, chat_id=str(chat_id))  # type: ignore[arg-type]
+        if not isinstance(self.repo, OpsRepository):
+            return
+        incident = ModerationIncident(chat_id=chat_id, direction=direction, blocked_by=result.blocked_by,  # type: ignore[arg-type]
+                                      categories=result.categories, text_hash=text_hash(text))
+        try:
+            with anyio.CancelScope(shield=True):
+                await self.repo.record_moderation(incident)
+        except (ChatStorageError, ChatNotFoundError) as exc:
+            log.error("moderation_incident_not_saved", chat_id=str(chat_id), error=repr(exc)[:300])
+
+    async def _moderate_input(self, chat_id: UUID, user_content: str, media: MediaRef | None) -> None:
+        if self.moderation is None:
+            return
+        text = user_content
+        if media is not None and media.part.get("type") == "text":
+            text = f"{user_content}\n{media.part.get('text', '')}"     # документ, расшифровка голоса
+        result = await self.moderation.check_input(text)
+        if not result.allowed:
+            await self._incident("input", result, text, chat_id)
+            raise ModerationBlocked(result)
 
     # ------------------------------------------------------------------ #
     def _check_system_prompt(self, system_prompt: str | None) -> None:
@@ -210,6 +274,27 @@ class ChatService:
     async def list_messages(self, chat_id: UUID, limit: int = 50) -> list[ChatMessage]:
         await self.get_chat(chat_id)
         return await self.repo.list_messages(chat_id, limit=limit)
+
+    def ops(self) -> OpsRepository:
+        """Хранилище блока 4.4. JSON и Postgres его умеют; чужой репозиторий — 501."""
+        if not isinstance(self.repo, OpsRepository):
+            raise RequestError(501, "not_supported", "Хранилище чатов не поддерживает оценки и статистику.")
+        return self.repo
+
+    async def add_feedback(self, chat_id: UUID, message_id: UUID, value: FeedbackValue) -> FeedbackResult:
+        """Оценка ответа 👍/👎 (блок 4.4). Оценивает владелец чата (owner_external_id): одна
+        оценка на ответ, повтор её не меняет. Оценить можно только ответ ассистента."""
+        chat = await self.get_chat(chat_id)
+        ops = self.ops()
+        message = await ops.get_message(chat_id, message_id)
+        if message is None:
+            raise RequestError(404, "message_not_found", "В этом чате нет сообщения с таким id.")
+        if message.role != "assistant":
+            raise RequestError(422, "not_an_answer", "Оценить можно только ответ ассистента.")
+        result = await ops.add_feedback(chat_id, message_id, chat.owner_external_id, value)
+        log.info("chat_feedback", chat_id=str(chat_id), message_id=str(message_id), value=value,
+                 saved=result.saved, stored=result.value)
+        return result
 
     async def add_system_message(self, chat_id: UUID, text: str) -> tuple[Chat, ChatMessage]:
         """Сообщение от системы (блок 4.3, POST /chats/{id}/system-message): в историю — как
@@ -303,19 +388,30 @@ class ChatService:
         return req, stats
 
     # ------------------------------------------------------------------ #
-    async def send_message(self, chat_id: UUID, user_content: str, media: MediaRef | None = None,
-                           user_name: str | None = None) -> AsyncIterator[str]:
+    async def stream_message(self, chat_id: UUID, user_content: str, media: MediaRef | None = None,
+                             user_name: str | None = None) -> AsyncIterator[StreamItem]:
         started = time.perf_counter()
         user_name = clean_user_name(user_name)
         chat = await self.get_chat(chat_id)
         if media is not None:
             self.check_media(media)
+        await self._moderate_input(chat_id, user_content, media)
         async with self.locks(chat_id):
             # aclosing: клиент ушёл — _turn закрывается здесь же и сохраняет ответ до того,
             # как замок отпустит следующий вопрос.
-            async with contextlib.aclosing(self._turn(chat, user_content, media, started, user_name)) as chunks:
-                async for chunk in chunks:
-                    yield chunk
+            async with contextlib.aclosing(self._turn(chat, user_content, media, started, user_name)) as items:
+                async for item in items:
+                    yield item
+
+    async def send_message(self, chat_id: UUID, user_content: str, media: MediaRef | None = None,
+                           user_name: str | None = None) -> AsyncIterator[str]:
+        """Только текст ответа. Ответ, заменённый модерацией, — её текстом отдельным фрагментом."""
+        async with contextlib.aclosing(self.stream_message(chat_id, user_content, media, user_name)) as items:
+            async for item in items:
+                if isinstance(item, str):
+                    yield item
+                elif isinstance(item, AnswerReplaced):
+                    yield item.text
 
     def user_message(self, chat_id: UUID, user_content: str, media: MediaRef | None) -> ChatMessage:
         """Вопрос для истории. С вложением без подписи content — пометка вида «[фото]»."""
@@ -327,7 +423,7 @@ class ChatService:
         return message
 
     async def _turn(self, chat: Chat, user_content: str, media: MediaRef | None,
-                    started: float, user_name: str | None = None) -> AsyncIterator[str]:
+                    started: float, user_name: str | None = None) -> AsyncIterator[StreamItem]:
         chat_id = chat.id
         await self.repo.append_message(chat_id, self.user_message(chat_id, user_content, media))
         history = await self.repo.list_messages(chat_id, limit=self.strategy.history_limit)
@@ -342,16 +438,35 @@ class ChatService:
         parts: list[str] = []
         usage: Usage | None = None
         outcome = "completed"
+        saved_id: UUID | None = None
+        blocked: ModerationResult | None = None
+        checked = False                     # ответ целиком прошёл check_output
+        tail = ""
         try:
             # aclosing: если клиент ушёл, поток модели закрывается сразу (LLMService закроет
             # соединение с провайдером), а не когда сборщик мусора доберётся до генератора.
             async with contextlib.aclosing(self.llm.stream(req)) as deltas:
                 async for delta in deltas:
                     if delta.content:
+                        if self.moderation is not None:
+                            quick = self.moderation.check_keywords(tail + delta.content)
+                            if not quick.allowed:
+                                blocked, parts = quick, [*parts, delta.content]
+                                break                    # фрагмент клиенту не уходит, модель останавливается
+                            tail = (tail + delta.content)[-MODERATION_TAIL:]
                         parts.append(delta.content)
                         yield delta.content
                     elif delta.usage is not None:
                         usage = delta.usage
+            if blocked is None and self.moderation is not None and parts:
+                final = await self.moderation.check_output("".join(parts))
+                blocked = final if not final.allowed else None
+                checked = True
+            if blocked is not None:
+                outcome = "moderated"
+                await self._incident("output", blocked, "".join(parts), chat_id)
+                parts = [OUTPUT_REFUSAL]
+                yield AnswerReplaced(OUTPUT_REFUSAL, blocked.categories)
         except LLMContentFiltered:
             # StreamGuard остановил ответ: придержанный хвост клиенту не ушёл, вместо него — отказ.
             outcome = "filtered"
@@ -366,19 +481,47 @@ class ChatService:
             outcome = "interrupted"
             raise
         finally:
-            await self._save_answer(chat_id, "".join(parts), usage, outcome)
+            if blocked is None and not checked and parts and self.moderation is not None:
+                # Оборванный ответ (клиент ушёл, ошибка провайдера, StreamGuard) целиком не
+                # проверялся, а в истории он уйдёт модели в следующих ходах и в GET /messages.
+                parts = await self._moderate_partial(chat_id, parts)
+            saved_id = await self._save_answer(chat_id, "".join(parts), usage, outcome)
             log.info("chat_turn_finished", chat_id=str(chat_id), outcome=outcome, answer_chars=len("".join(parts)),
                      output_tokens=usage.completion_tokens if usage else None,
                      prompt_tokens=usage.prompt_tokens if usage else None,
                      latency_ms=_elapsed_ms(started), **stats)
+        # Сюда доходит только ход без исключения: ответ уже сохранён (finally выше).
+        yield AnswerSaved(saved_id)
 
-    async def _save_answer(self, chat_id: UUID, text: str, usage: Usage | None, outcome: str) -> None:
-        """Ответ — одним сообщением после потока. Обрыв — сохраняется то, что успело прийти."""
-        if outcome not in {"completed", "filtered"}:
+    async def _moderate_partial(self, chat_id: UUID, parts: list[str]) -> list[str]:
+        """Проверка ответа, который оборвался до check_output. Задачу ответа уже отменяют,
+        поэтому — под щитом и не дольше MODERATION__TIMEOUT. Не прошёл — в историю пойдёт отказ.
+        Не успели проверить — как при ошибке OpenAI: fail-closed — отказ, иначе ответ как есть
+        (ключевые слова каждый фрагмент уже проверили)."""
+        assert self.moderation is not None
+        text = "".join(parts)
+        result: ModerationResult | None = None
+        with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(self.settings.moderation.timeout):
+                result = await self.moderation.check_output(text)
+            if result is None and self.moderation.fail_closed:
+                result = ModerationResult(allowed=False, categories=["moderation_unavailable"],
+                                          reasons=["timeout"], blocked_by="openai")
+            if result is None or result.allowed:
+                return parts
+            await self._incident("output", result, text, chat_id)
+        return [OUTPUT_REFUSAL]
+
+    async def _save_answer(self, chat_id: UUID, text: str, usage: Usage | None, outcome: str) -> UUID | None:
+        """Ответ — одним сообщением после потока. Обрыв — сохраняется то, что успело прийти.
+        Возвращает id сохранённого сообщения; None — сохранять нечего или хранилище подвело."""
+        if outcome not in {"completed", "filtered", "moderated"}:
             log.warning("chat_stream_interrupted", chat_id=str(chat_id), reason=outcome, saved_chars=len(text))
         if not text:
-            return
+            return None
         tokens = usage.completion_tokens if usage is not None and usage.completion_tokens else text_tokens(text)
+        if outcome == "moderated":
+            tokens = text_tokens(text)            # usage модели относится к заменённому ответу
         message = ChatMessage(chat_id=chat_id, role="assistant", content=text, tokens=tokens)
         try:
             # Клиент ушёл — задачу ответа отменяют; без щита отменилась бы и запись.
@@ -387,3 +530,5 @@ class ChatService:
         except (ChatStorageError, ChatNotFoundError) as exc:
             # Клиент ответ уже получил; ошибку хранилища поднимать некуда — только в лог.
             log.error("chat_answer_not_saved", chat_id=str(chat_id), error=repr(exc)[:300])
+            return None
+        return message.id

@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1.7
 #
-# Образ HTTP-сервиса ассистента техподдержки (блок 3.5).
+# Образ HTTP-сервиса ассистента техподдержки (блок 3.5) и, с блока 4.4, Telegram-бота:
+# в compose сервис bot запускает из этого же образа python -m bot.
 # Две стадии: builder ставит зависимости через uv в /app/.venv, runtime получает
 # только /app (venv + код) и запускается под непривилегированным пользователем.
 #
 #   docker build -t llm-service:v1 .
-#   docker compose up -d --build        # сервис + Redis + Postgres + Phoenix, см. compose.yaml
+#   docker compose up -d --build        # сервис + бот + Redis + Postgres + Phoenix, см. compose.yaml
 
 # ========== Стадия 1: builder ==========
 FROM python:3.13-slim-bookworm AS builder
@@ -37,7 +38,11 @@ COPY data/knowledge_base.json ./data/knowledge_base.json
 COPY alembic.ini ./
 COPY migrations/ ./migrations/
 COPY app/ ./app/
-RUN mkdir -p /app/var/chats
+# Блок 4.4: Telegram-бот — тот же образ, другая команда (compose.yaml, сервис bot).
+COPY bot/ ./bot/
+# Папки, куда сервис пишет: история JSONL (том chat_data) и LOG_FILE=logs/… из .env (блок 4.4:
+# без неё сервис в контейнере не мог создать logs/ — /app принадлежит root).
+RUN mkdir -p /app/var/chats /app/logs
 
 # ========== Стадия 2: runtime ==========
 FROM python:3.13-slim-bookworm AS runtime

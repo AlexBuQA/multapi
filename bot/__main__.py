@@ -1,5 +1,5 @@
 """
-Точка входа бота (блоки 4.2–4.3):
+Точка входа бота (блоки 4.2–4.4):
 
     uvicorn app.main:app --port 8000      # сначала chat-сервис
     python -m bot
@@ -21,7 +21,9 @@
    Порт занят — ошибка в логе, а бот отвечает как обычно. Сигналы (Ctrl+C) uvicorn не
    перехватывает (ApiServer): их обрабатывает asyncio.run, и в finally API
    останавливается штатно.
-7. Меню команд (setMyCommands) и long polling.
+7. Рассылки (блок 4.4, bot/services/broadcast.py) — фоновая задача: забирает их из очереди
+   сервиса и отправляет. Запускается, только если задан ADMIN_TOKEN; в finally отменяется.
+8. Меню команд (setMyCommands) и long polling.
 """
 from __future__ import annotations
 
@@ -31,20 +33,22 @@ import logging
 import socket
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import uvicorn
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat
 from aiogram.utils.token import TokenValidationError
 from pydantic import ValidationError
 
 from bot import texts
-from bot.config import BotSettings
+from bot.config import BotSettings, commented_values
 from bot.handlers import setup_routers
 from bot.services.backend_client import BACKEND_ERRORS, BackendClient, make_http
+from bot.services.broadcast import QuietEmptyPolls, start_broadcasts, stop_broadcasts
 from bot.services.chat_queue import ChatQueue
 from bot.services.telegram import TelegramSession, proxy_errors
 from bot.web import build_api
@@ -62,7 +66,8 @@ def create_dispatcher(backend: BackendClient, settings: BotSettings) -> Dispatch
 
 
 def create_bot(settings: BotSettings) -> Bot:
-    session = TelegramSession(proxy=settings.proxy(), use_system_certs=settings.bot_use_system_certs)
+    session = TelegramSession(proxy=settings.proxy(), use_system_certs=settings.bot_use_system_certs,
+                              extra_ca_file=settings.bot_extra_ca_file)
     return Bot(token=settings.bot_token.get_secret_value(), session=session)
 
 
@@ -144,39 +149,70 @@ async def stop_api(api: tuple[ApiServer, asyncio.Task[None]] | None) -> None:
         log.warning("notify_api_stop error=%r", exc)
 
 
+def bot_commands(pairs: list[tuple[str, str]]) -> list[BotCommand]:
+    return [BotCommand(command=name, description=description) for name, description in pairs]
+
+
+async def set_commands(bot: Bot, settings: BotSettings) -> None:
+    """Меню команд: общее — всем, с admin-командами — в личных чатах администраторов. Админ
+    ещё не писал боту — Telegram не знает его чат; меню появится после перезапуска бота."""
+    await bot.set_my_commands(bot_commands(texts.COMMANDS))
+    for admin_id in settings.bot_admin_ids:
+        try:
+            await bot.set_my_commands(bot_commands(texts.COMMANDS + texts.ADMIN_COMMANDS),
+                                      scope=BotCommandScopeChat(chat_id=admin_id))
+        except TelegramAPIError as exc:
+            log.info("admin_menu_skipped admin=%s error=%s", admin_id, type(exc).__name__)
+
+
 def make_backend(http: httpx.AsyncClient, settings: BotSettings) -> BackendClient:
-    """Клиент сервиса с настройками бота: таймаут потока и имя по умолчанию."""
-    return BackendClient(http, stream_timeout=settings.backend_stream_timeout, user_name=settings.bot_default_user_name)
+    """Клиент сервиса с настройками бота: таймаут потока, имя по умолчанию, ADMIN_TOKEN."""
+    admin_token = settings.admin_token.get_secret_value() if settings.admin_token else None
+    return BackendClient(http, stream_timeout=settings.backend_stream_timeout, user_name=settings.bot_default_user_name,
+                         admin_token=admin_token)
 
 
 async def run(settings: BotSettings) -> None:
     bot = create_bot(settings)
     http = make_http(settings.backend_url, timeout=settings.backend_timeout)   # один на всё приложение
     backend = make_backend(http, settings)
-    api = None
+    api = broadcasts = None
     try:
         me = await bot.get_me()
         await check_backend(backend)
-        await bot.set_my_commands([BotCommand(command=name, description=description)
-                                   for name, description in texts.COMMANDS])
+        await set_commands(bot, settings)
         api = await start_api(bot, settings)
+        broadcasts = start_broadcasts(bot, backend, poll=settings.bot_broadcast_poll,
+                                      admin_ids=settings.bot_admin_ids, enabled=settings.admin_token is not None)
         log.info("bot_started username=@%s backend=%s timeout=%ss stream_timeout=%ss streaming=%s "
-                 "default_user_name=%s", me.username, backend.base_url, settings.backend_timeout,
-                 settings.backend_stream_timeout, settings.bot_streaming,
-                 "on" if settings.bot_default_user_name else "off")
+                 "default_user_name=%s admins=%s admin_api=%s", me.username, backend.base_url,
+                 settings.backend_timeout, settings.backend_stream_timeout, settings.bot_streaming,
+                 "on" if settings.bot_default_user_name else "off", len(settings.bot_admin_ids),
+                 "on" if settings.admin_token else "off")
         await create_dispatcher(backend, settings).start_polling(bot, handle_signals=False)
     finally:
+        await stop_broadcasts(broadcasts)
         await stop_api(api)
         await http.aclose()
         await bot.session.close()
 
 
-def network_hint(error: str, settings: BotSettings) -> str:
+def in_container() -> bool:
+    return Path("/.dockerenv").exists()
+
+
+def network_hint(error: str, settings: BotSettings, *, container: bool | None = None) -> str:
     """Что делать, если до api.telegram.org не достучаться: сертификат или сама связь."""
     text = f"Нет связи с api.telegram.org: {error}\n"
     if "certificate" in error.lower() or "CERTIFICATE_VERIFY_FAILED" in error:
+        if (in_container() if container is None else container) and settings.bot_extra_ca_file is None:
+            return text + ("Сеть подменяет HTTPS-сертификат, а у контейнера своё хранилище сертификатов, и "
+                           "сертификата сети в нём нет. Выгрузите корневые сертификаты Windows в "
+                           "certs/windows-roots.pem и задайте в .env BOT_EXTRA_CA_FILE=certs/windows-roots.pem "
+                           "(docs/bot.md, «Бот в Docker»).")
         return text + ("Сеть подменяет HTTPS-сертификат: нужны BOT_USE_SYSTEM_CERTS=true (по умолчанию) и пакет "
-                       "truststore (pip install -r requirements.txt).")
+                       "truststore (pip install -r requirements.txt); если сертификата сети нет в хранилище ОС — "
+                       "файл с ним в BOT_EXTRA_CA_FILE.")
     if settings.bot_proxy_url is not None:
         return text + "Через прокси BOT_PROXY_URL соединиться не удалось: проверьте адрес, порт и доступ прокси к Telegram."
     return text + ("Сеть не пускает к Telegram напрямую (таймаут или отказ соединения). Задайте прокси в .env: "
@@ -186,12 +222,22 @@ def network_hint(error: str, settings: BotSettings) -> str:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").addFilter(QuietEmptyPolls())    # опрос пустой очереди рассылок — не в лог
+    broken = commented_values()
+    if broken:
+        print(f"Вместо значения — комментарий из .env: {', '.join(broken)}. docker compose читает строку "
+              "«КЛЮЧ=   # комментарий» как значение «# комментарий». В .env оставьте КЛЮЧ= без комментария "
+              'или напишите КЛЮЧ="" # комментарий.', file=sys.stderr)
+        return 2
     try:
         settings = BotSettings()  # type: ignore[call-arg]  # bot_token — из окружения или .env
     except ValidationError as exc:
         fields = ", ".join(str(err["loc"][0]).upper() for err in exc.errors())
+        # Тексты своих проверок (в них нет значений — только что не так), например «нет файла …».
+        details = "".join(f"\n- {err['msg'].removeprefix('Value error, ')}" for err in exc.errors()
+                          if err["type"] == "value_error")
         print(f"Настройки бота не прошли проверку: {fields}. Токен от @BotFather — строкой BOT_TOKEN=... "
-              "в .env в корне проекта; остальное — в .env.example, раздел «Telegram-бот».", file=sys.stderr)
+              f"в .env в корне проекта; остальное — в .env.example, раздел «Telegram-бот».{details}", file=sys.stderr)
         return 2
     try:
         asyncio.run(run(settings))

@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import ssl
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, Literal
 from pathlib import Path
@@ -191,6 +193,40 @@ class MediaSettings(BaseModel):
     parse_timeout: float = Field(default=30.0, gt=0, le=600)            # с на разбор PDF/DOCX
 
 
+class ModerationSettings(BaseModel):
+    """Модерация в чатах (блок 4.4), app/moderation/. Переменные — с префиксом MODERATION__.
+
+    Слой ключевых слов работает всегда, когда ENABLED=true; OpenAI Moderation — если
+    OPENAI_ENABLED=true и есть ключ (OPENAI_API_KEY или AUDIO_API_KEY).
+    """
+
+    enabled: bool = True
+    keywords_file: Path = ROOT / "app" / "moderation" / "moderation_keywords.yaml"
+    openai_enabled: bool = False
+    openai_api_key: SecretStr | None = None          # пусто — AUDIO_API_KEY (тоже ключ OpenAI)
+    openai_base_url: str | None = None               # пусто — https://api.openai.com/v1
+    openai_model: str = "omni-moderation-latest"
+    # Свои пороги по категориям OpenAI, JSON: {"violence": 0.5, "self_harm": 0.2}. Категория
+    # без порога блокирует, когда её отметил сам OpenAI (flagged).
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    timeout: float = Field(default=10.0, gt=0, le=120)
+    # Ошибка OpenAI Moderation: false — пропустить (ключевые слова уже проверены), true — блокировать.
+    fail_closed: bool = False
+
+    @field_validator("keywords_file")
+    @classmethod
+    def _keywords_from_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else ROOT / value
+
+    @field_validator("thresholds")
+    @classmethod
+    def _thresholds(cls, value: dict[str, float]) -> dict[str, float]:
+        for name, threshold in value.items():
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(f"MODERATION__THRESHOLDS: порог {name} — число от 0 до 1")
+        return value
+
+
 # Postgres из compose.yaml, опубликованный на 127.0.0.1:5433 (а не localhost: на Windows
 # localhost сначала пробует IPv6 ::1, и каждое новое соединение ждёт отказа по нему).
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://multapi:multapi@127.0.0.1:5433/multapi"
@@ -309,6 +345,12 @@ class Settings(BaseSettings):
     internal_token: SecretStr | None = None
     bot_api_port: int = Field(default=9000, ge=1, le=65535)    # тот же порт слушает бот
 
+    # --- Production-обвязка (блок 4.4) ---
+    moderation: ModerationSettings = Field(default_factory=ModerationSettings)
+    # Токен admin-эндпоинтов /chats/admin/* (заголовок X-Admin-Token); тот же — у бота для
+    # /stats, /users, /broadcast и рассылки. Не задан — admin-эндпоинты отвечают 503.
+    admin_token: SecretStr | None = None
+
     @field_validator("log_level")
     @classmethod
     def _check_log_level(cls, value: str) -> str:
@@ -346,6 +388,14 @@ class Settings(BaseSettings):
                              "python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
         return value
 
+    @field_validator("admin_token")
+    @classmethod
+    def _admin_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < 16:
+            raise ValueError("ADMIN_TOKEN короче 16 символов: сгенерируйте длинный, например "
+                             "python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+        return value
+
     @field_validator("bot_url")
     @classmethod
     def _bot_url(cls, value: str) -> str:
@@ -378,7 +428,24 @@ class Settings(BaseSettings):
         return self
 
 
+_COMMENT_VALUE = re.compile(r"#\s")
+
+
+def commented_values(environ: Mapping[str, str] | None = None) -> list[str]:
+    """Переменные, у которых вместо значения — комментарий из .env. docker compose (env_file)
+    читает строку «КЛЮЧ=   # пусто => …» как значение «# пусто => …» (python-dotenv так не
+    делает): без проверки сервис в контейнере падал на непонятной ошибке разбора, а строковые
+    настройки молча получали текст комментария (блок 4.4, проверка на Windows)."""
+    env = os.environ if environ is None else environ
+    return sorted(name for name, value in env.items() if _COMMENT_VALUE.match(value))
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Один экземпляр настроек на процесс: .env читается при первом вызове."""
+    broken = commented_values()
+    if broken:
+        raise ValueError(f"Вместо значения — комментарий из .env: {', '.join(broken)}. docker compose читает "
+                         "строку «КЛЮЧ=   # комментарий» как значение «# комментарий». В .env оставьте КЛЮЧ= "
+                         'без комментария или напишите КЛЮЧ="" # комментарий.')
     return Settings()

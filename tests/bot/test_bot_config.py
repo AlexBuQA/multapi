@@ -1,4 +1,4 @@
-"""Настройки и запуск бота (блок 4.2): .env, токен, HTTPS до Telegram."""
+"""Настройки и запуск бота (блоки 4.2–4.4): .env, токен, HTTPS до Telegram, ADMIN_TOKEN."""
 from __future__ import annotations
 
 import ssl
@@ -102,3 +102,99 @@ def test_network_hint_tells_proxy_from_certificate():
     proxied = BotSettings(bot_token="1:x", bot_proxy_url="http://u:secret@proxy.local:3128", _env_file=None)
     hint = network_hint(timeout, proxied)
     assert "Через прокси BOT_PROXY_URL" in hint and "secret" not in hint
+
+
+def test_admin_token_and_poll(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "admin-token-0123456789")
+    settings = BotSettings(bot_token="1:x", _env_file=None)
+    assert settings.admin_token == SecretStr("admin-token-0123456789") and settings.bot_broadcast_poll == 5.0
+    assert "admin-token-0123456789" not in repr(settings)
+
+
+def test_short_admin_token_is_rejected_without_leaking_it(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "short-secret")
+    with pytest.raises(ValidationError) as caught:
+        BotSettings(bot_token="1:x", _env_file=None)
+    assert caught.value.errors()[0]["loc"] == ("admin_token",) and "short-secret" not in str(caught.value)
+
+
+def test_make_backend_passes_admin_token():
+    import httpx
+
+    from bot.__main__ import make_backend
+
+    settings = BotSettings(bot_token="1:x", admin_token="admin-token-0123456789", _env_file=None)
+    assert make_backend(httpx.AsyncClient(), settings).admin_token == "admin-token-0123456789"
+    assert make_backend(httpx.AsyncClient(), BotSettings(bot_token="1:x", _env_file=None)).admin_token is None
+
+
+def test_commented_value_from_docker_env_file(monkeypatch, capsys):
+    """docker compose читает «BOT_BROADCAST_POLL=   # пусто => 5 с» как значение-комментарий."""
+    from bot.__main__ import main
+    from bot.config import commented_values
+
+    assert commented_values({"A": "# пусто => 5 с", "B": "", "C": "#hash-in-password", "D": "x # y"}) == ["A"]
+    monkeypatch.setenv("BOT_BROADCAST_POLL", "# пусто => 5 с: как часто бот проверяет очередь рассылок")
+    assert main() == 2
+    err = capsys.readouterr().err
+    assert "BOT_BROADCAST_POLL" in err and 'КЛЮЧ=""' in err
+
+
+# ---------------------------------------------------------------- блок 4.4: бот в Docker
+TEST_CA = Path(__file__).resolve().parent / "data" / "test-root-ca.pem"   # открытый сертификат, ключа нет
+
+
+def test_extra_ca_is_added_to_certifi_store():
+    """Без хранилища ОС (BOT_USE_SYSTEM_CERTS=false) — к набору certifi добавляется один сертификат."""
+    before = TelegramSession(use_system_certs=False)._connector_init["ssl"].cert_store_stats()["x509_ca"]
+    after = TelegramSession(use_system_certs=False, extra_ca_file=TEST_CA)._connector_init["ssl"]
+    assert after.cert_store_stats()["x509_ca"] == before + 1 and after.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_extra_ca_is_added_to_system_store(monkeypatch):
+    """С truststore — дополнительно к хранилищу ОС, а не вместо него."""
+    import truststore
+
+    loaded: list[str] = []
+    original = truststore.SSLContext.load_verify_locations
+
+    def spy(self, cafile=None, capath=None, cadata=None):
+        loaded.append(cafile)
+        return original(self, cafile=cafile, capath=capath, cadata=cadata)
+
+    monkeypatch.setattr(truststore.SSLContext, "load_verify_locations", spy)
+    session = TelegramSession(use_system_certs=True, extra_ca_file=TEST_CA)
+    assert isinstance(session._connector_init["ssl"], truststore.SSLContext) and loaded == [str(TEST_CA)]
+
+
+def test_extra_ca_file_setting(tmp_path):
+    relative = BotSettings(bot_token="1:x", bot_extra_ca_file="tests/bot/data/test-root-ca.pem", _env_file=None)
+    assert relative.bot_extra_ca_file == TEST_CA                        # путь — от корня проекта (в Docker /app)
+    assert BotSettings(bot_token="1:x", _env_file=None).bot_extra_ca_file is None
+    with pytest.raises(ValidationError, match="нет файла"):
+        BotSettings(bot_token="1:x", bot_extra_ca_file=tmp_path / "missing.pem", _env_file=None)
+    empty = tmp_path / "empty.pem"
+    empty.write_text("не сертификат", encoding="utf-8")
+    with pytest.raises(ValidationError, match="нет сертификатов"):
+        BotSettings(bot_token="1:x", bot_extra_ca_file=empty, _env_file=None)
+
+
+def test_certificate_hint_in_container():
+    from bot.__main__ import network_hint
+
+    error = "ClientOSError: [Errno 1] [SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain"
+    settings = BotSettings(bot_token="1:x", _env_file=None)
+    assert "BOT_EXTRA_CA_FILE=certs/windows-roots.pem" in network_hint(error, settings, container=True)
+    assert "BOT_USE_SYSTEM_CERTS" in network_hint(error, settings, container=False)
+
+
+def test_main_explains_missing_ca_file(monkeypatch, capsys):
+    from bot.__main__ import main
+
+    monkeypatch.setenv("BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("BOT_EXTRA_CA_FILE", "certs/no-such-file.pem")
+    monkeypatch.setenv("BOT_PROXY_URL", "http://user:secret@proxy.local")      # без порта — тоже ошибка
+    assert main() == 2
+    err = capsys.readouterr().err
+    assert "BOT_EXTRA_CA_FILE" in err and "нет файла" in err and "no-such-file.pem" in err
+    assert "secret" not in err                                         # пароль прокси в текст не попал

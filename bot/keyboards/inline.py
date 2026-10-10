@@ -11,6 +11,7 @@ callback_data — "topic:<slug>", отмена — "topic:cancel" (до 64 ба�
 from __future__ import annotations
 
 from typing import NamedTuple
+from uuid import UUID
 
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -40,3 +41,27 @@ def topics_kb() -> InlineKeyboardMarkup:
     builder.button(text="Отмена", callback_data=TOPIC_PREFIX + CANCEL)
     builder.adjust(2, 2, 1, 1)            # темы по две в ряд, «Отмена» — отдельной строкой
     return builder.as_markup()
+
+
+# Оценка ответа (блок 4.4): callback_data "fb:up:<message_id>" / "fb:down:<message_id>" —
+# до 44 байт при лимите Telegram 64. message_id — id ответа в сервисе из события done.
+FEEDBACK_PREFIX = "fb:"
+
+
+def feedback_kb(message_id: UUID) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👍", callback_data=f"{FEEDBACK_PREFIX}up:{message_id}")
+    builder.button(text="👎", callback_data=f"{FEEDBACK_PREFIX}down:{message_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def parse_feedback(data: str | None) -> tuple[str, UUID] | None:
+    """«fb:up:<uuid>» -> ("up", UUID); всё остальное — None."""
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] + ":" != FEEDBACK_PREFIX or parts[1] not in ("up", "down"):
+        return None
+    try:
+        return parts[1], UUID(parts[2])
+    except ValueError:
+        return None

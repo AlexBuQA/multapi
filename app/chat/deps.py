@@ -6,7 +6,7 @@
   "postgres" -> PostgresChatRepository(session=...) с сессией на время запроса.
   Другое значение -> ValueError с понятным текстом. Схема Settings такое значение и так
   не пропустит (Literal), проверка здесь — на случай настроек, собранных в обход неё.
-- get_chat_service() собирает ChatService из репозитория и LLMService.
+- get_chat_service() собирает ChatService из репозитория, LLMService и модерации (блок 4.4).
 
 Долгоживущие объекты — движок SQLAlchemy и фабрика сессий — создаёт lifespan
 (init_chat_storage в app/main.py) и кладёт в app.state; глобальных переменных-сервисов
@@ -31,6 +31,7 @@ from app.chat.context import preload_encoding
 from app.chat.service import ChatLocks, ChatService
 from app.core.config import Settings, async_database_url, get_settings
 from app.deps.providers import get_llm_service
+from app.moderation import ModerationService, build_moderation
 from app.observability.logging import get_logger
 from app.services.llm import LLMService
 
@@ -123,13 +124,27 @@ def get_chat_locks(request: Request) -> ChatLocks | None:
     return getattr(request.app.state, "chat_locks", None)
 
 
+def get_moderation(request: Request, settings: SettingsDep) -> ModerationService:
+    """Модерация (блок 4.4). Её собирает lifespan — шаблоны и клиент OpenAI Moderation, — а
+    для настроек, подменённых в тестах, — заново по ним (только слой ключевых слов)."""
+    state = request.app.state
+    built = getattr(state, "moderation", None)
+    if built is not None and getattr(state, "moderation_config", None) is settings.moderation:
+        return built
+    return build_moderation(settings)
+
+
+ModerationDep = Annotated[ModerationService, Depends(get_moderation)]
+
+
 def get_chat_service(
     repo: Annotated[ChatRepository, Depends(get_repository)],
     llm: Annotated[LLMService, Depends(get_llm_client)],
     settings: SettingsDep,
     locks: Annotated[ChatLocks | None, Depends(get_chat_locks)],
+    moderation: ModerationDep,
 ) -> ChatService:
-    return ChatService(repo, llm, settings, locks=locks)
+    return ChatService(repo, llm, settings, locks=locks, moderation=moderation)
 
 
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]

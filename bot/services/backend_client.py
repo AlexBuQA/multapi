@@ -1,12 +1,19 @@
 """
-BackendClient (блоки 4.2–4.3) — тонкий async-клиент chat-сервиса на httpx.
+BackendClient (блоки 4.2–4.4) — тонкий async-клиент chat-сервиса на httpx.
 
     get_or_create_chat(owner, interface) -> UUID   POST /chats (идемпотентен на стороне сервиса)
     send_message(chat_id, content, media=None, mime=None)
-                                         -> фрагменты ответа по мере генерации
+                                         -> AnswerStream: фрагменты ответа по мере генерации
                                             POST /chats/{id}/messages, форма + поток SSE
     clear_messages(chat_id)              -> None   DELETE /chats/{id}/messages
     health()                             -> dict   GET /health — для /status
+    send_feedback(chat_id, message_id, value)      POST …/messages/{id}/feedback (блок 4.4)
+    admin_stats(), admin_users(), admin_broadcast(), claim_broadcast(), finish_broadcast()
+                                                   /chats/admin/* с X-Admin-Token (блок 4.4)
+
+AnswerStream (блок 4.4) — async-итератор фрагментов текста, как раньше; после конца потока в
+нём же message_id (из события done — для кнопок 👍/👎) и replacement — текст, которым
+сервис заменил ответ, не прошедший модерацию (событие moderation).
 
 Все вопросы бота — и текст, и фото, голос, документ — идут через один send_message: без
 media это обычный вопрос, с media — форма multipart/form-data с полями content и media.
@@ -15,7 +22,8 @@ media это обычный вопрос, с media — форма multipart/form
 
 Поток ответа — события SSE, в каждом одна строка data: с JSON (блок 4.3):
     {"type": "token", "delta": "..."}   фрагмент ответа
-    {"type": "done"}                    конец
+    {"type": "moderation", "code", "categories", "message"}   ответ не прошёл модерацию (4.4)
+    {"type": "done", "message_id"}      конец; message_id — id сохранённого ответа (4.4)
     {"type": "error", "code", "message"} ошибка посреди ответа -> BackendStreamError
 Строки режет sse_lines (bot/services/sse.py), а не Response.aiter_lines(): та делит текст
 ещё и по \\u2028 и \\x85, а JSON с ensure_ascii=False оставляет их в строке как есть.
@@ -60,7 +68,7 @@ from bot.services.sse import iter_sse, sse_lines
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "multapi-telegram-bot/4.3"
+USER_AGENT = "multapi-telegram-bot/4.4"
 CONNECT_TIMEOUT = 3.0
 WRITE_TIMEOUT = 10.0
 POOL_TIMEOUT = 5.0
@@ -84,8 +92,34 @@ class BackendStreamError(Exception):
         self.message = message
 
 
+class AdminNotConfigured(Exception):
+    """У бота нет ADMIN_TOKEN — admin-эндпоинты сервиса ему недоступны."""
+
+
 # Всё, что handlers ловят и показывают пользователю понятным текстом.
 BACKEND_ERRORS: tuple[type[Exception], ...] = (httpx.HTTPError, BackendStreamError)
+
+
+class AnswerStream:
+    """Поток ответа: async for даёт фрагменты текста. Когда поток закончился, message_id —
+    id ответа в сервисе (событие done), replacement — текст замены от модерации или None."""
+
+    def __init__(self) -> None:
+        self.message_id: UUID | None = None
+        self.replacement: str | None = None
+        self.categories: list[str] = []
+        self._events: AsyncIterator[str] | None = None
+
+    def __aiter__(self) -> AnswerStream:
+        return self
+
+    async def __anext__(self) -> str:
+        assert self._events is not None
+        return await anext(self._events)
+
+    async def aclose(self) -> None:
+        if self._events is not None:
+            await self._events.aclose()  # type: ignore[attr-defined]
 
 
 def error_body(exc: httpx.HTTPStatusError) -> dict[str, Any]:
@@ -100,6 +134,13 @@ def error_body(exc: httpx.HTTPStatusError) -> dict[str, Any]:
 def error_code(exc: httpx.HTTPStatusError) -> str | None:
     code = error_body(exc).get("code")
     return str(code) if code is not None else None
+
+
+def parse_uuid(value: Any) -> UUID | None:
+    try:
+        return UUID(str(value)) if value else None
+    except ValueError:
+        return None
 
 
 def user_header(chat_id: UUID) -> dict[str, str]:
@@ -132,12 +173,14 @@ def parse_event(data: str) -> dict[str, Any]:
 
 class BackendClient:
     def __init__(self, http: httpx.AsyncClient, *, stream_timeout: float = 120.0,
-                 retry_delays: tuple[float, ...] = RETRY_DELAYS, user_name: str | None = None) -> None:
+                 retry_delays: tuple[float, ...] = RETRY_DELAYS, user_name: str | None = None,
+                 admin_token: str | None = None) -> None:
         self.http = http
         self.base_url = str(http.base_url).rstrip("/")
         self.stream_timeout = stream_timeout
         self.retry_delays = retry_delays
         self.user_name = user_name          # BOT_DEFAULT_USER_NAME: уходит с каждым вопросом
+        self.admin_token = admin_token      # ADMIN_TOKEN: /stats, /users, /broadcast и рассылка (блок 4.4)
 
     async def _send(self, build: Callable[[], httpx.Request], *, stream: bool = False) -> httpx.Response:
         """Запрос с повтором при ошибке подключения. Каждая попытка — новый запрос: тело
@@ -164,8 +207,15 @@ class BackendClient:
                                                                "interface": interface})
         return UUID(response.json()["chat_id"])
 
-    async def send_message(self, chat_id: UUID, content: str, media: bytes | None = None, mime: str | None = None,
-                           *, filename: str | None = None) -> AsyncIterator[str]:
+    def send_message(self, chat_id: UUID, content: str, media: bytes | None = None, mime: str | None = None,
+                     *, filename: str | None = None) -> AnswerStream:
+        """Вопрос (и необязательный файл) -> AnswerStream с фрагментами ответа."""
+        stream = AnswerStream()
+        stream._events = self._answer(stream, chat_id, content, media, mime, filename)
+        return stream
+
+    async def _answer(self, stream: AnswerStream, chat_id: UUID, content: str, media: bytes | None,
+                      mime: str | None, filename: str | None) -> AsyncIterator[str]:
         """Вопрос (и необязательный файл) -> фрагменты ответа. filename — имя файла для сервиса;
         не задано — по MIME (voice.ogg, photo.jpg, …). С вопросом уходит и имя по умолчанию
         (поле user_name), если оно задано: так модель обращается к пользователю, пока он не
@@ -193,8 +243,12 @@ class BackendClient:
                 kind = payload.get("type")
                 if kind == "token":
                     yield str(payload.get("delta", ""))
+                elif kind == "moderation":
+                    stream.replacement = str(payload.get("message") or "")
+                    stream.categories = [str(c) for c in payload.get("categories") or []]
                 elif kind == "done":
                     done = True
+                    stream.message_id = parse_uuid(payload.get("message_id"))
                     break
                 elif kind == "error":
                     raise BackendStreamError(str(payload.get("code", "stream_error")), str(payload.get("message", "")))
@@ -209,4 +263,43 @@ class BackendClient:
 
     async def health(self) -> dict[str, Any]:
         response = await self._request("GET", "/health")
+        return dict(response.json())
+
+    # ------------------------------------------------------------------ блок 4.4
+    async def send_feedback(self, chat_id: UUID, message_id: UUID, value: str) -> dict[str, Any]:
+        """Оценка ответа: {"message_id", "value", "saved"}; saved=False — уже оценён."""
+        response = await self._request("POST", f"/chats/{chat_id}/messages/{message_id}/feedback",
+                                       json={"value": value}, headers=user_header(chat_id))
+        return dict(response.json())
+
+    def _admin_headers(self) -> dict[str, str]:
+        if not self.admin_token:
+            raise AdminNotConfigured("ADMIN_TOKEN не задан в .env бота")
+        return {"X-Admin-Token": self.admin_token}
+
+    async def admin_stats(self, hours: int = 24, top: int = 5) -> dict[str, Any]:
+        response = await self._request("GET", "/chats/admin/stats", params={"hours": hours, "top": top},
+                                       headers=self._admin_headers())
+        return dict(response.json())
+
+    async def admin_users(self, limit: int = 10) -> list[dict[str, Any]]:
+        response = await self._request("GET", "/chats/admin/users", params={"limit": limit},
+                                       headers=self._admin_headers())
+        return list(response.json())
+
+    async def admin_broadcast(self, message: str, interface: str = "telegram") -> dict[str, Any]:
+        response = await self._request("POST", "/chats/admin/broadcast",
+                                       json={"message": message, "interface_filter": interface},
+                                       headers=self._admin_headers())
+        return dict(response.json())
+
+    async def claim_broadcast(self) -> dict[str, Any] | None:
+        """Рассылка из очереди сервиса или None (204 — очередь пуста)."""
+        response = await self._request("POST", "/chats/admin/broadcast/claim", params={"interface": "telegram"},
+                                       headers=self._admin_headers())
+        return None if response.status_code == 204 else dict(response.json())
+
+    async def finish_broadcast(self, broadcast_id: int, sent: int, failed: int) -> dict[str, Any]:
+        response = await self._request("POST", f"/chats/admin/broadcast/{broadcast_id}/result",
+                                       json={"sent": sent, "failed": failed}, headers=self._admin_headers())
         return dict(response.json())

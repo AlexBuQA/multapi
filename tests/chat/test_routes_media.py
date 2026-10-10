@@ -97,7 +97,7 @@ async def test_pdf_reaches_model_and_is_kept_in_history(media_app):
         chat_id = await create_chat(http)
         response = await send(http, chat_id, "Сколько ждать ответа?", ("Регламент.pdf", PDF, "application/pdf"))
         history = (await http.get(f"/chats/{chat_id}/messages")).json()
-    assert response.status_code == 200 and events(response)[-1] == {"type": "done"}
+    assert response.status_code == 200 and events(response)[-1]["type"] == "done"
     assert answer(response) == "Частей: 2, картинка: False"
     caption, document = llm.requests[-1].messages[-1].content
     assert caption.text == "Сколько ждать ответа?"
