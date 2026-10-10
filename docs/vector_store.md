@@ -17,6 +17,7 @@
 | Три примера фильтров | `scripts/qdrant_filters_demo.py` |
 | Поиск из сервиса: `GET /kb/search` | `app/routers/kb.py` |
 | Тесты | `tests/unit/test_vector_store.py` (Qdrant `:memory:`), `tests/integration/test_vector_store_live.py` (настоящий Qdrant) |
+| pgvector — та же база в Postgres, сравнение и выбор (задача 7) | раздел «pgvector» ниже |
 
 ## Qdrant в compose
 
@@ -36,7 +37,9 @@
   wget, а `/dev/tcp` — встроенная возможность bash (на нём же написан `entrypoint.sh` образа).
 - `restart: unless-stopped`, телеметрия выключена (`QDRANT__TELEMETRY_DISABLED`).
 - **`app` ждёт `qdrant: condition: service_healthy`** и получает `QDRANT_URL=http://qdrant:6333` —
-  имя сервиса в сети compose. Для uvicorn и скриптов на хосте в `.env` — `http://localhost:6333`.
+  имя сервиса в сети compose. Для uvicorn и скриптов на хосте в `.env` — `http://127.0.0.1:6333`,
+  а не `localhost`: на Windows `localhost` добавлял к каждому запросу ~250 мс (раздел «pgvector»,
+  «Задержка»).
 
 ## Коллекция `documents`
 
@@ -222,13 +225,189 @@ sanity check. Скорость тоже одинаковая: COSINE в Qdrant �
 («Команда» вместо «Профессионального», 4 900 ₽), то есть правильный ответ на вопрос со старым
 названием.
 
-## pgvector (опционально) — не делали
+## pgvector: та же база в Postgres (задача 7)
 
-В compose уже есть Postgres, но образ `postgres:16-alpine` без расширения pgvector: для опыта
-пришлось бы сменить образ на `pgvector/pgvector` и завести вторую копию данных. Для базы в 110
-фрагментов и одного сервиса оба варианта работают за миллисекунды; Qdrant выбран как основной
-заранее — ради payload-индексов, фильтров без SQL и будущего гибридного поиска (sparse-векторы)
-в RAG блока 5.3.
+Postgres в проекте уже есть (история чатов, блоки 4.1–4.4), поэтому pgvector 0.8 и halfvec
+проверены на той же выборке: те же 110 фрагментов, те же векторы, те же вопросы и фильтры.
+
+| Что | Где |
+|---|---|
+| Postgres 16 с расширением pgvector 0.8.7 — образ `pgvector/pgvector:0.8.7-pg16-bookworm` | сервис `postgres` в `compose.yaml` |
+| Таблица `kb.documents`, загрузка и поиск — `PgVectorStore` | `app/services/pgvector_store.py` |
+| Загрузка тех же фрагментов | `scripts/load_to_pgvector.py` |
+| Сравнение с Qdrant: задержка, совпадение, фильтры, размеры | `scripts/compare_pgvector.py` |
+| Тесты | `tests/unit/test_pgvector_store.py`, `tests/integration/test_pgvector_live.py` (настоящий Postgres) |
+
+### Как устроено
+
+- **Образ** — официальный `pgvector/pgvector:0.8.7-pg16-bookworm`: тот же Postgres 16 и
+  расширение pgvector 0.8.7, том `pg-data` прежний. Сначала pgvector собирался из исходников в
+  прежнем `postgres:16-alpine`, но на Windows сборка упала: `apk` и `git` в ней ходят по HTTPS, а
+  сеть подменяет сертификаты (`TLS: server certificate not trusted` — как у бота, см.
+  [`docs/bot.md`](bot.md)). Готовый образ Docker Desktop скачивает сам, как Qdrant, и при сборке
+  сеть не нужна.
+- **Том после смены образа.** Новый образ — на Debian (glibc), а том создан на Alpine (musl), где
+  строки сортируются иначе. Данные читаются как есть, но индексы по текстовым колонкам надо один
+  раз перестроить: `docker compose exec postgres reindexdb -U multapi --all`. Новому тому это
+  не нужно.
+- **Таблица** — как в задании: `id uuid PRIMARY KEY, embedding vector(1024) NOT NULL,
+  payload jsonb NOT NULL`, в схеме `kb`. Alembic сравнивает модели чата только со схемой
+  `public`, и таблица в `kb` не попадёт в `alembic revision --autogenerate` как лишняя
+  (`drop_table`). `id` и `payload` — те же, что у точек Qdrant.
+- **Индексы:**
+  - HNSW `vector_cosine_ops` с `m = 16, ef_construction = 100` — как у коллекции Qdrant (у
+    pgvector по умолчанию `ef_construction = 64`);
+  - HNSW по выражению `embedding::halfvec(1024)` с `halfvec_cosine_ops` — половинная точность,
+    2 байта на число вместо 4. Чтобы Postgres взял этот индекс, запрос сортирует по тому же
+    выражению: `ORDER BY embedding::halfvec(1024) <=> $1::halfvec(1024)`;
+  - GIN `jsonb_path_ops` по `payload` — для условий вида `payload @> '{"category": "billing"}'`.
+- **Загрузка** идемпотентна: `INSERT … ON CONFLICT (id) DO UPDATE … WHERE (embedding, payload)
+  IS DISTINCT FROM …`. Повторный запуск — «новых 0, изменено 0, без изменений 110»: неизменённые
+  строки не переписываются, и мёртвые версии строк не копятся. Таблица под другую размерность —
+  ошибка с подсказкой `--recreate`, как у коллекции Qdrant.
+- **Score** = `1 − (embedding <=> вектор)`: `<=>` — косинусное расстояние, так что шкала та же,
+  что у Qdrant с COSINE.
+
+### Задержка
+
+`python scripts/compare_pgvector.py --today 2026-10-10`: те же пять вопросов, что в «Метрике».
+Вектор вопроса считается один раз, замеряется только поиск top-5 с payload — от вызова в Python
+до ответа: 3 прогрева и 50 замеров на вопрос и способ. Способов четыре: Qdrant (REST, как в
+сервисе), pgvector с планом по умолчанию, pgvector только по HNSW (`enable_seqscan = off`) и
+только по HNSW над halfvec. Отдельно снимается время самого поиска на сервере: у Qdrant — поле
+`time` ответа, у Postgres — `EXPLAIN ANALYZE`.
+
+Windows, 11.10.2026: Qdrant и Postgres в Docker Desktop, `bge-m3`, `QDRANT_URL=http://127.0.0.1:6333`;
+мс, медиана по всем вопросам (p95):
+
+| | Qdrant | pgvector, план по умолчанию | pgvector, HNSW | pgvector, HNSW halfvec |
+|---|---|---|---|---|
+| От вызова в Python до ответа | 5.13 (13.51) | 1.83 (3.21) | 1.81 (2.86) | 1.59 (2.26) |
+| Поиск на сервере | 0.52 | 0.40 | 0.16 | 0.19 |
+| Остальное: соединение, формат ответа, разбор в Python | 4.61 | 1.43 | 1.65 | 1.40 |
+
+По вопросам Qdrant — от 4.80 до 7.46 мс, pgvector — от 1.40 до 2.51 мс. Песочница (Linux, без
+Docker) дала ту же картину: 3.49 / 1.02 / 1.01 / 0.72 мс, на сервере 0.40 / 0.50 / 0.16 / 0.20.
+
+- **План.** На 110 строках планировщик Postgres выбирает перебор (`Limit → Sort → Seq Scan`), а
+  не HNSW: на маленькой таблице так дешевле. Qdrant тоже ищет перебором — база меньше его порога
+  индексации. Поэтому обе базы в этом замере ищут точно, и top-5 совпали на всех вопросах с
+  разницей score 0.00000.
+- **Где время.** Сам поиск на сервере — доли миллисекунды у обоих. Разница во времени ответа — это
+  клиент. `VectorStore` открывает к Qdrant новое TCP-соединение на каждый запрос (почему — ниже),
+  дальше HTTP, JSON и модели pydantic в `qdrant-client`. У Postgres одно соединение `asyncpg` и
+  двоичный протокол. Вектор вопроса от `bge-m3` на CPU и ответ модели занимают на порядки больше,
+  так что на время ответа пользователю выбор хранилища здесь не влияет.
+
+Две находки этого замера — обе про дорогу до Qdrant, а не про сам Qdrant:
+
+- **`localhost` на Windows — +260 мс к каждому запросу.** Первый прогон шёл с
+  `QDRANT_URL=http://localhost:6333`: Qdrant отвечал за 264.52 мс при 0.56 мс поиска на сервере.
+  Сошлись две причины. Для адресов `localhost` и `127.0.0.1` `qdrant-client` открывает новое
+  соединение на каждый запрос. А `localhost` в Windows сначала разрешается в IPv6-адрес `::1`, где
+  Qdrant не слушает (`netstat`: только `127.0.0.1:6333`), и клиент около 250 мс ждёт, прежде чем
+  попробовать IPv4. С `127.0.0.1` — 5.13 мс. Поэтому в `.env.example` теперь
+  `QDRANT_URL=http://127.0.0.1:6333`, как у `DATABASE_URL`. Этим же объясняется медленная загрузка
+  в блоке 5.2: 110 точек записывались около 2 с.
+- **Keep-alive — +40 мс к каждому ответу.** `qdrant-client` отключает keep-alive для `localhost`
+  не случайно: на переиспользуемом соединении каждый ответ Qdrant ждёт ~40 мс — задержанное
+  подтверждение TCP (delayed ACK) вместе с алгоритмом Нейгла. Замер в песочнице: 45.9 мс с
+  keep-alive против 4.5 мс без; `TCP_NODELAY` на стороне клиента не помогает. Для адреса
+  `qdrant:6333`, по которому `app` ходит в compose, клиент keep-alive оставлял — то есть каждый
+  поиск сервиса платил эти 40 мс. Теперь `VectorStore` отключает keep-alive для всех локальных
+  адресов по HTTP (`localhost`, `127.0.0.1`, имена сервисов compose, частная сеть); для внешнего
+  Qdrant по HTTPS пул соединений остаётся — там новое соединение означает новое TLS-рукопожатие.
+
+### halfvec
+
+- **Выдача** — та же: top-5 по индексу halfvec совпали с полной точностью на всех вопросах,
+  разница score с `bge-m3` — не больше 0.00002. Трёх знаков половинной точности для ранжирования
+  хватает.
+- **Размер** — одинаковый на Windows и в песочнице:
+
+  | Объект | КБ |
+  |---|---|
+  | таблица с TOAST (векторы `vector(1024)`) | 744 |
+  | HNSW `vector` | 888 |
+  | HNSW `halfvec` | 304 |
+  | GIN по payload | 40 |
+  | первичный ключ | 16 |
+
+  Индекс halfvec меньше втрое, а не вдвое: вектор `vector(1024)` занимает 4 КБ, и в страницу
+  индекса (8 КБ) помещается один, а `halfvec(1024)` — 2 КБ, и их помещается три. Таблицу можно
+  уменьшить так же, храня колонку сразу как `halfvec(1024)`; оставлен `vector` — как в задании, с
+  полной точностью для перебора.
+
+### Фильтры: SQL `WHERE` против `Filter`
+
+Те же три фильтра, что в «Фильтрах» выше, в SQL (`$1` — вектор вопроса):
+
+```sql
+-- 1. Match по строке
+SELECT id, payload, 1 - (embedding <=> $1) AS score FROM kb.documents
+WHERE payload @> '{"source": "release_notes.md"}'
+ORDER BY embedding <=> $1 LIMIT 3;
+
+-- 2. Range по дате
+... WHERE (payload->>'created_at')::timestamptz >= now() - interval '30 days' ...
+
+-- 3. must + must_not
+... WHERE payload @> '{"category": "billing"}'
+      AND NOT payload @> '{"status": "archived"}' ...
+```
+
+Скрипт выполняет их с той же датой «сегодня», что `qdrant_filters_demo.py`, и сравнивает top-3.
+На Windows с `bge-m3` совпали все три — те же документы и те же score, что в таблицах «Фильтров»
+выше (например, для must + must_not: RN-2025-12-16 — 0.661, FAQ-01 — 0.615, RN-2026-09-29 — 0.599).
+
+| | Qdrant `Filter` | SQL `WHERE` |
+|---|---|---|
+| Как пишется | объекты Python: `FieldCondition`, `MatchValue`, `DatetimeRange` | обычный SQL: `payload @> '{…}'`, `payload->>'поле'` с приведением типа |
+| Типы | тип задаёт payload-индекс (KEYWORD, DATETIME): дата сравнивается как дата | в jsonb даты — строки: нужен `::timestamptz`, а для индекса по дате — отдельная колонка |
+| «Не равно» | `must_not` пропускает точки без поля | `NOT payload @> …` тоже пропускает строки без поля; `payload->>'status' <> 'archived'` их бы потерял (NULL) |
+| Другие данные | только payload точки | JOIN с любыми таблицами (чаты, оценки, права доступа) и одна транзакция с записью истории |
+| Фильтр и HNSW | условие проверяется во время обхода графа: top-k полный при любой редкости условия | условие проверяется после того, как HNSW отдал кандидатов (`hnsw.ef_search` = 40): при редком условии строк меньше top-k — опыт ниже |
+
+### HNSW + WHERE: редкое условие
+
+Вопрос «Как включить вход по отпечатку пальца в приложении?», условие — только архивные редакции
+(8 строк из 110), top-5. Чтобы Postgres взял HNSW, перебор и GIN выключены (`enable_seqscan`,
+`enable_bitmapscan` = off) — так он поступит сам, когда таблица вырастет. Windows, `bge-m3` (в
+песочнице — те же 5 / 5 / 1 / 5):
+
+| Способ | План | Строк |
+|---|---|---|
+| Qdrant, `Filter` status = archived | фильтр внутри поиска | 5 |
+| pgvector, план по умолчанию | `Limit → Sort → Seq Scan` | 5 |
+| pgvector, только HNSW, `hnsw.ef_search = 40` | `Limit → Index Scan (documents_embedding_hnsw)` | 1 |
+| pgvector, только HNSW + `hnsw.iterative_scan = strict_order` | `Limit → Index Scan (documents_embedding_hnsw)` | 5 |
+
+HNSW отдаёт 40 ближайших строк, и только после этого Postgres проверяет условие — архивных среди
+них почти нет. Итеративное сканирование (с pgvector 0.8) продолжает обход графа, пока не наберёт
+top-k. В Qdrant такой настройки нет: фильтр работает внутри поиска.
+
+### Выбор: оставляю Qdrant
+
+- **Скорость не решает.** Поиск на сервере — доли миллисекунды у обоих (0.52 мс у Qdrant, 0.16–0.40
+  у pgvector); разница во времени ответа — это клиент и дорога до сервера, а вектор вопроса и ответ
+  модели дольше на порядки.
+- **Фильтры без ловушек.** В Qdrant top-k полный при любом фильтре. В pgvector, как только
+  планировщик перейдёт на HNSW (таблица вырастет), без `hnsw.iterative_scan` редкие условия
+  начнут молча терять результаты — опыт выше. RAG блока 5.3 весь построен на фильтрах (статус,
+  раздел, дата).
+- **Блок 5.3.** LlamaIndex `QdrantVectorStore` подключается к этой же коллекции. Для вопросов с
+  кодами ошибок и названиями тарифов пригодится гибридный поиск (sparse + dense): в Qdrant он
+  есть в Query API, в pgvector его собирают вручную — полнотекстовый поиск Postgres или
+  `sparsevec` и слияние результатов в SQL.
+- **Отдельный сервис.** Индекс векторов не делит память и диск с историей чатов и
+  масштабируется отдельно.
+
+Что дал бы pgvector: на один сервис меньше в compose, JOIN с историей чатов и транзакции,
+привычный SQL. Если бы база знаний оставалась небольшой, а поиск — только по смыслу, без
+гибридного, pgvector был бы проще в эксплуатации.
+
+Таблица `kb.documents` — копия для сравнения, сервис её не читает. Удалить:
+`python scripts/load_to_pgvector.py --drop` (расширение остаётся — сравнение можно повторить).
 
 ## Проверка
 
@@ -240,4 +419,12 @@ python scripts/load_to_qdrant.py                 # новых 0, points_count: 1
 python scripts/compare_metrics.py
 python scripts/qdrant_filters_demo.py --today 2026-10-10
 pytest tests/unit/test_vector_store.py tests/integration/test_vector_store_live.py -v
+
+# pgvector (задача 7)
+docker compose up -d postgres                    # образ pgvector/pgvector, том pg-data тот же
+docker compose exec postgres reindexdb -U multapi --all   # один раз для тома со старого образа
+python scripts/load_to_pgvector.py               # count(*): 110
+python scripts/load_to_pgvector.py               # новых 0, изменено 0, без изменений 110
+python scripts/compare_pgvector.py --today 2026-10-10
+pytest tests/unit/test_pgvector_store.py tests/integration/test_pgvector_live.py -v
 ```

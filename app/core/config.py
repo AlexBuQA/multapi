@@ -401,7 +401,8 @@ class Settings(BaseSettings):
     admin_token: SecretStr | None = None
 
     # --- Векторная база Qdrant (блок 5.2), app/services/vector_store.py ---
-    # Адрес REST API Qdrant: на хосте — http://localhost:6333, в compose — http://qdrant:6333
+    # Адрес REST API Qdrant: на хосте — http://127.0.0.1:6333 (не localhost: .env.example), в compose —
+    # http://qdrant:6333
     # (задан в compose.yaml). Пусто или none — векторный поиск выключен, сервис работает без него
     # (none — чтобы выключить его переменной окружения поверх .env, например в тестах).
     qdrant_url: str | None = None
@@ -465,7 +466,7 @@ class Settings(BaseSettings):
             return None
         value = value.strip().rstrip("/")
         if not value.startswith(("http://", "https://")):
-            raise ValueError("QDRANT_URL: ожидается адрес вида http://localhost:6333")
+            raise ValueError("QDRANT_URL: ожидается адрес вида http://127.0.0.1:6333")
         return value
 
     @field_validator("qdrant_collection")

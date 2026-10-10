@@ -27,7 +27,9 @@ import importlib.metadata
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import urlsplit
 
+import httpx
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (
@@ -82,7 +84,8 @@ class VectorStoreUnavailable(VectorStoreError):
 class VectorStore:
     def __init__(self, url: str | None, api_key: str | None, collection: str, dim: int, *,
                  distance: Distance = Distance.COSINE, timeout: int = 30,
-                 client: AsyncQdrantClient | None = None) -> None:
+                 client: AsyncQdrantClient | None = None, **client_options: Any) -> None:
+        """client_options — дополнительные параметры AsyncQdrantClient, например limits (пул соединений)."""
         if client is None:
             if not url:
                 raise VectorStoreError("QDRANT_URL не задан: укажите адрес Qdrant в .env (пример — в .env.example)")
@@ -91,9 +94,18 @@ class VectorStore:
                     # Ключ по HTTP — норма для Qdrant на этом компьютере и в сети compose;
                     # для внешнего адреса предупреждение остаётся: там нужен https.
                     warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
+                if is_local_url(url) and urlsplit(url).scheme == "http":
+                    # Новое соединение на каждый запрос: на переиспользуемом (keep-alive) каждый
+                    # ответ Qdrant ждёт ~40 мс — задержанное подтверждение TCP вместе с алгоритмом
+                    # Нейгла (замер: 45,9 мс против 4,5 мс). qdrant-client сам так делает только для
+                    # localhost и 127.0.0.1, а app в compose ходит по имени сервиса qdrant. Для внешнего Qdrant
+                    # по https keep-alive остаётся: там новое соединение — новое TLS-рукопожатие.
+                    client_options.setdefault("limits", httpx.Limits(max_connections=None,
+                                                                     max_keepalive_connections=0))
                 # check_compatibility=False: клиент сверял бы версии в фоновом потоке синхронным
                 # запросом при создании; версию сверяет ensure_collection — асинхронно и в лог.
-                client = AsyncQdrantClient(url=url, api_key=api_key, timeout=timeout, check_compatibility=False)
+                client = AsyncQdrantClient(url=url, api_key=api_key, timeout=timeout, check_compatibility=False,
+                                           **client_options)
         self.client = client
         self.url = url or ":memory:"
         self.collection = collection
@@ -103,11 +115,12 @@ class VectorStore:
 
     @classmethod
     def from_settings(cls, cfg: Settings, *, collection: str | None = None,
-                      distance: Distance = Distance.COSINE) -> VectorStore:
+                      distance: Distance = Distance.COSINE, **client_options: Any) -> VectorStore:
         if not cfg.qdrant_url or cfg.embedding_dim is None:
             raise VectorStoreError("Векторная база не настроена: задайте QDRANT_URL и EMBEDDING_DIM в .env")
         key = cfg.qdrant_api_key.get_secret_value() if cfg.qdrant_api_key else None
-        return cls(cfg.qdrant_url, key, collection or cfg.qdrant_collection, cfg.embedding_dim, distance=distance)
+        return cls(cfg.qdrant_url, key, collection or cfg.qdrant_collection, cfg.embedding_dim, distance=distance,
+                   **client_options)
 
     # -------------------------------------------------------- коллекция
     async def ensure_collection(self) -> None:
@@ -231,14 +244,24 @@ class VectorStore:
             return await call
         except ResponseHandlingException as exc:
             raise VectorStoreUnavailable(
-                f"Нет связи с Qdrant ({self.url}): {exc}. Запущен ли он — docker compose up -d qdrant; "
-                "верен ли QDRANT_URL") from exc
+                f"Нет связи с Qdrant ({self.url}): {connection_error(exc)}. Запущен ли он — "
+                "docker compose up -d qdrant; верен ли QDRANT_URL") from exc
         except UnexpectedResponse as exc:
             if exc.status_code in (401, 403):
                 raise VectorStoreError(f"Qdrant ({self.url}) не принял ключ ({exc.status_code}): QDRANT_API_KEY в "
                                        ".env должен совпадать с ключом контейнера") from exc
             detail = exc.content.decode("utf-8", "replace")[:300] if exc.content else exc.reason_phrase
             raise VectorStoreError(f"Qdrant ответил {exc.status_code}: {detail}") from exc
+
+
+def connection_error(exc: ResponseHandlingException) -> str:
+    """Причина обрыва связи. Текст ResponseHandlingException всегда пуст — причина в exc.source
+    (ConnectError, ReadTimeout…); у тайм-аутов httpx и собственный текст бывает пустым."""
+    source = getattr(exc, "source", None) or exc.__cause__
+    if source is None:
+        return type(exc).__name__
+    text = str(source).strip()
+    return f"{type(source).__name__}: {text}" if text else f"{type(source).__name__} — нет ответа"
 
 
 # ---------------------------------------------------------------- фильтры и сервис

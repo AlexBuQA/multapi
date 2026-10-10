@@ -130,7 +130,8 @@ class TestChatStorageFiles(unittest.TestCase):
     def test_postgres_service(self):
         compose = _read("compose.yaml")
         postgres = _service_block(compose, "postgres")
-        self.assertIn("image: postgres:16-alpine", postgres)
+        # Блок 5.2, задача 7: Postgres 16 с расширением pgvector (TestPgvectorImage).
+        self.assertIn("image: pgvector/pgvector:0.8.7-pg16-bookworm", postgres)
         self.assertRegex(postgres, r'ports:\n(\s+#.*\n)*\s+- "127\.0\.0\.1:5433:5432"')   # только loopback
         self.assertIn('test: ["CMD", "pg_isready", "-U", "multapi", "-d", "multapi"]', postgres)
         # Блок 4.4: том называется pg-data (в блоке 4.1 был pg_data).
@@ -144,6 +145,38 @@ class TestChatStorageFiles(unittest.TestCase):
         self.assertIn("CHAT_STORAGE_DIR: /app/var/chats", app)
         self.assertRegex(app, r"volumes:\n\s+- chat_data:/app/var/chats")
         self.assertRegex(app, r"\n\s+postgres:\n\s+condition: service_healthy")
+
+
+class TestPgvectorImage(unittest.TestCase):
+    """Блок 5.2, задача 7: pgvector в существующем postgres — официальный образ, тот же мажор и том."""
+
+    def setUp(self) -> None:
+        self.postgres = _service_block(_read("compose.yaml"), "postgres")
+
+    def test_official_image_pinned_to_same_major(self):
+        image = re.search(r"\n    image: (\S+)\n", self.postgres).group(1)
+        # Точная версия pgvector, Postgres 16 — как у тома pg-data, Debian — явно, а не «какой окажется».
+        match = re.fullmatch(r"pgvector/pgvector:(\d+)\.(\d+)\.(\d+)-pg16-bookworm", image)
+        self.assertIsNotNone(match, image)
+        self.assertGreaterEqual(tuple(map(int, match.groups())), (0, 8, 0))   # 0.8: итеративный поиск HNSW
+        self.assertNotIn("build:", self.postgres)            # ничего не собирается: сеть не нужна при сборке
+
+    def test_volume_migration_is_documented(self):
+        # Том pg-data создан на Alpine (musl), образ — на Debian (glibc): индексы по тексту перестраиваются.
+        command = "docker compose exec postgres reindexdb -U multapi --all"
+        self.assertIn(command, self.postgres)
+        self.assertIn(command, _read("docs/vector_store.md"))
+
+    def test_env_example_uses_ipv4_loopback(self):
+        # localhost в Windows сначала пробует ::1, а qdrant-client для локального адреса открывает
+        # соединение на каждый запрос: +250 мс к каждому запросу (найдено на Windows, задача 7).
+        env = _read(".env.example")
+        self.assertIn("QDRANT_URL=http://127.0.0.1:6333\n", env)
+        self.assertNotRegex(env, r"(?m)^QDRANT_URL=http://localhost")
+
+    def test_volume_and_port_unchanged(self):
+        self.assertRegex(self.postgres, r"volumes:\n(\s+#.*\n)*\s+- pg-data:/var/lib/postgresql/data")
+        self.assertIn('"127.0.0.1:5433:5432"', self.postgres)
 
 
 class TestProductionCompose(unittest.TestCase):
