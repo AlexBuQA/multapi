@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (
     Distance,
@@ -89,23 +89,7 @@ class VectorStore:
         if client is None:
             if not url:
                 raise VectorStoreError("QDRANT_URL не задан: укажите адрес Qdrant в .env (пример — в .env.example)")
-            with warnings.catch_warnings():
-                if is_local_url(url):
-                    # Ключ по HTTP — норма для Qdrant на этом компьютере и в сети compose;
-                    # для внешнего адреса предупреждение остаётся: там нужен https.
-                    warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
-                if is_local_url(url) and urlsplit(url).scheme == "http":
-                    # Новое соединение на каждый запрос: на переиспользуемом (keep-alive) каждый
-                    # ответ Qdrant ждёт ~40 мс — задержанное подтверждение TCP вместе с алгоритмом
-                    # Нейгла (замер: 45,9 мс против 4,5 мс). qdrant-client сам так делает только для
-                    # localhost и 127.0.0.1, а app в compose ходит по имени сервиса qdrant. Для внешнего Qdrant
-                    # по https keep-alive остаётся: там новое соединение — новое TLS-рукопожатие.
-                    client_options.setdefault("limits", httpx.Limits(max_connections=None,
-                                                                     max_keepalive_connections=0))
-                # check_compatibility=False: клиент сверял бы версии в фоновом потоке синхронным
-                # запросом при создании; версию сверяет ensure_collection — асинхронно и в лог.
-                client = AsyncQdrantClient(url=url, api_key=api_key, timeout=timeout, check_compatibility=False,
-                                           **client_options)
+            client = make_qdrant_client(url, api_key, timeout=timeout, **client_options)
         self.client = client
         self.url = url or ":memory:"
         self.collection = collection
@@ -252,6 +236,34 @@ class VectorStore:
                                        ".env должен совпадать с ключом контейнера") from exc
             detail = exc.content.decode("utf-8", "replace")[:300] if exc.content else exc.reason_phrase
             raise VectorStoreError(f"Qdrant ответил {exc.status_code}: {detail}") from exc
+
+
+def connection_options(url: str) -> dict[str, Any]:
+    """Новое соединение на каждый запрос для Qdrant по HTTP на локальном адресе. На
+    переиспользуемом (keep-alive) каждый ответ Qdrant ждёт ~40 мс — задержанное подтверждение
+    TCP вместе с алгоритмом Нейгла (замер: 45,9 мс против 4,5 мс). qdrant-client сам так делает
+    только для localhost и 127.0.0.1, а app в compose ходит по имени сервиса qdrant. Для внешнего
+    Qdrant по https keep-alive остаётся: там новое соединение — новое TLS-рукопожатие."""
+    if is_local_url(url) and urlsplit(url).scheme == "http":
+        return {"limits": httpx.Limits(max_connections=None, max_keepalive_connections=0)}
+    return {}
+
+
+def make_qdrant_client(url: str, api_key: str | None, *, timeout: int = 30, asynchronous: bool = True,
+                       **options: Any) -> Any:
+    """AsyncQdrantClient (или QdrantClient, asynchronous=False — для LlamaIndex, блок 5.3) с
+    настройками проекта: connection_options, без проверки версии при создании и без
+    предупреждения о ключе по HTTP для локального адреса."""
+    cls = AsyncQdrantClient if asynchronous else QdrantClient
+    with warnings.catch_warnings():
+        if is_local_url(url):
+            # Ключ по HTTP — норма для Qdrant на этом компьютере и в сети compose;
+            # для внешнего адреса предупреждение остаётся: там нужен https.
+            warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
+        # check_compatibility=False: клиент сверял бы версии в фоновом потоке синхронным
+        # запросом при создании; версию сверяет ensure_collection — асинхронно и в лог.
+        return cls(url=url, api_key=api_key, timeout=timeout, check_compatibility=False,
+                   **{**connection_options(url), **options})
 
 
 def connection_error(exc: ResponseHandlingException) -> str:

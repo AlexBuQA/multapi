@@ -35,6 +35,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Блок 4.1: миграции Alembic (docker compose exec app alembic upgrade head) и папка для
 # истории чатов в JSONL — её владельцем станет appuser, и том chat_data унаследует права.
 COPY data/knowledge_base.json ./data/knowledge_base.json
+# Блок 5.3: корпус RAG — для индексации из контейнера (python -m app.services.rag --build).
+COPY data/rag-block-03/ ./data/rag-block-03/
 COPY alembic.ini ./
 COPY migrations/ ./migrations/
 COPY app/ ./app/

@@ -3,9 +3,9 @@
 
 В .env разработчика QDRANT_URL указывает на настоящий Qdrant, и тесты, которые запускают
 lifespan сервиса (TestClient, lifespan_context), стали бы создавать в нём коллекцию.
-QDRANT_URL=none выключает VectorStore поверх .env (пустое значение pydantic-settings
-пропустил бы и взял .env). Тесты векторной базы задают настройки явно, а живой тест
-(tests/integration/test_vector_store_live.py) читает .env сам.
+QDRANT_URL=none выключает VectorStore и RAG (блок 5.3) поверх .env (пустое значение
+pydantic-settings пропустил бы и взял .env). Тесты векторной базы и RAG задают настройки явно, а
+живые тесты (tests/integration/test_vector_store_live.py, test_rag_live.py) читают .env сами.
 """
 from __future__ import annotations
 

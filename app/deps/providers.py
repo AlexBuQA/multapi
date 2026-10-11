@@ -9,7 +9,7 @@ Annotated-алиасы, а тесты подменяют их через app.dep
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Request
 from openai import AsyncOpenAI
@@ -58,8 +58,19 @@ def get_vector_store(request: Request) -> VectorStore:
     return store
 
 
+def get_rag(request: Request) -> Any:
+    """RAGService из lifespan (блок 5.3) — один на процесс. Нет QDRANT_URL — 503. Тип — Any:
+    импорт LlamaIndex остаётся в app/services/rag.py, а не в каждом модуле с зависимостями."""
+    rag = getattr(request.app.state, "rag", None)
+    if rag is None:
+        raise RequestError(503, "rag_not_configured",
+                           "RAG выключен: в .env сервиса не задан QDRANT_URL (и EMBEDDING_DIM).")
+    return rag
+
+
 LimiterDep = Annotated[asyncio.Semaphore, Depends(get_limiter)]
 VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
+RagDep = Annotated[Any, Depends(get_rag)]
 RedactorDep = Annotated[NameRedactor | None, Depends(get_redactor)]
 CanaryDep = Annotated[str | None, Depends(get_canary)]
 

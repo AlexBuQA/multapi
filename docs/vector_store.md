@@ -2,7 +2,7 @@
 
 Эмбеддинги блока 5.1 (`bge-m3`, 1024 числа) лежат в Qdrant — коллекция `documents`, 110
 фрагментов базы знаний с метаданными. Поиск — за миллисекунды и с фильтрами по метаданным.
-На блоке 5.3 к этой же коллекции подключится LlamaIndex (`QdrantVectorStore`).
+На блоке 5.3 RAG на LlamaIndex работает с этим же Qdrant, но в своей коллекции `rag_block_03` — почему, в [`docs/rag.md`](rag.md#коллекция-отдельная-rag_block_03).
 
 ## Что где
 
@@ -106,9 +106,10 @@
 
 ## `VectorStore` и сервис
 
-- `app/services/vector_store.py` — единственное место, где есть `qdrant-client`: на блоке 5.3
-  поиск переедет на LlamaIndex, а интерфейс `ensure_collection()`, `upsert(points, batch_size=256)`,
-  `search(query_vector, top_k=5, query_filter=None) -> list[ScoredPoint]` останется.
+- `app/services/vector_store.py` — единственное место блока 5.2, где есть `qdrant-client`:
+  `ensure_collection()`, `upsert(points, batch_size=256)`,
+  `search(query_vector, top_k=5, query_filter=None) -> list[ScoredPoint]`. RAG блока 5.3 ходит в
+  Qdrant через LlamaIndex (`QdrantVectorStore`) в своей коллекции — [`docs/rag.md`](rag.md).
 - `search` — через `query_points` (старые методы `search` в Qdrant 1.19 устарели и убраны из
   спецификации REST API), с payload.
 - **Один клиент на процесс.** В сервисе `VectorStore` создаёт lifespan (`app.state.vector_store`) и
@@ -393,12 +394,12 @@ top-k. В Qdrant такой настройки нет: фильтр работа
   модели дольше на порядки.
 - **Фильтры без ловушек.** В Qdrant top-k полный при любом фильтре. В pgvector, как только
   планировщик перейдёт на HNSW (таблица вырастет), без `hnsw.iterative_scan` редкие условия
-  начнут молча терять результаты — опыт выше. RAG блока 5.3 весь построен на фильтрах (статус,
-  раздел, дата).
-- **Блок 5.3.** LlamaIndex `QdrantVectorStore` подключается к этой же коллекции. Для вопросов с
-  кодами ошибок и названиями тарифов пригодится гибридный поиск (sparse + dense): в Qdrant он
-  есть в Query API, в pgvector его собирают вручную — полнотекстовый поиск Postgres или
-  `sparsevec` и слияние результатов в SQL.
+  начнут молча терять результаты — опыт выше. Поиск по базе знаний (`/kb/search`) весь построен
+  на фильтрах (статус, раздел, дата).
+- **Блок 5.3.** RAG на LlamaIndex работает через `QdrantVectorStore` — в своей коллекции того же
+  Qdrant (`docs/rag.md`). Для вопросов с кодами ошибок и названиями тарифов пригодится гибридный
+  поиск (sparse + dense): в Qdrant он есть в Query API, в pgvector его собирают вручную —
+  полнотекстовый поиск Postgres или `sparsevec` и слияние результатов в SQL.
 - **Отдельный сервис.** Индекс векторов не делит память и диск с историей чатов и
   масштабируется отдельно.
 

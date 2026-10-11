@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.2
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.3
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -22,6 +22,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 4.4 — Production-обвязка:** модерация вопросов и ответов в сервисе (`app/moderation/`: ключевые слова из YAML и OpenAI Moderation, `403 moderation_blocked`, замена ответа событием `moderation`), admin API `/chats/admin/*` под `X-Admin-Token` — статистика, пользователи, очередь рассылок; в боте — `/stats`, `/users`, `/broadcast` для `BOT_ADMIN_IDS` и оценки ответов 👍/👎; `docker compose up` поднимает app, бот и Postgres одной командой — см. раздел [«Блок 4.4»](#блок-44--production-обвязка).
 - **Блок 5.1 — Эмбеддинги и семантический поиск:** `app/services/embeddings.py` — `embed_texts` / `embed_query` / `embed_documents` с батчами, повторами tenacity, L2-нормализацией и кешем (память процесса + SQLite, ключ зависит от модели); модель — `bge-m3` в Ollama, выбор обоснован ruMTEB и мини-бенчмарком на своих данных, посчитана стоимость индексации — см. раздел [«Блок 5.1»](#блок-51--эмбеддинги-и-семантический-поиск) и [`docs/embeddings.md`](docs/embeddings.md).
 - **Блок 5.2 — Векторная база Qdrant:** сервис `qdrant` в `compose.yaml` (ключ API, том, проверка по TCP), коллекция `documents` под `bge-m3` (1024, COSINE, HNSW m=16) с payload-индексами, база знаний из 110 фрагментов с датами и разделами, идемпотентная загрузка `scripts/load_to_qdrant.py`, `app/services/vector_store.py` на `AsyncQdrantClient`, `GET /kb/search`, сравнение cosine и dot, три примера фильтров — см. раздел [«Блок 5.2»](#блок-52--векторная-база-qdrant) и [`docs/vector_store.md`](docs/vector_store.md) Опционально (задача 7) — pgvector 0.8 в том же Postgres: задержка, halfvec, фильтры SQL против `Filter`; выбор — остаётся Qdrant.
+- **Блок 5.3 — Архитектура RAG с LlamaIndex:** корпус из 10 документов (`.md`, `.txt`, `.pdf`, `.docx`) в своей коллекции Qdrant `rag_block_03`, `RAGService` на компонентах LlamaIndex (`SimpleDirectoryReader`, `SentenceSplitter`, `QdrantVectorStore`, query engine) и та же цепочка без фреймворка, порог «не знаю», `POST /rag/query`, сравнение версий и прогон пяти вопросов — см. раздел [«Блок 5.3»](#блок-53--архитектура-rag-с-llamaindex) и [`docs/rag.md`](docs/rag.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -104,8 +105,9 @@ multapi/
 │   ├── core/                # блок 3.4: config.py (Settings), exceptions.py (ошибки LLM); 3.7: llm_output.py;
 │   │                        #   3.8: charset.py (charset=utf-8 у JSON-ответов)
 │   ├── deps/providers.py    # блок 3.4: внедрение зависимостей
-│   ├── routers/             # блок 3.4: chat.py, models.py, health.py; 5.2: kb.py (GET /kb/search)
-│   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py; 5.2: kb.py
+│   ├── routers/             # блок 3.4: chat.py, models.py, health.py; 5.2: kb.py (GET /kb/search);
+│   │                        #   5.3: rag.py (POST /rag/query)
+│   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py; 5.2: kb.py; 5.3: rag.py
 │   ├── services/
 │   │   ├── llm.py           # блок 3.4: LLMService — кеш в Redis, поток, перевод ошибок; 3.6: span и лог вызова
 │   │   ├── prompts.py       # блок 3.7: системный промпт ассистента со статьями руководства
@@ -115,6 +117,9 @@ multapi/
 │   │   ├── vector_store.py  # блок 5.2: VectorStore — ensure_collection / upsert / search над Qdrant
 │   │   ├── documents.py     # блок 5.2: фрагменты базы знаний из data/ и их payload, id uuid5
 │   │   ├── pgvector_store.py # блок 5.2, задача 7: та же база в Postgres + pgvector — для сравнения
+│   │   ├── rag.py           # блок 5.3: RAGService на LlamaIndex — индексация, ответ, CLI
+│   │   ├── rag_baremetal.py # блок 5.3: тот же RAG без фреймворка — для сравнения
+│   │   ├── rag_common.py    # блок 5.3: промпт, отказ «нет в базе», форма ответа, ошибки — общие для обеих
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -147,10 +152,12 @@ multapi/
 │   ├── release_notes.md     # блок 5.2: заметки «Что нового», 24 фрагмента с датами
 │   ├── faq.md               # блок 5.2: частые вопросы, 22 фрагмента
 │   ├── archive/             # блок 5.2: прежние редакции статей (status: archived)
+│   ├── rag-block-03/        # блок 5.3: корпус RAG — 10 файлов .md/.txt/.pdf/.docx, один не по теме
 │   └── service_status.json  # статус компонентов сервиса
 ├── examples/
 │   ├── run_tool_call.py     # прогон трёх тест-запросов
-│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4; chats_* — блоки 4.1, 4.3)
+│   └── requests/            # тела запросов к сервису для curl.exe (блок 3.4; chats_* — блоки 4.1, 4.3;
+│                            #   rag_query*.json — блок 5.3)
 ├── scripts/                 # блок 3.3
 │   ├── benchmark.py         # бенчмарк sync vs async -> benchmark_results.md
 │   ├── benchmark_results.md # результаты локального прогона (мок и Ollama)
@@ -168,13 +175,15 @@ multapi/
 │   ├── compare_metrics.py   # блок 5.2: cosine против dot на пяти вопросах
 │   ├── qdrant_filters_demo.py # блок 5.2: фильтры match, по дате, must + must_not
 │   ├── load_to_pgvector.py  # блок 5.2, задача 7: та же база знаний в kb.documents (pgvector)
-│   └── compare_pgvector.py  # блок 5.2, задача 7: Qdrant против pgvector — задержка, halfvec, фильтры
+│   ├── compare_pgvector.py  # блок 5.2, задача 7: Qdrant против pgvector — задержка, halfvec, фильтры
+│   └── rag_compare.py       # блок 5.3: пять вопросов на LlamaIndex и bare-metal, строки кода
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
 │   ├── bot.md               # блоки 4.2–4.3: Telegram-бот — поток, /ask, медиа, /notify, запуск
 │   ├── embeddings.md        # блок 5.1: требования, кандидаты, выбор модели, стоимость, устройство модуля
 │   ├── vector_store.md      # блок 5.2: Qdrant — compose, коллекция, загрузка, метрика, фильтры, pgvector
+│   ├── rag.md               # блок 5.3: версии, коллекция, конвейер, LlamaIndex против bare-metal, 5 вопросов
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -193,8 +202,9 @@ multapi/
 │   ├── unit/                # блок 3.7: pytest + mocker, без сети: промпты, парсинг, схемы, кеш, 429, eval;
 │   │                        #   5.1: test_embeddings.py — батчи, кеш, повторы, префиксы, скрипты;
 │   │                        #   5.2: test_vector_store.py — Qdrant :memory:, загрузка, метрика, фильтры, /kb/search;
-│   │                        #   test_pgvector_store.py — SQL поиска и фильтров, ошибки, без базы
-│   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env
+│   │                        #   test_pgvector_store.py — SQL поиска и фильтров, ошибки, без базы;
+│   │                        #   5.3: test_rag.py — обе версии RAG на Qdrant :memory:, порог, /rag/query
+│   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env (5.3: и RAG)
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
@@ -204,7 +214,8 @@ multapi/
 │   └── integration/         # блок 3.7: test_llm_live.py — с настоящей моделью (маркер llm);
 │                            #   5.1: test_embeddings_live.py — bge-m3 в Ollama, префиксы E5;
 │                            #   5.2: test_vector_store_live.py — VectorStore на настоящем Qdrant;
-│                            #   test_pgvector_live.py — pgvector на настоящем Postgres, скрипты
+│                            #   test_pgvector_live.py — pgvector на настоящем Postgres, скрипты;
+│                            #   5.3: test_rag_live.py — обе версии RAG на bge-m3 и llama3.2
 ├── samples/                 # входные файлы: photo.jpg, screenshot.png, chart.png, voice_question.wav;
 │                            #   блок 4.3: support_rules.docx/.pdf — регламент поддержки для бота и тестов
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
@@ -2493,7 +2504,7 @@ ollama pull bge-m3                              # ~1,2 ГБ
 
 ## Блок 5.2 — Векторная база Qdrant
 
-Эмбеддинги блока 5.1 теперь хранятся в Qdrant: поиск ближайших фрагментов базы знаний — за миллисекунды и с фильтрами по метаданным (раздел, дата, источник, архивность). На блоке 5.3 к этой же коллекции подключится LlamaIndex. Подробно — [`docs/vector_store.md`](docs/vector_store.md).
+Эмбеддинги блока 5.1 теперь хранятся в Qdrant: поиск ближайших фрагментов базы знаний — за миллисекунды и с фильтрами по метаданным (раздел, дата, источник, архивность). RAG блока 5.3 работает с этим же Qdrant, но в своей коллекции. Подробно — [`docs/vector_store.md`](docs/vector_store.md).
 
 ```mermaid
 flowchart LR
@@ -2641,7 +2652,84 @@ python -m pytest -q                             # 1156 passed
 - **Образ:** Docker Hub из песочницы недоступен — Postgres 16 с pgvector 0.8.7 собран из исходников тега `v0.8.7`, той же версии, что в образе `pgvector/pgvector:0.8.7-pg16-bookworm`.
 - **Тесты:** `pytest` — 1155 passed и 1 skipped (живой тест Qdrant без `.env`), с `-W error` тоже.
 
-**Выбор — остаётся Qdrant.** Поиск на сервере — доли миллисекунды у обоих. В Qdrant фильтр работает внутри поиска, а в pgvector при переходе на HNSW без итеративного сканирования редкие условия теряют результаты. На блоке 5.3 к коллекции Qdrant подключится LlamaIndex, а гибридный поиск в Qdrant есть из коробки. Обоснование — в [`docs/vector_store.md`](docs/vector_store.md#выбор-оставляю-qdrant).
+**Выбор — остаётся Qdrant.** Поиск на сервере — доли миллисекунды у обоих. В Qdrant фильтр работает внутри поиска, а в pgvector при переходе на HNSW без итеративного сканирования редкие условия теряют результаты. На блоке 5.3 RAG на LlamaIndex работает с Qdrant через `QdrantVectorStore`, а гибридный поиск в Qdrant есть из коробки. Обоснование — в [`docs/vector_store.md`](docs/vector_store.md#выбор-оставляю-qdrant).
+
+## Блок 5.3 — Архитектура RAG с LlamaIndex
+
+Ответ на вопрос по корпусу из 10 документов: вопрос → эмбеддинг → три ближайших фрагмента из Qdrant → ответ модели только по ним, а если ответа в базе нет — «В базе знаний ответа нет.». Конвейер собран на LlamaIndex и второй раз без фреймворка — на тех же Qdrant и модели эмбеддингов, чтобы сравнить. Подробно — [`docs/rag.md`](docs/rag.md).
+
+```mermaid
+flowchart LR
+    D["data/rag-block-03/<br/>10 файлов: md, txt, pdf, docx"] --> R["SimpleDirectoryReader →<br/>SentenceSplitter 512/64"]
+    R -- "ProjectEmbedding<br/>(модуль 5.1, bge-m3)" --> Q[("Qdrant: rag_block_03<br/>1024, Cosine")]
+    U["POST /rag/query<br/>python -m app.services.rag"] --> S["RAGService: retrieve top-3"]
+    S --> Q
+    S -- "top_score ≥ RAG__MIN_SCORE" --> M["synthesize: OpenAILike<br/>llama3.2, промпт на русском"]
+    S -- "ниже порога" --> N["«В базе знаний ответа нет.»<br/>без вызова модели"]
+```
+
+### Что сделано
+
+- **Зависимости** (`requirements.txt`, `pyproject.toml`, `uv.lock`): `llama-index` 0.14.25, `llama-index-vector-stores-qdrant` 0.10.3, `llama-index-readers-file` 0.7.0, `llama-index-llms-openai-like` 0.8.0, `docx2txt` 0.9 — версии и даты выхода в [`docs/rag.md`](docs/rag.md#версии). Lock добавил 42 пакета и не обновил ни одного из прежних.
+- **Корпус `data/rag-block-03/`** — 10 документов о «Личном кабинете» из базы знаний блока 5.2 и регламента поддержки: 5 Markdown, 3 текстовых, DOCX об обмене с 1С, PDF с таблицей сроков поддержки и один заведомо не по теме (уход за комнатными растениями). Корпус копируется в образ: индексировать можно и из контейнера.
+- **Коллекция `rag_block_03`** — своя, а не `documents` блока 5.2: у LlamaIndex свой формат точек (`_node_content`), у корпуса своя нарезка, пересборка не трогает `/kb/search`. 1024 числа (`EMBEDDING_DIM`), Cosine, метка модели эмбеддингов в payload — подключаясь, обе версии сверяют размерность, метрику и модель.
+- **`app/services/rag.py`** — `RAGService` на компонентах LlamaIndex: `SimpleDirectoryReader(recursive=True)` → `SentenceSplitter(512, 64)` → `QdrantVectorStore` + `StorageContext` → `VectorStoreIndex.from_documents` (первый запуск) или `from_vector_store` (коллекция уже заполнена) → `as_query_engine(similarity_top_k=3)`. Свои — адаптер `ProjectEmbedding` над модулем эмбеддингов 5.1 (та же модель и кеш), модель ответа `OpenAILike` с настройками `LLM__*`, русские промпты, метаданные без путей к файлам. `answer(question)` → `{"answer", "top_score", "sources": [{"text" (300 символов), "source" (файл), "score"}]}`. CLI: `python -m app.services.rag "вопрос"`, `--build`, `--rebuild`.
+- **`app/services/rag_baremetal.py`** — та же цепочка без фреймворка: чтение (`pypdf`, `python-docx`), наивная нарезка по словам, `embed_documents` → `upsert` (id `uuid5`, плоский payload), `query_points` → промпт → `openai.chat.completions.create`. Тот же Qdrant, та же модель эмбеддингов, тот же словарь ответа; LlamaIndex не импортирует.
+- **`app/services/rag_common.py`** — промпт, фраза отказа, форма ответа и ошибки, общие для обеих версий: модель видит одни и те же инструкции.
+- **Порог «не знаю»** `RAG__MIN_SCORE` (0.5): лучший фрагмент ниже порога — ответ «В базе знаний ответа нет.» без вызова модели; выше, но ответа во фрагментах нет — ту же фразу требует промпт.
+- **Настройки** `RAG__*` в `.env.example` и `Settings.rag`: папка корпуса, коллекции, нарезка, top-k, порог, модель ответа, `max_tokens`, `temperature`. В коде только значения по умолчанию.
+- **`POST /rag/query`** `{"question": "…"}` → `answer`, `top_score`, `sources`. Индекс создаёт lifespan один раз на процесс; не проиндексирован — `503 rag_not_indexed` с командой, а после индексации с хоста первый же запрос подключается без перезапуска. Вопрос проходит проверку входа блока 3.8, одновременных запросов к модели — не больше `LLM__MAX_CONCURRENCY`.
+- **`scripts/rag_compare.py`** — пять вопросов (три хороших, средний, вне базы) на обеих версиях: короткий ответ, top-1 файл и близость, релевантность, найден ли ожидаемый факт, сработал ли отказ; таблица строк кода обеих версий. Вывод — Markdown для `docs/rag.md`.
+- **`docs/rag.md`** — версии, корпус, решение о коллекции, конвейер, настройки, запуск и коды ответа, порог, сравнение LlamaIndex и bare-metal с выводом, пять вопросов, подводные камни.
+- **Тесты:** +31.
+  - `tests/unit/test_rag.py` — 30, без сети: настоящий корпус, Qdrant `:memory:`, эмбеддинги из триграмм, модели-заглушки, которые запоминают промпт. Обе версии: контракт и ≥3 источника, промпт на русском с именем файла, повторное подключение без индексации, отказ ниже порога без вызова модели, отказ работать с коллекцией другой модели или размерности, метаданные без путей, чтение четырёх форматов, нарезка с перекрытием, CLI; bare-metal не импортирует LlamaIndex; `/rag/query` — ответ, коды ошибок, проверка входа; lifespan; подсчёт строк в `rag_compare.py`;
+  - `TestRagCorpus` в `tests/test_docker_files.py` — корпус в образе, `.md` корпуса не отсеиваются правилом `*.md`;
+  - `tests/integration/test_rag_live.py` (маркер `llm`, по умолчанию не запускается) — обе версии на настоящих Qdrant, `bge-m3` и `llama3.2` во временных коллекциях.
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt                 # llama-index 0.14.25 и др.
+docker compose up -d qdrant
+python -m pytest -q                             # 1187 passed
+python -m app.services.rag --build              # «проиндексировано фрагментов — 29»
+python -m app.services.rag --build              # «подключились к готовой»
+python -m app.services.rag                      # «Сколько стоит тариф «Команда» в месяц?» — JSON
+python -m app.services.rag_baremetal --build    # 37 фрагментов
+python scripts/rag_compare.py --out var\rag_compare.md   # пять вопросов на обеих версиях; на CPU — минуты
+python -m pytest -m llm tests/integration/test_rag_live.py -v -s
+```
+
+Затем весь стек — `docker compose up -d --build`, в логе `app` — `rag_ready`, и вопрос сервису:
+
+```powershell
+curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: application/json" -d "@examples/requests/rag_query.json"
+curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: application/json" -d "@examples/requests/rag_query_out_of_base.json"
+```
+
+### Результаты
+
+**Песочница (Linux).** Ollama недоступна: эмбеддинги — подставной сервер (векторы из триграмм символов), модель ответа — заглушка, которая повторяет первую строку контекста. Близость и ответы на них смысла не имеют — проверена механика.
+- **Индексация:** LlamaIndex прочитал все 10 файлов (PDF — с `page_label`), 29 фрагментов; повторный запуск — «подключились к готовой» без чтения корпуса. Bare-metal — 37 фрагментов: счёт токенов по словам завышает их на треть, и фрагменты короче 512.
+- **Ответ:** модель получила русский системный промпт и фрагменты с именами файлов, без пути и метки модели эмбеддингов; `max_tokens=512`, `temperature=0.1`. `rag_compare.py`: на вопросах 1–3 ожидаемый файл первый у обеих версий даже на подставных эмбеддингах.
+- **Сервис:** uvicorn — `rag_ready` на старте, `POST /rag/query` — 200 и три источника, пустой вопрос — 422 `empty_question`, инъекция — 400 `input_rejected`.
+- **Образ:** `docker build` с LlamaIndex — 705 МБ против 452 МБ у образа блока 5.2 (site-packages 444 МБ против 258; больше всех — `pandas`, 75 МБ, его требует `llama-index-readers-file`). В контейнере: индексация из корпуса образа (29 фрагментов), сервис с `rag_ready`, `/rag/query` — 200.
+- **Тесты:** `pytest` — 1186 passed и 1 skipped, с `-W error` тоже.
+
+**Windows** — после прогона.
+
+### Соответствие критериям блока 5.3
+
+| Критерий | Реализация |
+|---|---|
+| `python -m app.services.rag` работает отдельно от сервиса | CLI в `app/services/rag.py`: индексация или подключение + ответ в JSON; `test_cli_prints_json` |
+| `RAGService.build()` / `answer()` на `SimpleDirectoryReader`, `SentenceSplitter(512, 64)`, `QdrantVectorStore` + `StorageContext`, `from_documents` / `from_vector_store`, `as_query_engine(similarity_top_k=3)` | `app/services/rag.py`; `test_llamaindex_builds_and_answers_with_three_sources`, `test_llamaindex_reconnects_without_reindexing` |
+| Ответ — `answer`, `top_score`, не меньше трёх `sources` с `text` (300 символов), `source`, `score` | `rag_common.result` / `source`; `assert_contract` в тестах обеих версий |
+| Конфигурация — в `.env`, без хардкода | `RAG__*` в `Settings.rag` и `.env.example`; `test_rag_settings_from_environment` |
+| Bare-metal на тех же Qdrant и модели эмбеддингов, тот же контракт | `app/services/rag_baremetal.py`; `test_baremetal_builds_and_answers_with_same_contract`, `test_both_versions_share_embeddings_and_differ_in_chunking`, `test_baremetal_does_not_import_llamaindex` |
+| `POST /rag/query`, индекс инициализируется один раз в lifespan | `app/routers/rag.py`, `open_rag` в lifespan; `test_rag_query_*`, `test_lifespan_opens_rag_once_and_closes_it` |
+| Нерелевантный документ и честный «не знаю» | `10_houseplants.txt`, порог `RAG__MIN_SCORE` и промпт; `test_*_fallback_below_threshold_skips_model`; вопрос 5 прогона |
+| `docs/rag.md`: версии, решение о коллекции, таблица сравнения с выводом, прогон пяти вопросов | разделы «Версии», «Коллекция», «LlamaIndex против bare-metal», «Прогон 5 вопросов» |
 
 ## Конфигурация (.env)
 

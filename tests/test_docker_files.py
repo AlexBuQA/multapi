@@ -112,6 +112,22 @@ class TestDockerignore(unittest.TestCase):
                 self.assertFalse(_ignored(path, self.patterns))
 
 
+class TestRagCorpus(unittest.TestCase):
+    """Блок 5.3: корпус RAG в образе — индексация из контейнера (python -m app.services.rag --build)."""
+
+    def test_image_has_rag_corpus(self):
+        self.assertIn("COPY data/rag-block-03/ ./data/rag-block-03/", _read("Dockerfile"))
+        patterns = [line.strip() for line in _read(".dockerignore").splitlines()
+                    if line.strip() and not line.startswith("#")]
+        files = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "data" / "rag-block-03").iterdir())
+        self.assertEqual(len(files), 10)
+        for path in files:
+            with self.subTest(path=path):
+                self.assertFalse(_ignored(path, patterns))          # и .md корпуса, несмотря на *.md
+        self.assertTrue(_ignored("data/eval/golden.jsonl", patterns))   # остальное data/ — по-прежнему нет
+        self.assertTrue(_ignored("docs/rag.md", patterns))
+
+
 class TestChatStorageFiles(unittest.TestCase):
     """Блок 4.1: миграции в образе, Postgres в compose."""
 
