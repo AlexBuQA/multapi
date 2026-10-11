@@ -225,6 +225,11 @@ MRR@10 — fact 1.000, comparison 1.000, paraphrase 0.900, multi_step 0.917. У 
 `rag_block_03`, собранную в блоке 5.3 без метки нарезки, нужно пересобрать один раз:
 `python -m app.services.rag --rebuild` — получится 28 фрагментов.
 
+> **Блок 5.5.** Сервис отвечает по корпусу `data/<категория>/…` из 66 документов (коллекция `kb_docs`,
+> `python scripts/ingest.py data/`), с той же нарезкой: recursive 512/64, 10 кандидатов, без
+> re-ranker. Учебный корпус этого эксперимента — `RAG__LAB_DIR` (`data/rag-block-03`), его коллекция
+> сервиса — `python -m app.services.rag --lab --rebuild`. [`docs/rag.md`](rag.md).
+
 ### Ограничения и следующая итерация
 
 На этом корпусе метрики у потолка, и разница между конфигурациями — один-два вопроса. Чтобы
@@ -271,7 +276,8 @@ python scripts/chunking_experiment.py --rebuild         # переиндекси
 - `RAGService` режет корпус стратегией `RAG__CHUNKING` с `RAG__CHUNK_SIZE` / `RAG__CHUNK_OVERLAP`
   (у semantic — `RAG__SEMANTIC_BUFFER_SIZE` / `RAG__SEMANTIC_BREAKPOINT`). Метка нарезки — в payload.
   Если коллекция нарезана иначе, это не ошибка: поиск работает, а в лог пишется
-  `rag_chunking_mismatch`, CLI подсказывает `python -m app.services.rag --rebuild`.
+  `rag_chunking_mismatch`. С блока 5.5 метка нарезки — ещё и в hash документа: следующий
+  `python scripts/ingest.py data/` переиндексирует документы сам.
 - `RERANK__ENABLED=true`: из Qdrant берутся `RAG__CANDIDATES_TOP_K` кандидатов, re-ranker
   пересортировывает их, модели уходят первые `RAG__SIMILARITY_TOP_K`. Порог «не знаю» по-прежнему
   сравнивается с близостью из Qdrant, `score` в `sources` — тоже она. Re-ranker недоступен —

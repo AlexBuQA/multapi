@@ -249,7 +249,7 @@ async def test_draft_keepalive_while_model_thinks(bot, session):
 async def test_answer_with_stream_draft_end_to_end(bot, session):
     chat = new_chat_id()
     backend = FakeBackend("Ссылка для сброса действует 30 минут.", chunk=5, delay=0.01)
-    renderer = await answer_with_stream(source(bot, chat), backend, uuid4(), "вопрос")
+    renderer = await answer_with_stream(source(bot, chat), backend, uuid4(), "вопрос", mode="draft")
     assert renderer.mode == "draft" and session.on_screen(chat) == [backend.answer]
     assert drafts(session, chat)[0][1] == "" and drafts(session, chat)[-1][1] in backend.answer
 
@@ -270,7 +270,7 @@ async def test_draft_network_error_does_not_lose_answer(bot, session):
     session.fail[SendMessageDraft] = [TelegramNetworkError(SendMessageDraft(chat_id=chat, draft_id=1), "timeout"),
                                       TelegramNetworkError(SendMessageDraft(chat_id=chat, draft_id=1), "timeout")]
     backend = FakeBackend("Ссылка действует 30 минут.", chunk=5)
-    renderer = await answer_with_stream(source(bot, chat), backend, uuid4(), "вопрос")
+    renderer = await answer_with_stream(source(bot, chat), backend, uuid4(), "вопрос", mode="draft")
     assert renderer.fallback is None and session.on_screen(chat) == [backend.answer]
 
 

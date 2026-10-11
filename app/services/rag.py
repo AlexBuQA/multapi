@@ -1,37 +1,36 @@
 """
-RAG на LlamaIndex (блок 5.3): ответ на вопрос по корпусу data/rag-block-03.
+RAG на LlamaIndex (блоки 5.3–5.5): ответ на вопрос по корпусу data/<категория>/… с цитатами.
 
-    python -m app.services.rag                          # индекс (подключиться или собрать) + вопрос по умолчанию
-    python -m app.services.rag "Как включить вход по отпечатку пальца?"
-    python -m app.services.rag --rebuild "…"            # пересобрать коллекцию: сменили корпус, нарезку или модель
-    python -m app.services.rag --build                  # только индексация, без вопроса
+    python -m app.services.rag                          # подключиться (или проиндексировать) + вопрос по умолчанию
+    python -m app.services.rag "Каков срок возврата оплаты?"
+    python -m app.services.rag --rebuild "…"            # пересобрать коллекцию (то же, что scripts/ingest.py --rebuild)
+    python -m app.services.rag --build                  # только подключиться или проиндексировать, без вопроса
+    python -m app.services.rag --lab "…"                # учебный корпус блоков 5.3–5.4 (data/rag-block-03)
 
-Конвейер — компоненты LlamaIndex:
+Два контура (docs/rag.md, схема):
 
-    SimpleDirectoryReader → нарезка          → QdrantVectorStore → VectorStoreIndex → QueryEngine
-      .md .txt .pdf .docx    RAG__CHUNKING      коллекция             эмбеддинги         top-3 → модель
-                                                rag_block_03          блока 5.1
+    ingestion (app/services/ingestion.py, scripts/ingest.py):
+      файлы PDF/DOCX/HTML/MD → метаданные → SentenceSplitter 512/64 → bge-m3 → QdrantVectorStore
+      IngestionPipeline + SimpleDocumentStore (UPSERTS): повторный запуск — «0 changed, N unchanged»
 
-- Чтение — SimpleDirectoryReader(recursive=True): PDF и DOCX — ридеры llama-index-readers-file
-  (DOCX — через docx2txt). Метаданные — только имя файла (и номер страницы у PDF): полный путь
-  с именем пользователя Windows в Qdrant и в промпт не попадает.
-- Нарезка — RAG__CHUNKING (app/services/chunking.py, блок 5.4): fixed (TokenTextSplitter),
-  recursive (SentenceSplitter по абзацам и русским предложениям) или semantic
-  (SemanticSplitterNodeParser); размер и перекрытие — RAG__CHUNK_SIZE / RAG__CHUNK_OVERLAP. Метка
-  нарезки — в payload: другая нарезка в коллекции — предупреждение и совет пересобрать.
-- Хранение — своя коллекция RAG__COLLECTION в Qdrant (QDRANT_URL): LlamaIndex хранит узлы в своём
-  формате (_node_content), и коллекция блока 5.2 с плоским payload ему не подходит (docs/rag.md,
-  «Коллекция»). Подключаясь к готовой, build() сверяет размерность (EMBEDDING_DIM), метрику (COSINE)
-  и модель эмбеддингов: иначе поиск вернул бы мусор.
-- Эмбеддинги — ProjectEmbedding: модуль блока 5.1 (bge-m3 в Ollama, нормирование, кеш), тот же,
-  что у версии без фреймворка и у коллекции блока 5.2.
-- Ответ — OpenAI-совместимая модель LLM__* (Ollama llama3.2, OpenRouter) через OpenAILike, промпт —
-  rag_common: только по фрагментам, без ответа — «В базе знаний ответа нет.».
-- Порог: если близость лучшего фрагмента ниже RAG__MIN_SCORE, модель не вызывается — ответ «нет».
-- Re-ranker (RERANK__ENABLED, блок 5.4): из Qdrant берутся RAG__CANDIDATES_TOP_K кандидатов,
-  cross-encoder пересортировывает их, модели уходят первые RAG__SIMILARITY_TOP_K.
+    query (этот модуль):
+      вопрос → retriever top-10 (RAG__CANDIDATES_TOP_K) → score-guard → re-ranker (RERANK__ENABLED) →
+      top-5 (RAG__SIMILARITY_TOP_K) → нумерованный контекст «[1] (файл) текст» → модель → ответ с [1], [2]
 
-answer(question) -> {"answer", "top_score", "sources": [{"text", "source", "score"}, …]}.
+- Score-guard: лучшая близость кандидатов ниже RAG__SCORE_THRESHOLD — модель не вызывается, ответ
+  «По базе не нашёл, могу эскалировать.» (rag_common.NO_ANSWER), в лог — rag_score_guard. Второй
+  слой — правило в промпте: нет ответа в контексте — та же фраза.
+- Цитаты — нумерованный контекст и правило «после утверждения — номер фрагмента» (как в
+  reference-сервисе курса): source с id=N — фрагмент [N]; cited — сослалась ли на него модель.
+- Эмбеддинги — ProjectEmbedding (модуль блока 5.1: bge-m3 в Ollama, кеш); модель ответа —
+  OpenAI-совместимая LLM__* (Ollama llama3.2, OpenRouter) через OpenAILike.
+- Хранение — коллекция RAG__COLLECTION (kb_docs) в формате LlamaIndex (_node_content). build()
+  сверяет размерность (EMBEDDING_DIM), метрику (COSINE) и модель эмбеддингов: иначе поиск вернул бы мусор.
+
+Чат (app/chat/service.py) пользуется теми же retrieve() и контекстом, а ответ модели стримит сам.
+
+answer(question) -> {"answer", "top_score", "confident", "sources": [{"id", "file_name", "page", "score",
+"snippet", …}, …]} — контракт rag_common.
 """
 from __future__ import annotations
 
@@ -40,77 +39,55 @@ import asyncio
 import json
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex
-from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.llms import ChatMessage, MessageRole
-from llama_index.core.prompts import ChatPromptTemplate
 from llama_index.core.schema import Document, NodeWithScore, QueryBundle
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-from pydantic import PrivateAttr
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Distance, VectorParams
 
+from app.observability.logging import get_logger
 from app.services import chunking, embeddings
+from app.services.ingestion import IngestionService, ProjectEmbedding
 from app.services.rag_common import (
     DEFAULT_QUESTION,
-    NO_ANSWER,
-    REFINE_TEMPLATE,
     USER_TEMPLATE,
     RAGError,
     RAGLLMError,
     RAGNotIndexed,
     RAGUnavailable,
+    final_answer,
     llm_error,
+    numbered_context,
     qdrant_error,
-    result,
+    refusal,
     source,
     system_prompt,
 )
 from app.services.vector_store import make_qdrant_client
 
 __all__ = ["ProjectEmbedding", "RAGError", "RAGLLMError", "RAGNotIndexed", "RAGService", "RAGUnavailable",
-           "open_rag"]
+           "Retrieval", "open_rag"]
 
 if TYPE_CHECKING:
+    from llama_index.core.embeddings import BaseEmbedding
     from llama_index.core.llms import LLM
 
     from app.core.config import Settings
 
+log = get_logger()
+
 # Что считать «кодом конвейера» при сравнении с bare-metal (scripts/rag_compare.py, docs/rag.md):
-# индексация и запрос. Сверка коллекции (check_collection) — одинаковая в обеих версиях, не считается.
+# индексация и запрос в этом модуле. С блока 5.5 индексация — в ingestion.py (IngestionService), здесь —
+# только запуск; сверка коллекции (check_collection) одинаковая в обеих версиях и не считается.
 PIPELINE = {
-    "ingestion": ("ProjectEmbedding", "load_corpus", "RAGService.build"),
-    "query": ("build_llm", "prompts", "RAGService.answer", "sources"),
+    "ingestion": ("load_corpus", "RAGService.build"),
+    "query": ("build_llm", "chat_messages", "RAGService.retrieve", "RAGService.answer", "Retrieval"),
 }
-
-
-class ProjectEmbedding(BaseEmbedding):
-    """Модель эмбеддингов блока 5.1 для LlamaIndex: те же векторы, префиксы E5, нормирование и
-    кеш, что у bare-metal-версии и у коллекции блока 5.2."""
-
-    _service: Any = PrivateAttr()
-
-    def __init__(self, service: embeddings.EmbeddingService, **kwargs: Any) -> None:
-        super().__init__(model_name=service.label, embed_batch_size=64, **kwargs)
-        self._service = service
-
-    def _get_query_embedding(self, query: str) -> list[float]:
-        return self._service.embed_query(query)
-
-    def _get_text_embedding(self, text: str) -> list[float]:
-        return self._service.embed_documents([text])[0]
-
-    def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-        return self._service.embed_documents(list(texts))
-
-    async def _aget_query_embedding(self, query: str) -> list[float]:
-        return await asyncio.to_thread(self._get_query_embedding, query)
-
-    async def _aget_text_embedding(self, text: str) -> list[float]:
-        return await asyncio.to_thread(self._get_text_embedding, text)
 
 
 def build_llm(cfg: Settings) -> LLM:
@@ -144,20 +121,19 @@ def build_llm(cfg: Settings) -> LLM:
     )
 
 
-def prompts(product_name: str) -> tuple[ChatPromptTemplate, ChatPromptTemplate]:
-    """Шаблоны ответа и уточнения на русском: у LlamaIndex по умолчанию английские."""
-    system = ChatMessage(role=MessageRole.SYSTEM, content=system_prompt(product_name))
-    qa = ChatPromptTemplate(message_templates=[system, ChatMessage(role=MessageRole.USER, content=USER_TEMPLATE)])
-    refine = ChatPromptTemplate(message_templates=[system,
-                                                   ChatMessage(role=MessageRole.USER, content=REFINE_TEMPLATE)])
-    return qa, refine
+def chat_messages(product_name: str, question: str, context: str) -> list[ChatMessage]:
+    """Промпт ответа: системные правила (только по контексту, цитаты [N], отказ) и пользовательское
+    сообщение с нумерованным контекстом и вопросом — те же тексты, что у bare-metal."""
+    return [ChatMessage(role=MessageRole.SYSTEM, content=system_prompt(product_name)),
+            ChatMessage(role=MessageRole.USER, content=USER_TEMPLATE.format(context_str=context, query_str=question))]
 
 
 def load_corpus(data_dir: Path, embed_label: str, chunking_label: str | None = None) -> list[Document]:
-    """Корпус: все файлы папки, PDF — по странице на документ. Id документа — имя файла: полный
-    путь с именем пользователя Windows в Qdrant и в промпт не попадает."""
+    """Учебный корпус блоков 5.3–5.4 одним списком документов: для сравнения нарезок
+    (scripts/chunking_experiment.py), где id документа — имя файла, а не путь. Сервис индексирует
+    корпус через IngestionService."""
     if not data_dir.is_dir():
-        raise RAGError(f"Нет папки корпуса {data_dir}: проверьте RAG__DATA_DIR")
+        raise RAGError(f"Нет папки корпуса {data_dir}: проверьте RAG__LAB_DIR")
     reader = SimpleDirectoryReader(input_dir=str(data_dir), recursive=True,
                                    file_metadata=lambda path: {"file_name": Path(path).name})
     documents = reader.load_data()
@@ -175,22 +151,59 @@ def load_corpus(data_dir: Path, embed_label: str, chunking_label: str | None = N
     return documents
 
 
+@dataclass
+class Retrieval:
+    """Результат поиска: фрагменты для контекста (top_n после re-ranker) и лучшая близость среди
+    кандидатов — по ней score-guard решает, звать ли модель."""
+
+    question: str
+    nodes: list[NodeWithScore]
+    top_score: float
+    candidates: int
+    threshold: float
+
+    @property
+    def confident(self) -> bool:
+        return bool(self.nodes) and self.top_score >= self.threshold
+
+    def fragments(self) -> list[tuple[str, str | None, int | None]]:
+        return [(node.node.get_content(), node.metadata.get("file_name"), node.metadata.get("page"))
+                for node in self.nodes]
+
+    def context(self) -> str:
+        """«[1] (refunds_v2.docx)\\nтекст\\n\\n[2] (support-regulation_v2.3.pdf, стр. 2)\\nтекст»."""
+        return numbered_context(self.fragments())
+
+    def sources(self) -> list[dict[str, Any]]:
+        return [source(number, node.node.get_content(), file_name=node.metadata.get("file_name"),
+                       page=node.metadata.get("page"), score=node.score, path=node.metadata.get("source"),
+                       category=node.metadata.get("category"))
+                for number, node in enumerate(self.nodes, start=1)]
+
+    def log_guard(self, **extra: Any) -> None:
+        """Срабатывание score-guard — в лог: без текста вопроса (в нём бывают персональные данные)."""
+        log.info("rag_score_guard", top_score=round(self.top_score, 3), threshold=self.threshold,
+                 candidates=self.candidates, question_chars=len(self.question), **extra)
+
+
 class RAGService:
     def __init__(self, cfg: Settings, *, client: Any = None, embed_model: BaseEmbedding | None = None,
-                 llm: LLM | None = None, reranker: Any = None) -> None:
+                 llm: LLM | None = None, reranker: Any = None, data_dir: Path | None = None,
+                 collection: str | None = None) -> None:
         if client is None and not cfg.qdrant_url:
             raise RAGError("QDRANT_URL не задан: RAG хранит фрагменты в Qdrant — укажите адрес в .env")
         if cfg.embedding_dim is None:
             raise RAGError("EMBEDDING_DIM не задан: укажите размерность модели эмбеддингов в .env")
         self.cfg = cfg
         self.settings = cfg.rag
-        self.collection = cfg.rag.collection
+        self.data_dir = data_dir or cfg.rag.data_dir
+        self.collection = collection or cfg.rag.collection
         if client is None:
             key = cfg.qdrant_api_key.get_secret_value() if cfg.qdrant_api_key else None
             client = make_qdrant_client(cfg.qdrant_url, key, asynchronous=False)
         self.client = client
         self.embed_model = embed_model or ProjectEmbedding(embeddings.default_service())
-        self.llm = llm or build_llm(cfg)
+        self._llm = llm
         if reranker is None:
             from app.services.reranker import build_reranker
 
@@ -201,48 +214,47 @@ class RAGService:
                                              buffer_size=cfg.rag.semantic_buffer_size,
                                              breakpoint_percentile_threshold=cfg.rag.semantic_breakpoint)
         self.chunking_mismatch: str | None = None   # нарезка готовой коллекции, если она другая
-        self.query_engine: Any = None
+        self.retriever: Any = None
         self.indexed = 0           # сколько фрагментов записал последний build(); 0 — подключились к готовой
         self._lock = threading.Lock()
 
+    @property
+    def llm(self) -> LLM:
+        """Модель ответа создаётся при первом ответе: чату (он стримит своей моделью) и скриптам
+        индексации она не нужна."""
+        if self._llm is None:
+            self._llm = build_llm(self.cfg)
+        return self._llm
+
     # -------------------------------------------------------- индексация
-    def load_documents(self) -> list[Document]:
-        """Корпус RAG__DATA_DIR с метками модели эмбеддингов и нарезки."""
-        return load_corpus(self.settings.data_dir, self.embed_model.model_name, self.chunking_label)
+    def ingestion(self) -> IngestionService:
+        """Индексатор того же корпуса и коллекции, с теми же клиентом Qdrant и эмбеддингами."""
+        return IngestionService(self.cfg, client=self.client, embed_model=self.embed_model, data_dir=self.data_dir,
+                                collection=self.collection)
 
     def build(self, *, rebuild: bool = False, create: bool = True) -> RAGService:
-        """Подключиться к коллекции RAG__COLLECTION или, если её нет (или rebuild), проиндексировать
-        корпус. create=False — только подключиться (lifespan сервиса): нет коллекции — RAGNotIndexed."""
+        """Подключиться к коллекции или, если её нет (или rebuild), проиндексировать корпус через
+        IngestionService. create=False — только подключиться (lifespan сервиса): нет коллекции —
+        RAGNotIndexed."""
         try:
             exists = self.client.collection_exists(self.collection)
-            if exists and rebuild:
-                self.client.delete_collection(self.collection)
-                exists = False
             points = self.client.count(self.collection, exact=True).count if exists else 0
-            store = QdrantVectorStore(client=self.client, collection_name=self.collection)
-            if points:
-                self.check_collection()
-                index = VectorStoreIndex.from_vector_store(store, embed_model=self.embed_model)
-                self.indexed = 0
-            elif not create:
-                raise RAGNotIndexed(f"Коллекция {self.collection} пуста или её нет: проиндексируйте корпус — "
-                                    "python -m app.services.rag --build")
+            if rebuild or (not points and create):
+                report = self.ingestion().run(rebuild=rebuild)
+                self.indexed = report.chunks
+                points = self.client.count(self.collection, exact=True).count \
+                    if self.client.collection_exists(self.collection) else 0
             else:
-                splitter = chunking.build_splitter(
-                    self.settings.chunking, chunk_size=self.settings.chunk_size, chunk_overlap=self.settings.chunk_overlap,
-                    embed_model=self.embed_model, buffer_size=self.settings.semantic_buffer_size,
-                    breakpoint_percentile_threshold=self.settings.semantic_breakpoint)
-                index = VectorStoreIndex.from_documents(
-                    self.load_documents(), storage_context=StorageContext.from_defaults(vector_store=store),
-                    embed_model=self.embed_model, transformations=[splitter])
-                self.indexed = self.client.count(self.collection, exact=True).count
-                self.check_collection()
+                self.indexed = 0
+            if not points:
+                raise RAGNotIndexed(f"Коллекция {self.collection} пуста или её нет: проиндексируйте корпус — "
+                                    "python scripts/ingest.py data/")
+            self.check_collection()
+            store = QdrantVectorStore(client=self.client, collection_name=self.collection)
+            index = VectorStoreIndex.from_vector_store(store, embed_model=self.embed_model)
+            self.retriever = index.as_retriever(similarity_top_k=self.settings.candidates_top_k)
         except (ResponseHandlingException, UnexpectedResponse) as exc:
             raise qdrant_error(exc, self.cfg.qdrant_url) from exc
-        qa, refine = prompts(self.cfg.support.product_name)
-        top_k = self.settings.candidates_top_k if self.reranker else self.settings.similarity_top_k
-        self.query_engine = index.as_query_engine(similarity_top_k=top_k, llm=self.llm, text_qa_template=qa,
-                                                  refine_template=refine)
         return self
 
     def check_collection(self) -> None:
@@ -251,62 +263,74 @@ class RAGService:
         vectors = info.config.params.vectors
         if not isinstance(vectors, VectorParams):
             raise RAGError(f"Коллекция {self.collection} с именованными векторами: её создавали не этим "
-                           "кодом — пересоберите: python -m app.services.rag --rebuild")
+                           "кодом — пересоберите: python scripts/ingest.py --rebuild")
         if vectors.size != self.cfg.embedding_dim or vectors.distance != Distance.COSINE:
             raise RAGError(f"Коллекция {self.collection}: векторы из {vectors.size} чисел, метрика "
                            f"{vectors.distance.value}, а нужно EMBEDDING_DIM={self.cfg.embedding_dim} и Cosine — "
-                           "её заполняла другая модель: python -m app.services.rag --rebuild")
+                           "её заполняла другая модель: python scripts/ingest.py --rebuild")
         records, _ = self.client.scroll(self.collection, limit=1, with_payload=["embed_model", "chunking"])
         payload = (records[0].payload or {}) if records else {}
         model = payload.get("embed_model")
         if model and model != self.embed_model.model_name:
             raise RAGError(f"Коллекция {self.collection} проиндексирована моделью {model}, а сейчас "
                            f"{self.embed_model.model_name}: вопросы и фрагменты были бы в разных пространствах — "
-                           "python -m app.services.rag --rebuild")
+                           "python scripts/ingest.py data/ (документы переиндексируются сами) или --rebuild")
         # Другая нарезка — не ошибка: поиск работает, просто не на выбранной конфигурации.
         stored = payload.get("chunking", "без метки (до блока 5.4)") if records else None
         self.chunking_mismatch = stored if stored and stored != self.chunking_label else None
         if self.chunking_mismatch:
-            from app.observability.logging import get_logger
+            log.warning("rag_chunking_mismatch", collection=self.collection, stored=stored,
+                        configured=self.chunking_label, fix="python scripts/ingest.py data/")
 
-            get_logger().warning("rag_chunking_mismatch", collection=self.collection, stored=stored,
-                                 configured=self.chunking_label, fix="python -m app.services.rag --rebuild")
-
-    # -------------------------------------------------------- ответ
-    def answer(self, question: str) -> dict[str, Any]:
-        """Поиск top-k фрагментов и ответ модели по ним. Лучший фрагмент ниже RAG__MIN_SCORE —
-        ответ NO_ANSWER без вызова модели: выдумывать не из чего."""
-        if self.query_engine is None:
+    # -------------------------------------------------------- поиск и ответ
+    def retrieve(self, question: str) -> Retrieval:
+        """Кандидаты из Qdrant (RAG__CANDIDATES_TOP_K) → score-guard → re-ranker → первые
+        RAG__SIMILARITY_TOP_K. Не прошли порог — nodes пустой, re-ranker не вызывается."""
+        if self.retriever is None:
             raise RAGError("Индекс не готов: сначала build()")
         question = question.strip()
         if not question:
             raise ValueError("Пустой вопрос")
-        bundle = QueryBundle(question)
         try:
-            nodes = self.query_engine.retrieve(bundle)
+            candidates = self.retriever.retrieve(QueryBundle(question))
         except (ResponseHandlingException, UnexpectedResponse) as exc:
             raise qdrant_error(exc, self.cfg.qdrant_url) from exc
-        top_score = max((node.score or 0.0 for node in nodes), default=0.0)
-        if top_score < self.settings.min_score:
-            return result(NO_ANSWER, top_score, sources(nodes[:self.settings.similarity_top_k]))
-        if self.reranker:
-            nodes = rerank_nodes(self.reranker, question, nodes, self.settings.similarity_top_k)
+        top_score = max((node.score or 0.0 for node in candidates), default=0.0)
+        threshold = self.settings.score_threshold
+        top_n = self.settings.similarity_top_k
+        if top_score < threshold:
+            nodes: list[NodeWithScore] = []
+        elif self.reranker:
+            nodes = rerank_nodes(self.reranker, question, candidates, top_n)
+        else:
+            nodes = candidates[:top_n]
+        return Retrieval(question, nodes, top_score, len(candidates), threshold)
+
+    def answer(self, question: str) -> dict[str, Any]:
+        """Ответ с цитатами. Score-guard — без вызова модели; модель отказалась по промпту — тоже
+        confident=false и без источников."""
+        found = self.retrieve(question)
+        if not found.confident:
+            found.log_guard(where="rag_query")
+            return refusal(found.top_score)
         try:
-            response = self.query_engine.synthesize(bundle, nodes)
+            response = self.llm.chat(chat_messages(self.cfg.support.product_name, found.question, found.context()))
         except Exception as exc:
             explained = llm_error(exc, self.cfg)
             if explained is exc:
                 raise
             raise explained from exc
-        return result(str(response).strip() or NO_ANSWER, top_score, sources(response.source_nodes))
+        result = final_answer(response.message.content or "", found.top_score, found.sources())
+        if not result["confident"]:
+            log.info("rag_refused", reason="model", top_score=round(found.top_score, 3), where="rag_query")
+        return result
 
     def ensure_ready(self) -> None:
-        """Для сервиса: подключиться к коллекции, если на старте её ещё не было. Один раз —
-        дальше запросы идут в готовый query_engine; проиндексировать корпус можно с хоста, не
-        перезапуская сервис (python -m app.services.rag --build)."""
-        if self.query_engine is None:
+        """Для сервиса: подключиться к коллекции, если на старте её ещё не было (индексация шла в
+        фоне или корпус индексировали с хоста). Один раз — дальше запросы идут в готовый retriever."""
+        if self.retriever is None:
             with self._lock:
-                if self.query_engine is None:
+                if self.retriever is None:
                     self.build(create=False)
 
     def close(self) -> None:
@@ -318,22 +342,20 @@ def open_rag(cfg: Settings) -> RAGService | None:
     Без QDRANT_URL — None (/rag/query отвечает 503). Коллекции ещё нет или Qdrant не отвечает —
     сервис стартует, а RAG подключится при первом запросе (ensure_ready). Коллекция под другую
     модель — исключение: старт с заведомо неверной конфигурацией хуже понятной ошибки."""
-    from app.observability.logging import get_logger
-
-    log = get_logger()
     if not cfg.qdrant_url:
         log.info("rag_disabled", reason="QDRANT_URL не задан")
         return None
     service = RAGService(cfg)
     try:
         service.build(create=False)
-        log.info("rag_ready", collection=service.collection, top_k=cfg.rag.similarity_top_k,
-                 min_score=cfg.rag.min_score, model=cfg.rag.llm_model or cfg.llm.default_model,
-                 embed_model=service.embed_model.model_name, chunking=service.chunking_label,
-                 reranker=getattr(service.reranker, "model", None))
+        log.info("rag_ready", collection=service.collection, candidates=cfg.rag.candidates_top_k,
+                 top_n=cfg.rag.similarity_top_k, score_threshold=cfg.rag.score_threshold,
+                 model=cfg.rag.llm_model or cfg.llm.default_model, embed_model=service.embed_model.model_name,
+                 chunking=service.chunking_label, reranker=getattr(service.reranker, "model", None))
     except (RAGNotIndexed, RAGUnavailable) as exc:
         log.warning("rag_not_ready", collection=service.collection, error=str(exc),
-                    note="сервис работает; RAG подключится при первом запросе к /rag/query")
+                    note="сервис работает; RAG подключится, когда коллекция появится (RAG__INGEST_ON_START "
+                         "или python scripts/ingest.py data/)")
     except Exception:
         service.close()
         raise
@@ -341,16 +363,12 @@ def open_rag(cfg: Settings) -> RAGService | None:
 
 
 def no_implicit_event_loop() -> None:
-    """Для вызовов RAGService из главного потока (CLI, scripts/rag_compare.py). Синхронные методы
-    LlamaIndex запускают свои корутины через asyncio.get_event_loop() (async_utils.asyncio_run): в
-    главном потоке без цикла Python 3.12–3.13 создаёт цикл неявно — с DeprecationWarning и без
-    закрытия. После set_event_loop(None) get_event_loop падает, и LlamaIndex берёт asyncio.run — как
-    в потоках сервиса (asyncio.to_thread) и как будет по умолчанию в Python 3.14."""
+    """Для вызовов RAGService из главного потока (CLI, скрипты). Синхронные методы LlamaIndex
+    запускают свои корутины через asyncio.get_event_loop() (async_utils.asyncio_run): в главном
+    потоке без цикла Python 3.12–3.13 создаёт цикл неявно — с DeprecationWarning и без закрытия.
+    После set_event_loop(None) get_event_loop падает, и LlamaIndex берёт asyncio.run — как в потоках
+    сервиса (asyncio.to_thread) и как будет по умолчанию в Python 3.14."""
     asyncio.set_event_loop(None)
-
-
-def sources(nodes: list[NodeWithScore]) -> list[dict[str, Any]]:
-    return [source(node.text, node.metadata.get("file_name"), node.score) for node in nodes]
 
 
 def rerank_nodes(reranker: Any, question: str, nodes: list[NodeWithScore], top_n: int) -> list[NodeWithScore]:
@@ -366,10 +384,11 @@ def rerank_nodes(reranker: Any, question: str, nodes: list[NodeWithScore], top_n
 
 # ---------------------------------------------------------------- python -m app.services.rag
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="RAG на LlamaIndex по корпусу data/rag-block-03 (блок 5.3)")
+    parser = argparse.ArgumentParser(description="RAG на LlamaIndex по корпусу data/ с цитатами (блоки 5.3–5.5)")
     parser.add_argument("question", nargs="?", default=DEFAULT_QUESTION, help="вопрос по корпусу")
     parser.add_argument("--rebuild", action="store_true", help="удалить коллекцию и проиндексировать заново")
     parser.add_argument("--build", action="store_true", help="только подключиться или проиндексировать, без вопроса")
+    parser.add_argument("--lab", action="store_true", help="учебный корпус блоков 5.3–5.4 (RAG__LAB_DIR)")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
@@ -384,12 +403,13 @@ def main(argv: list[str] | None = None) -> int:
     no_implicit_event_loop()
     try:
         cfg = get_settings()
-        service = RAGService(cfg).build(rebuild=args.rebuild)
+        lab = {"data_dir": cfg.rag.lab_dir, "collection": cfg.rag.lab_collection} if args.lab else {}
+        service = RAGService(cfg, **lab).build(rebuild=args.rebuild)
         print(f"Коллекция {service.collection}: " + (f"проиндексировано фрагментов — {service.indexed}"
               if service.indexed else "подключились к готовой"), file=sys.stderr)
         if service.chunking_mismatch:
             print(f"Внимание: нарезка коллекции — «{service.chunking_mismatch}», а в .env — «{service.chunking_label}». "
-                  "Пересоберите: python -m app.services.rag --rebuild", file=sys.stderr)
+                  "Переиндексируйте: python scripts/ingest.py data/", file=sys.stderr)
         if not args.build:
             print(json.dumps(service.answer(args.question), ensure_ascii=False, indent=2))
         service.close()

@@ -48,6 +48,7 @@ import weakref
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import aiofiles
@@ -311,7 +312,7 @@ class JsonChatRepository:
         return next((m for m in await self._all_messages(chat_id) if m.id == message_id), None)
 
     async def add_feedback(self, chat_id: UUID, message_id: UUID, owner_external_id: str,
-                           value: FeedbackValue) -> FeedbackResult:
+                           value: FeedbackValue, sources: list[dict[str, Any]] | None = None) -> FeedbackResult:
         path = self.base_dir / FEEDBACK_FILE
         async with file_lock(path):
             for line in await self._read_lines(path):
@@ -321,9 +322,11 @@ class JsonChatRepository:
                     continue
                 if row.get("owner_external_id") == owner_external_id and row.get("message_id") == str(message_id):
                     return FeedbackResult(saved=False, value=row["value"])
-            await self._append(path, json.dumps({
-                "message_id": str(message_id), "chat_id": str(chat_id), "owner_external_id": owner_external_id,
-                "value": value, "created_at": utc_now().isoformat()}, ensure_ascii=False))
+            row = {"message_id": str(message_id), "chat_id": str(chat_id), "owner_external_id": owner_external_id,
+                   "value": value, "created_at": utc_now().isoformat()}
+            if sources:
+                row["sources"] = sources          # блок 5.5: источники, показанные под ответом
+            await self._append(path, json.dumps(row, ensure_ascii=False))
         return FeedbackResult(saved=True, value=value)
 
     async def record_moderation(self, incident: ModerationIncident) -> None:

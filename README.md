@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.4
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.5
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -24,6 +24,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 5.2 — Векторная база Qdrant:** сервис `qdrant` в `compose.yaml` (ключ API, том, проверка по TCP), коллекция `documents` под `bge-m3` (1024, COSINE, HNSW m=16) с payload-индексами, база знаний из 110 фрагментов с датами и разделами, идемпотентная загрузка `scripts/load_to_qdrant.py`, `app/services/vector_store.py` на `AsyncQdrantClient`, `GET /kb/search`, сравнение cosine и dot, три примера фильтров — см. раздел [«Блок 5.2»](#блок-52--векторная-база-qdrant) и [`docs/vector_store.md`](docs/vector_store.md) Опционально (задача 7) — pgvector 0.8 в том же Postgres: задержка, halfvec, фильтры SQL против `Filter`; выбор — остаётся Qdrant.
 - **Блок 5.3 — Архитектура RAG с LlamaIndex:** корпус из 10 документов (`.md`, `.txt`, `.pdf`, `.docx`) в своей коллекции Qdrant `rag_block_03`, `RAGService` на компонентах LlamaIndex (`SimpleDirectoryReader`, `SentenceSplitter`, `QdrantVectorStore`, query engine) и та же цепочка без фреймворка, порог «не знаю», `POST /rag/query`, сравнение версий и прогон пяти вопросов — см. раздел [«Блок 5.3»](#блок-53--архитектура-rag-с-llamaindex) и [`docs/rag.md`](docs/rag.md).
 - **Блок 5.4 — Chunking и оптимизация качества:** golden dataset из 28 вопросов, три стратегии нарезки (fixed, recursive, semantic) в коллекциях `docs_fixed` / `docs_recursive` / `docs_semantic`, метрики Hit Rate@5, MRR@10, Recall@10 по документам и строже — по фрагменту с ответом, re-ranker `bge-reranker-v2-m3`, подбор `chunk_size`, `overlap` и `top-K` — см. раздел [«Блок 5.4»](#блок-54--chunking-и-оптимизация-качества) и [`docs/chunking_experiment.md`](docs/chunking_experiment.md).
+- **Блок 5.5 — Корпоративный RAG-ассистент:** корпус из 66 документов «Личного кабинета» в PDF, DOCX, HTML и Markdown (`data/<категория>/`), инкрементальная индексация `scripts/ingest.py` (IngestionPipeline + docstore, UPSERTS, `.failed`), метаданные из путей и самих документов, ответы с цитатами [1], [2] и флагом `confident`, score-guard «По базе не нашёл, могу эскалировать.», диалог с переписыванием follow-up, событие `sources` в SSE, загрузка документов `POST /documents/upload`, бот с debounce правок и источниками, весь стек — `docker compose up -d` — см. раздел [«Блок 5.5»](#блок-55--корпоративный-rag-ассистент) и [`docs/rag.md`](docs/rag.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -2820,6 +2821,151 @@ python -m app.services.rag --rebuild            # коллекция серви�
 | Финальный Hit Rate@5 ≥ 0.5 или анализ причин | 1.000 на Windows; почему метрики у потолка и что делать дальше — «Разбор» и «Ограничения и следующая итерация» |
 | Параграф «выбираю стратегию X с конфигом Y, потому что …» | раздел «Итог» в `docs/chunking_experiment.md` |
 
+## Блок 5.5 — Корпоративный RAG-ассистент
+
+Ассистент отвечает по базе знаний компании: 66 документов в четырёх форматах, ответ с цитатами [1], [2] и источниками (файл, страница, близость, фрагмент), а без ответа в базе — «По базе не нашёл, могу эскалировать.». Одношаговый `POST /rag/query`, диалог `POST /chats/{id}/messages` со стримингом и follow-up, Telegram-бот, загрузка новых документов на лету. Подробно — [`docs/rag.md`](docs/rag.md), опись корпуса — [`docs/data_inventory.md`](docs/data_inventory.md).
+
+```mermaid
+flowchart LR
+    F["data/&lt;категория&gt;/…<br/>66 файлов: PDF, DOCX, HTML, MD"] --> I["ingest: ридеры → метаданные →<br/>SentenceSplitter 512/64 → bge-m3<br/>docstore + UPSERTS"]
+    UP["POST /documents/upload<br/>BackgroundTasks"] --> I
+    I --> Q[("Qdrant: kb_docs")]
+    A["/rag/query · /chats/{id}/messages · бот"] --> C["condense follow-up (чат)"] --> R["top-10 → score-guard ≥ 0.5<br/>→ (re-ranker) → top-5"]
+    Q --> R
+    R -- "да" --> M["llama3.2: только по контексту,<br/>цитаты [N]"] --> O["answer + sources + confident<br/>SSE: event: sources"]
+    R -- "нет" --> N["«По базе не нашёл,<br/>могу эскалировать.»"]
+```
+
+### Что сделано
+
+- **Корпус** `data/<категория>/` — 66 документов в 11 категориях, собраны из базы знаний проекта (`scripts/build_corpus.py`, детерминированный): HTML 26 (статьи справки, сверстанные как страницы сайта — шапка, меню, подвал вокруг `<article>`), Markdown 17 (документация API и частые вопросы с YAML front matter), DOCX 14 (документы финансового отдела и отдела внедрения, автор и дата — в свойствах), PDF 9 (регламент поддержки v2.3 — раздел на странице и таблица сроков, заметки о выпусках — по полугодиям, документы о данных). Четыре — вторые редакции, редакция в имени файла (`refunds_v2.docx`, `support-regulation_v2.3.pdf`). 916 КБ, 102 документа LlamaIndex. `data/.ragignore` — что в `data/` не корпус: исходники базы знаний, архив прежних редакций, учебный корпус блоков 5.3–5.4. Опись — `scripts/data_inventory.py` → `docs/data_inventory.md` (тест сверяет числа с папкой).
+- **`app/services/ingestion.py`** и **`scripts/ingest.py`**:
+  - ридеры `SimpleDirectoryReader` на формат — `PyMuPDFReader` (страница — документ, номер страницы; с каноническим `import pymupdf`), `DocxReader`, `HTMLTagReader(tag="article")` (без шапки и меню; нет `<article>` — `<main>`, `<body>`), `MarkdownReader` (раздел — документ; front matter — в метаданные, не в текст);
+  - метаданные: `source` (путь в корпусе), `file_name`, `category` из `data/<категория>/`, `author`, `title` и `created_at` из самого документа (свойства DOCX, метаданные PDF, `<meta>` HTML, front matter), `last_modified` из `stat`, `version` из имени, `page`; без полных путей; в вектор — только текст (`excluded_embed_metadata_keys`);
+  - `IngestionPipeline([SentenceSplitter 512/64, ProjectEmbedding], docstore=SimpleDocumentStore, vector_store=QdrantVectorStore, docstore_strategy=UPSERTS)`; docstore — `var/ingest/kb_docs_docstore.json`. Повторный запуск — «0 changed, N unchanged» без эмбеддингов; изменённый файл заменяет свои фрагменты; исчезнувший — удаляется (`removed`); смена модели или нарезки переиндексирует документы сами (метки — в hash); id фрагментов постоянные (`uuid5`) — без docstore дублей нет;
+  - нечитаемый файл (битый PDF, DOCX — не zip, пустой, скан без текста) → `<имя>.failed`, строка `ingest_file_failed` в логе, остальные индексируются; код выхода 1;
+  - `--dry-run`, `--rebuild`, один файл, защита от смешения двух корпусов в одной коллекции.
+- **Query** (`app/services/rag.py`, `rag_common.py`): retriever top-10 → score-guard (`RAG__SCORE_THRESHOLD`, 0.5 для `bge-m3`; ниже — отказ без вызова модели, в лог `rag_score_guard`) → re-ranker (выключен по итогам 5.4) → top-5 → нумерованный контекст «[1] (файл, стр. N) текст» и правило «только по контексту, номера фрагментов [N], в конце — строка „Источники: [1], [3]“, нет ответа — „По базе не нашёл, могу эскалировать.“» (формат выбран замером на Windows, `docs/rag.md`, «Цитаты (Windows)»). Ответ — `{answer, top_score, confident, sources[{id, file_name, source, category, page, score, snippet, cited}]}`; модель отказалась по промпту — `confident=false`. Тот же контракт у bare-metal-версии.
+- **`POST /rag/query`** — расширен цитатами и `confident`.
+- **Чат** (`app/chat/knowledge.py`): текстовый вопрос сначала ищется в базе; follow-up переписывается одним вызовом модели по последним сообщениям чата (`RAG__CONDENSE`) — для поиска; контекст уходит модели отдельным системным сообщением (как текст документа: защитный слой проверяет инъекции, но не длину; маскирование его не трогает); цитаты из прошлых ответов вычищаются; score-guard — ответ без модели. SSE: токены → `event: sources` → `done`, `sanitize()` для переводов строк в поле `data`. База недоступна — `503` до записи вопроса.
+- **Оценка 👍/👎 с источниками**: `POST …/feedback {"value", "sources"}`, миграция `b8d4f1a2c3e5` — `message_feedback.sources` (JSONB); JSON-хранилище — поле в `feedback.jsonl`.
+- **`POST /documents/upload`** (`X-Admin-Token`): файл → `data/uploads/`, `BackgroundTasks` → тот же конвейер, `202`; `GET /documents/status`, `POST /documents/reindex`. Проверки: формат, имя (только последняя часть пути), размер до разбора формы (`RAG__UPLOAD_MAX_MB`).
+- **Бот**: по умолчанию правки `editMessageText` с debounce по чату — `EditDebounce` с `last_edit_at[chat_id]` и `time.monotonic()`, не чаще раза в 0,7 с (`BOT_EDIT_INTERVAL`), финальная правка ждёт очереди; подпись «Источники: [1] …» под ответом; 👍/👎 отправляют показанные источники; ошибки базы — понятным текстом сервиса.
+- **Docker**: корпус в образе (`COPY data/`, `.dockerignore` пропускает только корпус), `app` индексирует его в фоне при старте (`RAG__INGEST_ON_START=true`), тома `rag_state` (docstore и кеш эмбеддингов — перезапуск не переиндексирует) и `rag_uploads`. `docker compose up -d` — app, qdrant, redis, bot (и postgres, migrate, phoenix) без ручных шагов.
+- **`scripts/calibrate_threshold.py`** — распределение `top_score` для 28 вопросов по базе, 8 посторонних, 4 вопросов о продукте без ответа в базе и 4 follow-up без истории; рекомендуемый порог (по первым двум группам).
+- **`scripts/citation_experiment.py`** — какой вариант промпта заставляет модель ответа ставить цитаты [N] и не ломает отказ: номер после каждого предложения, пример диалога, строка «Источники: …» и их сочетание на 5 вопросах по базе и 2 без ответа в базе. Выиграла строка «Источники: …» — она и стала промптом сервиса; бот заменяет её своей подписью с именами файлов.
+- **`scripts/condense_experiment.py`** — что получает поиск на follow-up: вопрос как есть, condense без образцов и с образцами переписывания, склейка двух вопросов; попал ли нужный файл в top-5 на 4 парах, включая смену темы.
+- **Зависимости**: `pymupdf` 1.28.2 (`uv.lock` добавил один пакет).
+- **Документация**: `docs/rag.md` переписан — схема двух контуров (Mermaid), корпус, ingestion, query, параметры (нарезка 5.4, re-ranker, порог с обоснованием), multi-turn, эндпоинты и SSE, бот, Docker; часть блока 5.3 сохранена ниже; `docs/data_inventory.md`, правки в `docs/bot.md`, `docs/chat.md`, `docs/chunking_experiment.md`.
+- **Тесты:** +93.
+  - `tests/unit/test_ingestion.py` — корпус (66 файлов, форматы, авторы, опись), генератор воспроизводит файлы, ридеры и метаданные, UPSERTS: повтор без эмбеддингов, изменение, удаление, `.failed` и лог, потерянный docstore, пустая коллекция, сбой модели эмбеддингов посреди записи, смена нарезки, один файл; битый файл закрыт до переименования в `.failed` (Windows); CLI и опись;
+  - `tests/unit/test_documents_api.py` — загрузка 202 и индексация в фоне, повторная загрузка без дублей, битый файл, 401/413/415/422, имена с путём, статус, переиндексация;
+  - `tests/chat/test_rag_chat.py` — контекст и правило в запросе, `event: sources` перед `done`, score-guard без модели, condense и откат без него, 503 без записи вопроса, отказ модели, `RAG__CHAT=false`, оценка с источниками в обоих хранилищах, `sanitize`;
+  - `tests/bot/test_bot_rag.py` — debounce по чату и общий счётчик, подпись с источниками, оценка с источниками, разбор `event: sources`;
+  - в `test_rag.py` — контракт 5.5 (id, `cited`, `confident`), отказ модели, калибровка (вопросы о продукте без ответа в подбор порога не входят); тесты 5.3–5.4 — на учебном корпусе через `RAG__LAB_*`; `tests/integration/test_rag_live.py` — ещё два живых теста на корпусе ассистента.
+
+### Проверка на Windows
+
+Ollama с `bge-m3` и `llama3.2` запущена, в `.env` — ключи прошлых блоков (`QDRANT_API_KEY`, `ADMIN_TOKEN`, `BOT_TOKEN`, `INTERNAL_TOKEN`). Новых обязательных переменных нет; строки `RAG__*` и `BOT_EDIT_INTERVAL` из `.env.example` можно перенести пустыми.
+
+```powershell
+pip install -r requirements.txt                       # + pymupdf 1.28.2
+python -m pytest -q                                   # 1314 passed (в песочнице 1313 + 1 skipped)
+docker compose up -d qdrant
+
+# 1. Индексация: 66 файлов, повторно — «0 changed, 66 unchanged»
+python scripts/ingest.py data/
+python scripts/ingest.py data/
+
+# 2. Упавший файл: переименован в .failed и виден в логе
+New-Item -ItemType Directory -Force data\uploads | Out-Null
+Set-Content data\uploads\broken.pdf "not a pdf"
+python scripts/ingest.py data/                        # «1 failed», data\uploads\broken.pdf.failed; код выхода 1
+Remove-Item data\uploads\broken.pdf.failed
+
+# 3. Порог отказа на этом корпусе
+python scripts/calibrate_threshold.py --out var\threshold.md
+```
+
+Весь стек — `docker compose up -d --build` (образ пересобирается: новый пакет и корпус). Через минуту-две — итог индексации при старте:
+
+```powershell
+docker compose ps                                     # app, bot, qdrant, redis, postgres — Up; migrate — Exited (0)
+docker compose logs app | Select-String "ingest_done"
+
+# 4. /rag/query: ответ с цитатами и источниками; посторонний вопрос — отказ и score-guard в логе;
+#    вопрос о продукте без ответа в базе (криптовалюта, близость 0.662) проходит порог — отказ даёт промпт
+curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: application/json" -d "@examples/requests/rag_query_refund.json"
+curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: application/json" -d "@examples/requests/rag_query_off_topic.json"
+curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: application/json" -d "@examples/requests/rag_query_not_in_base.json"
+docker compose logs app | Select-String "rag_score_guard|rag_refused"
+
+# 5. Диалог: вопрос и follow-up, SSE с event: sources
+$chat = (Invoke-RestMethod -Method Post http://127.0.0.1:8000/chats -ContentType "application/json" -Body '{"owner_external_id":"check-55","interface":"cli"}').chat_id
+curl.exe -N -X POST "http://127.0.0.1:8000/chats/$chat/messages" -F "content=<examples/requests/chats_message_refund.txt"
+curl.exe -N -X POST "http://127.0.0.1:8000/chats/$chat/messages" -F "content=<examples/requests/chats_message_followup.txt"
+docker compose logs app | Select-String "chat_rag_condensed"
+
+# 6. Загрузка PDF: 202, через 30–60 с — в индексе
+$admin = (Select-String -Path .env -Pattern '^ADMIN_TOKEN=\s*"?([^"#\s]+)').Matches[0].Groups[1].Value   # токен не печатается
+curl.exe -s -X POST http://127.0.0.1:8000/documents/upload -H "X-Admin-Token: $admin" -F "file=@samples/upload_tariffs_2027.pdf" -w " %{http_code}`n"
+Start-Sleep 30
+curl.exe -s "http://127.0.0.1:8000/documents/status?file=uploads/upload_tariffs_2027.pdf"
+curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: application/json" -d "@examples/requests/rag_query_upload.json"
+
+# 7. Повторный старт не переиндексирует корпус
+docker compose restart app
+docker compose logs app --since 2m | Select-String "ingest_done"     # unchanged 67
+
+# 8. Живые тесты на Qdrant и Ollama
+python -m pytest -m llm tests/integration/test_rag_live.py -v -s
+```
+
+**Бот:** в Telegram — «Каков срок возврата оплаты?», затем «А при оплате по счёту?». Ответ растёт правками сообщения, внизу — «Источники: [1] …», под ним 👍/👎. Нажать 👎 и проверить, что оценка сохранилась с источниками:
+
+```powershell
+docker compose logs bot | Select-String "feedback"
+docker compose exec postgres psql -U multapi -d multapi -c "SELECT value, sources FROM message_feedback ORDER BY id DESC LIMIT 1"
+```
+
+### Результаты
+
+**Песочница (Linux).** Ollama недоступна: эмбеддинги — подставной сервер (векторы из триграмм символов), модель ответа — подставная: переписывает follow-up и отвечает первым предложением фрагмента [1]. Близость и ответы смысла не имеют — проверена механика, порог для неё — 0.3.
+- **Индексация:** `scripts/ingest.py data/` — «66 файлов: 66 new», 102 точки в `kb_docs`; повтор — «0 new, 0 changed, 66 unchanged», 0 фрагментов, 0,9 с. Битый PDF и пустой Markdown — `failed`, переименованы в `.failed`, `ingest_file_failed` в логе с путём от корня корпуса; изменённый файл — `changed`, удалённый — `removed`, точек ровно столько, сколько фрагментов.
+- **Сервис (uvicorn):** индексация при старте в фоне, затем `rag_ready`. `/rag/query` «Каков срок возврата оплаты?» — ответ с [1], 5 источников (`releases/release-notes_2026-h1.pdf`, стр. 7, `billing/refunds_v2.docx`, …), `confident: true`; «Как приготовить борщ?» — отказ, `rag_score_guard` (0.234 < 0.3) в логе.
+- **Диалог:** SSE — токены, `event: sources`, `done`; follow-up «А при оплате по счёту?» переписан в «Каков срок возврата оплаты — при оплате по счёту?» (`chat_rag_condensed`), первым источником стал `billing/refunds_v2.docx`; в истории для модели цитаты [1] вычищены; оценка 👎 с источниками — в `feedback.jsonl`.
+- **Загрузка:** PDF — 202, через 3 с `state: new`, вопрос о новом тарифе находит `uploads/…pdf`, стр. 1; без токена — 401; `../../app/main.py` — 415; битый PDF — `failed` и `.failed`.
+- **Docker:** образ собран; в контейнере индексация при старте — 66 new, загрузка в том `rag_uploads`; `docker restart` и пересоздание контейнера с теми же томами — «67 unchanged»: время изменения файлов в образе сохраняется, docstore — в томе.
+- **Тесты:** `pytest` — 1313 passed и 1 skipped, с `-W error` тоже.
+
+**Windows (Ollama на CPU: `bge-m3`, `llama3.2`).**
+- **Тесты:** `pytest` — 1314 passed. Первый прогон нашёл ошибку, которой в песочнице не было: битый PDF не переименовывался в `.failed` — PyMuPDF держал файл открытым, а Windows не переименовывает открытый файл (Linux — переименовывает). Исправлено: PDF читается из байтов, переименование — после обработки ошибки; добавлен тест, имитирующий поведение Windows и на Linux (`docs/rag.md`, «Подводные камни блока 5.5»).
+- **Индексация:** `scripts/ingest.py data/` — «66 файлов: 66 new», 102 фрагмента, 35,1 с; повтор — «0 new, 0 changed, 66 unchanged», 0 фрагментов, 1,0 с. Битый PDF — `failed`, `uploads/broken.pdf → uploads/broken.pdf.failed`, строка `ingest_file_failed` в логе с путём от корня корпуса.
+- **Порог:** `scripts/calibrate_threshold.py` — вопросы по базе 0.593–0.823 (28), посторонние 0.242–0.448 (8): группы разделяются, порог 0.5 в зазоре — 0 ошибок в обе стороны. Вопросы о продукте без ответа в базе — 0.478–0.662, их отказ — за промптом. Таблицы и разбор — `docs/rag.md`, «Калибровка (Windows)».
+- **Docker:** `docker compose up -d --build` — app, bot, qdrant, redis, postgres работают, migrate завершился с кодом 0. Индексация при старте — «66 new», 102 фрагмента, 68 с; после пересборки образа — «66 unchanged», 1 с: состояние индексации — в томе `rag_state`.
+- **`/rag/query`:** «Каков срок возврата оплаты?» — 14 дней по `refunds_v2.docx`, `confident: true`; «Как приготовить борщ?» — отказ порогом (0.327 < 0.5), `rag_score_guard` в логе; «Можно ли оплатить тариф криптовалютой?» — порог пройден (0.662), отказала модель, `rag_refused` в логе.
+- **Цитаты:** первый ответ о возврате пришёл без [1] — `llama3.2` не выполняла правило «номер после каждого предложения». Замер четырёх вариантов промпта (`scripts/citation_experiment.py`): номер после предложения — цитаты в 3 ответах из 5; со строкой «Источники: [1], [3]» в конце — в 5 из 5, отказ на вопросы без ответа в базе — 2 из 2; пример диалога тоже дал 5 из 5, но сломал отказ. Разбор — `docs/rag.md`, «Цитаты (Windows)».
+- **Диалог:** SSE — токены, `event: sources` перед `done`, ответ «Срок возврата оплаты составляет 14 дней после списания. Источники: [2], [3].». Follow-up «А при оплате по счёту?» condense без образцов переписал в «Какова сумма, которую я могу заплатить по счёту?» — поиск ушёл в оплату, ответ — «По базе не нашёл». Замер `scripts/condense_experiment.py` на 4 парах: без condense нужный файл в top-5 — 3 из 4, condense с образцами — 4 из 4, склейка двух вопросов ломается на смене темы; в сервисе — condense с образцами. После правки поиск нашёл `refunds_v2.docx` первым (0.707), ответ учёл контекст (возврат при оплате по счёту), но `llama3.2` поменяла местами части фразы из документа и не поставила «Источники: …» — ошибка генерации 3B-модели, разбор — `docs/rag.md`, «Condense (Windows)».
+- **Загрузка:** `POST /documents/upload` с `samples/upload_tariffs_2027.pdf` — 202; через 30 с статус `new`, `indexed: true`. Вопрос о новом тарифе — «Цена тарифа «Квант» для студентов составляет 290 ₽ в месяц. Источники: [1][2]», первый источник — `uploads/upload_tariffs_2027.pdf`, стр. 1 (0.828).
+- **Перезапуск:** `docker compose restart app` — «67 unchanged» (66 файлов корпуса и загруженный PDF), 2,3 с.
+- **Живые тесты:** `pytest -m llm tests/integration/test_rag_live.py` — 6 passed за 4 мин 10 с: обе версии на учебном корпусе (тариф «Команда» — 4 900 ₽ со строкой «Источники: …»; «Битрикс24» — отказ порогом, 0.439 и 0.448) и ассистент на корпусе 5.5 (возврат — с цитатами, борщ — отказ порогом, 0.327).
+- **Бот:** ответ растёт правками сообщения; под ним подпись «Источники:» с именами файлов вместо строки модели. Нажатие 👎 → «Спасибо за оценку!», в логе бота `feedback … value=down saved=True sources=2`, в `message_feedback` — `down` и два источника с `cited: true`. Follow-up в боте модель пересказала верно (на ту же карту за 5–10 рабочих дней, при оплате по счёту — на расчётный счёт плательщика) — ответы 3B-модели от прогона к прогону разные. Найдена ошибка: оба ответа начинались с «Первое утверждение [1].» / «Второе утверждение [2][3].» — модель вставила образец формата из правил. Образец убран; после пересборки ответы в боте начинаются по делу («Срок возврата оплаты составляет 14 дней после списания.», follow-up — верно и с `refunds_v2.docx` в подписи), перемер цитат без образца — 5 из 5, отказ — 2 из 2. Отказ модель теперь пишет со строкой «Источники: [5]» — бот её убирает, `/rag/query` заменяет ответ ровно фразой отказа.
+
+### Соответствие критериям блока 5.5
+
+| Критерий | Реализация |
+|---|---|
+| `python scripts/ingest.py data/` индексирует 50+ документов разных форматов, упавшие — `.failed` и в логах | 66 файлов (HTML, MD, DOCX, PDF), 102 документа; `.failed` + `ingest_file_failed`; `test_corpus_has_66_documents_*`, `test_broken_and_empty_files_are_renamed_and_logged` |
+| Повторный запуск — «0 changed, N unchanged» (UPSERTS через docstore) | `IngestionPipeline` + `SimpleDocumentStore` + `DocstoreStrategy.UPSERTS`; `test_second_run_is_all_unchanged_without_embeddings` |
+| `POST /rag/query` синхронно; `/chats/{id}/messages` — SSE с sanitize, финальный `event: sources` с `file_name`, `page`, `score`, `snippet` | `app/routers/rag.py`; `app/chat/routes.py` (`sanitize`, `sse_event(..., event="sources")`); `test_answer_from_knowledge_base_streams_sources_before_done`, `test_sse_sanitize_keeps_event_on_one_line` |
+| Multi-turn: «Каков срок возврата?» → follow-up учитывает контекст | история из `ChatService` + condense по `chat_id`; пара «Каков срок возврата оплаты?» → «А при оплате по счёту?»; `test_follow_up_is_condensed_for_search_*`. На Windows: condense с образцами (выбран замером, 4 из 4 пар) — поиск находит `refunds_v2.docx` первым, ответ учитывает контекст, но `llama3.2` путает части фразы из документа — `docs/rag.md`, «Condense (Windows)» |
+| Вопрос не по базе — «по базе не нашёл, могу эскалировать», score-guard в логах | `rag_common.NO_ANSWER`, `Retrieval.log_guard` → `rag_score_guard`; правило в промпте; `test_llamaindex_score_guard_skips_model_and_logs`, `test_score_guard_answers_without_model` |
+| `POST /documents/upload` с PDF — 202, через 30–60 с документ в индексе | `app/routers/documents.py`, `BackgroundTasks`, UPSERTS; `test_upload_returns_202_and_indexes_in_background` |
+| Бот отвечает через RAG, сообщение обновляется по мере генерации, 👍/👎 сохраняют feedback | `editMessageText` с debounce ≥ 700 мс по `chat_id`, подпись с источниками, feedback с `sources`; `tests/bot/test_bot_rag.py` |
+| `docker compose up -d` — app + qdrant + redis + bot без ручных шагов | `compose.yaml`: индексация при старте, тома `rag_state` / `rag_uploads`, миграции — сервис `migrate`; `TestRagCorpus` |
+| `docs/rag.md` — Mermaid, параметры chunking, threshold с пояснением | разделы «Схема: два контура», «Параметры», «Порог отказа» и «Калибровка (Windows)»: 0.5 — в зазоре 0.448–0.593 между посторонними вопросами и вопросами по базе |
+| `docs/data_inventory.md` — число документов, форматы, размер | сгенерирован `scripts/data_inventory.py`; `test_inventory_doc_matches_corpus` |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -2864,6 +3010,8 @@ LLM__MAX_RETRIES=2
 Для медиа и уведомлений (блок 4.3): `CHAT_VISION_MODEL` (модель для фото, например `gemma3:4b`), `AUDIO_API_KEY` / `AUDIO_BASE_URL` / `WHISPER_MODEL` / `AUDIO_LANGUAGE` (Whisper), `MEDIA__*` (пределы файлов и токены картинки), `INTERNAL_TOKEN` (общий секрет сервиса и бота), `BOT_URL` (адрес HTTP-API бота); у бота — `BOT_API_HOST`, `BOT_API_PORT`, `BOT_STREAMING`, `BACKEND_STREAM_TIMEOUT`.
 
 Для production-обвязки (блок 4.4): `ADMIN_TOKEN` (заголовок `X-Admin-Token` admin API; тот же токен у бота для `/stats`, `/users`, `/broadcast` и рассылок), `MODERATION__ENABLED`, `MODERATION__KEYWORDS_FILE`, `MODERATION__OPENAI_ENABLED` / `MODERATION__OPENAI_API_KEY` / `MODERATION__OPENAI_MODEL` / `MODERATION__THRESHOLDS` / `MODERATION__FAIL_CLOSED`; у бота — `BOT_BROADCAST_POLL`.
+
+Для RAG (блоки 5.3–5.5): `RAG__DATA_DIR` и `RAG__COLLECTION` (корпус ассистента `data`, `kb_docs`), `RAG__LAB_DIR` / `RAG__LAB_COLLECTION` (учебный корпус), `RAG__DOCSTORE_DIR`, `RAG__INGEST_ON_START`, `RAG__UPLOAD_DIR` / `RAG__UPLOAD_MAX_MB`, `RAG__SCORE_THRESHOLD`, `RAG__SIMILARITY_TOP_K` / `RAG__CANDIDATES_TOP_K`, `RAG__CHAT`, `RAG__CONDENSE`, нарезка и re-ranker блока 5.4; у бота — `BOT_EDIT_INTERVAL`. Полный список — [`docs/rag.md`](docs/rag.md#настройки).
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 

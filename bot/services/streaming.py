@@ -1,11 +1,10 @@
 """
-Ответ потоком в Telegram (блоки 4.2–4.3).
+Ответ потоком в Telegram (блоки 4.2–4.3, 5.5).
 
 answer_with_stream(message, backend, chat_id, prompt, media=..., mime=..., mode=...):
 1. Пока модель думает над первым словом (llama3.2 на CPU — до 15 с, фото — дольше), в чате
    висит «печатает…» (ChatActionSender: sendChatAction каждые 5 с).
-2. mode="draft" (блок 4.3, по умолчанию; BOT_STREAMING) — нативный черновик Telegram,
-   DraftRenderer:
+2. mode="draft" (блок 4.3; BOT_STREAMING=draft) — нативный черновик Telegram, DraftRenderer:
    - сразу — пустой черновик sendMessageDraft(text=""): по документации Bot API 10.0
      Telegram показывает «Thinking…». aiogram пустые поля не отправляет, так что text в
      запросе нет совсем; если Telegram такой черновик не примет, бот просто обойдётся без
@@ -20,10 +19,15 @@ answer_with_stream(message, backend, chat_id, prompt, media=..., mime=..., mode=
      черновиком с новым draft_id.
    sendMessageDraft работает только в личных чатах. В группе, а также если Telegram
    отклонил черновик (старый Bot API), ответ показывается правками — как в блоке 4.2.
-3. mode="edit" (блок 4.2) — StreamRenderer: первый фрагмент — новое сообщение, дальше
-   message.edit_text(buffer) не чаще раза в EDIT_INTERVAL (Telegram ограничивает частоту
-   правок одного чата). RetryAfter — промежуточные правки ждут паузу, финальная
-   повторяется. Ответ длиннее MESSAGE_LIMIT продолжается новым сообщением.
+3. mode="edit" (блоки 4.2, 5.5; по умолчанию с блока 5.5) — StreamRenderer: первый фрагмент —
+   новое сообщение, дальше editMessageText (message.edit_text(buffer)) с debounce по чату:
+   EditDebounce хранит last_edit_at[chat_id] (time.monotonic()), и сообщение обновляется, только
+   если с прошлой правки в этом чате прошло не меньше EDIT_INTERVAL (BOT_EDIT_INTERVAL, 0,7 с).
+   Telegram терпит около 30 правок в секунду на чат, а одно сообщение советует править не чаще
+   раза в секунду — чаще приходит 429 Too Many Requests. Счётчик общий для всех сообщений чата:
+   два ответа подряд в одном чате не удваивают частоту. Финальная правка ждёт свою очередь, а не
+   пропускается. RetryAfter — промежуточные правки ждут паузу, финальная повторяется. Ответ
+   длиннее MESSAGE_LIMIT продолжается новым сообщением.
 4. Ошибка до первого фрагмента — сообщение об ошибке вместо ответа; посреди ответа —
    пометка «Ответ прерван: …» к уже показанному тексту, и он сохраняется сообщением. Текст
    ответа модели не разбирается как HTML/Markdown: parse_mode не задан.
@@ -33,6 +37,9 @@ answer_with_stream(message, backend, chat_id, prompt, media=..., mime=..., mode=
    Черновик эфемерный и исчезает сам.
 6. Блок 4.4. Под последним сообщением ответа — кнопки 👍/👎 (fb:up:<id>, fb:down:<id>, id —
    из события done). Под заменённым модерацией ответом и под ответом с ошибкой их нет.
+7. Блок 5.5. Ответ по базе знаний (событие sources): к последнему сообщению дописывается
+   подпись «Источники: [1] refunds_v2.docx …» (bot/services/sources.py), показанные источники
+   запоминаются по id ответа — 👍/👎 отправит их в сервис вместе с оценкой.
 """
 from __future__ import annotations
 
@@ -54,10 +61,11 @@ from aiogram.utils.chat_action import ChatActionSender
 from bot import texts
 from bot.keyboards.inline import feedback_kb
 from bot.services.backend_client import BACKEND_ERRORS, error_body, error_code
+from bot.services.sources import SHOWN_SOURCES, legend, shown, without_sources_line
 
 log = logging.getLogger(__name__)
 
-EDIT_INTERVAL = 1.0      # с между правками одного сообщения (mode="edit")
+EDIT_INTERVAL = 0.7      # с между правками в одном чате (mode="edit"; BOT_EDIT_INTERVAL, не меньше 0,7)
 DRAFT_INTERVAL = 0.3     # с между обновлениями черновика (mode="draft")
 DRAFT_KEEPALIVE = 20.0   # с: черновик живёт ~30 с — обновить, если текст давно не менялся
 MESSAGE_LIMIT = 4000     # символов в сообщении; у Telegram 4096 — с запасом на пометку об ошибке
@@ -93,17 +101,52 @@ def split_point(text: str, limit: int) -> int:
     return limit
 
 
+class EditDebounce:
+    """Debounce правок по чату (блок 5.5): last_edit_at[chat_id] — когда в этом чате последний раз
+    отправили или правили сообщение ответа; следующая правка — не раньше чем через interval.
+    Время — time.monotonic(): ему не страшны переводы системных часов."""
+
+    STALE = 3600.0           # с: записи старше часа забываются — словарь не растёт бесконечно
+
+    def __init__(self, interval: float = EDIT_INTERVAL, clock: Callable[[], float] = time.monotonic) -> None:
+        self.interval = interval
+        self.clock = clock
+        self.last_edit_at: dict[int, float] = {}
+
+    def wait_time(self, chat_id: int) -> float:
+        """Сколько секунд ждать до следующей правки в чате (0 — можно сейчас)."""
+        last = self.last_edit_at.get(chat_id)
+        return 0.0 if last is None else max(0.0, last + self.interval - self.clock())
+
+    def ready(self, chat_id: int) -> bool:
+        return self.wait_time(chat_id) <= 0
+
+    def mark(self, chat_id: int) -> None:
+        now = self.clock()
+        self.last_edit_at[chat_id] = now
+        if len(self.last_edit_at) > 10_000:
+            self.last_edit_at = {k: v for k, v in self.last_edit_at.items() if now - v < self.STALE}
+
+
+# Один на процесс бота: правки всех ответов в одном чате делят один счётчик.
+EDIT_DEBOUNCE = EditDebounce()
+
+
 class StreamRenderer:
-    """Показывает растущий текст ответа: первое сообщение, затем правки с интервалом."""
+    """Показывает растущий текст ответа: первое сообщение, затем правки не чаще раза в
+    interval на чат (EditDebounce)."""
 
     mode: StreamMode = "edit"
 
-    def __init__(self, source: Message, *, interval: float = EDIT_INTERVAL, limit: int = MESSAGE_LIMIT,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, source: Message, *, interval: float | None = None, limit: int = MESSAGE_LIMIT,
+                 clock: Callable[[], float] = time.monotonic, debounce: EditDebounce | None = None) -> None:
         self.source = source
-        self.interval = interval
+        # Свой interval (тесты) — свой счётчик; иначе общий счётчик процесса с BOT_EDIT_INTERVAL.
+        self.debounce = debounce or (EditDebounce(interval, clock) if interval is not None else EDIT_DEBOUNCE)
+        self.interval = self.debounce.interval
         self.limit = limit
         self.clock = clock
+        self.chat_id = source.chat.id
         self.current: Message | None = None    # сообщение бота, которое сейчас дописывается
         self.buffer = ""                       # его полный текст
         self.shown = ""                        # что из него уже видно в Telegram
@@ -137,7 +180,10 @@ class StreamRenderer:
         await self._overflow()
         await self._show(force=False)
 
-    async def finish(self, note: str = "") -> None:
+    async def finish(self, note: str = "", clean: Callable[[str], str] | None = None) -> None:
+        """Последняя правка: clean — что убрать из текста ответа перед подписью note."""
+        if clean is not None:
+            self.buffer = clean(self.buffer)
         self.buffer += note
         await self._overflow()
         await self._show(force=True)
@@ -166,12 +212,15 @@ class StreamRenderer:
             self.messages.append(self.current)
         else:
             now = self.clock()
-            if not force and (now - self.last_edit < self.interval or now < self.blocked_until):
+            if not force and (not self.debounce.ready(self.chat_id) or now < self.blocked_until):
                 return
+            if force and (pause := self.debounce.wait_time(self.chat_id)) > 0:
+                await asyncio.sleep(pause)          # финальную правку не пропускаем — ждём очередь чата
             if not await self._edit(text, retry=force):
                 return
         self.shown = text
         self.last_edit = self.clock()
+        self.debounce.mark(self.chat_id)
 
     async def _send(self, text: str) -> Message:
         """Новое сообщение. Его нельзя пропустить, поэтому на RetryAfter — пауза и повтор."""
@@ -276,11 +325,13 @@ class DraftRenderer:
         if self.buffer.strip():
             await self._draft(self.buffer, force=False, origin="feed")
 
-    async def finish(self, note: str = "") -> None:
+    async def finish(self, note: str = "", clean: Callable[[str], str] | None = None) -> None:
         await self.close()
         if self.fallback is not None:
-            await self.fallback.finish(note)
+            await self.fallback.finish(note, clean)
             return
+        if clean is not None:
+            self.buffer = clean(self.buffer)
         self.buffer += note
         await self._overflow()
         if self.buffer.strip():
@@ -360,7 +411,7 @@ class DraftRenderer:
 Renderer = StreamRenderer | DraftRenderer
 
 
-def make_renderer(message: Message, mode: StreamMode = "draft") -> Renderer:
+def make_renderer(message: Message, mode: StreamMode = "edit") -> Renderer:
     """Черновик — только в личном чате: sendMessageDraft принимает лишь их."""
     if mode == "draft" and message.chat.type == ChatType.PRIVATE:
         return DraftRenderer(message)
@@ -380,7 +431,7 @@ async def attach_feedback(renderer: Renderer, message_id: UUID | None) -> None:
 
 async def answer_with_stream(message: Message, backend: StreamingBackend, chat_id: UUID, prompt: str, *,
                              media: bytes | None = None, mime: str | None = None, filename: str | None = None,
-                             mode: StreamMode = "draft", renderer: Renderer | None = None) -> Renderer:
+                             mode: StreamMode = "edit", renderer: Renderer | None = None) -> Renderer:
     renderer = renderer or make_renderer(message, mode)
     # Текст — send_message(chat_id, текст), как в блоке 4.2; файл — тем же методом с media.
     chunks = (backend.send_message(chat_id, prompt) if media is None
@@ -403,10 +454,17 @@ async def answer_with_stream(message: Message, backend: StreamingBackend, chat_i
         if replacement:                                # блок 4.4: ответ не прошёл модерацию
             await renderer.replace(texts.replacement_text(replacement, getattr(chunks, "categories", [])))
             return renderer
-        await renderer.finish()
+        # Блок 5.5: ответ по базе знаний — подпись с источниками и память для 👍/👎.
+        items = shown(getattr(chunks, "sources", None) or [], getattr(chunks, "confident", None))
+        # Строку модели «Источники: [1], [3]» заменяет подпись, а при отказе модель тоже её дописывает
+        # («По базе не нашёл. Могу эскалировать. Источники: [5]») — там подписи нет, и строка не нужна.
+        await renderer.finish(legend(items) if renderer.started else "", without_sources_line)
         if not renderer.started:                       # ответ из одних пробелов и переводов строк
             await message.answer(texts.EMPTY_ANSWER)
-        await attach_feedback(renderer, getattr(chunks, "message_id", None))
+        message_id = getattr(chunks, "message_id", None)
+        if message_id is not None:
+            SHOWN_SOURCES.remember(message_id, items)
+        await attach_feedback(renderer, message_id)
     except BACKEND_ERRORS as exc:
         if isinstance(exc, httpx.HTTPStatusError) and error_code(exc) == "moderation_blocked":
             # Штатный отказ модерации (блок 4.4), а не сбой сервиса: одна строка без текста вопроса.

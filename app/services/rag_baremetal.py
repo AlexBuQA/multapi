@@ -1,6 +1,7 @@
 """
 RAG без фреймворка (блок 5.3): тот же путь, что app/services/rag.py, но руками — чтобы видеть,
-что именно делает LlamaIndex.
+что именно делает LlamaIndex. Корпус — учебный (RAG__LAB_DIR, data/rag-block-03): на нём версии
+сравнивает scripts/rag_compare.py. Контракт ответа и промпт с цитатами — блока 5.5 (rag_common).
 
     python -m app.services.rag_baremetal                       # индекс + вопрос по умолчанию, вывод — JSON
     python -m app.services.rag_baremetal "Сколько запросов в минуту можно делать к API?"
@@ -15,10 +16,11 @@ RAG без фреймворка (блок 5.3): тот же путь, что app
 4. Своя коллекция RAG__BAREMETAL_COLLECTION, плоский payload {text, file_name, chunk_index,
    embed_model}, id — uuid5 от файла и номера фрагмента: повторная индексация перезаписывает те же точки.
 5. Поиск — qdrant_client.query_points (search устарел), top-k = RAG__SIMILARITY_TOP_K.
-6. Промпт — system + фрагменты + вопрос (тексты из rag_common, как у LlamaIndex) →
-   openai.chat.completions.create к модели LLM__*. Порог RAG__MIN_SCORE — тот же.
+6. Score-guard RAG__SCORE_THRESHOLD — тот же: ниже порога модель не вызывается.
+7. Промпт — system + нумерованные фрагменты «[1] (файл) текст» + вопрос (тексты из rag_common, как у
+   LlamaIndex) → openai.chat.completions.create к модели LLM__*.
 
-answer(question) -> тот же словарь, что у RAGService.answer: answer, top_score, sources.
+answer(question) -> тот же словарь, что у RAGService.answer: answer, top_score, confident, sources.
 """
 from __future__ import annotations
 
@@ -35,13 +37,14 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 from app.services import embeddings
 from app.services.rag_common import (
     DEFAULT_QUESTION,
-    NO_ANSWER,
     USER_TEMPLATE,
     RAGError,
     RAGNotIndexed,
+    final_answer,
     llm_error,
+    numbered_context,
     qdrant_error,
-    result,
+    refusal,
     source,
     system_prompt,
 )
@@ -133,7 +136,7 @@ class BareMetalRAG:
                 self.client.create_collection(self.collection, vectors_config=VectorParams(
                     size=self.cfg.embedding_dim, distance=Distance.COSINE))
             rows = []
-            for path in sorted(p for p in self.settings.data_dir.rglob("*") if p.is_file()):
+            for path in sorted(p for p in self.settings.lab_dir.rglob("*") if p.is_file()):
                 for number, chunk in enumerate(naive_chunks(read_file(path), self.settings.chunk_size,
                                                             self.settings.chunk_overlap)):
                     rows.append((path.name, number, chunk))
@@ -170,11 +173,13 @@ class BareMetalRAG:
                                             with_payload=True).points
         except (ResponseHandlingException, UnexpectedResponse) as exc:
             raise qdrant_error(exc, self.cfg.qdrant_url) from exc
-        found = [source(hit.payload["text"], hit.payload.get("file_name"), hit.score) for hit in hits]
         top_score = hits[0].score if hits else 0.0
-        if top_score < self.settings.min_score:
-            return result(NO_ANSWER, top_score, found)
-        context = "\n\n".join(f"file_name: {hit.payload.get('file_name')}\n\n{hit.payload['text']}" for hit in hits)
+        if top_score < self.settings.score_threshold:
+            return refusal(top_score)
+        found = [source(number, hit.payload["text"], file_name=hit.payload.get("file_name"), page=None,
+                        score=hit.score, path=hit.payload.get("file_name"))
+                 for number, hit in enumerate(hits, start=1)]
+        context = numbered_context([(hit.payload["text"], hit.payload.get("file_name"), None) for hit in hits])
         messages = [
             {"role": "system", "content": system_prompt(self.cfg.support.product_name)},
             {"role": "user", "content": USER_TEMPLATE.format(context_str=context, query_str=question)},
@@ -188,8 +193,7 @@ class BareMetalRAG:
             if explained is exc:
                 raise
             raise explained from exc
-        text = (completion.choices[0].message.content or "").strip()
-        return result(text or NO_ANSWER, top_score, found)
+        return final_answer(completion.choices[0].message.content or "", top_score, found)
 
     def close(self) -> None:
         self.client.close()

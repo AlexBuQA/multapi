@@ -125,6 +125,7 @@ def replacement_text(replacement: str, categories: list[str]) -> str:
 
 # Оценки ответов 👍/👎 (блок 4.4).
 FEEDBACK_THANKS = "Спасибо за оценку!"
+SOURCES_TITLE = "Источники:"          # блок 5.5: подпись под ответом по базе знаний
 FEEDBACK_ALREADY = "Оценка уже учтена."
 FEEDBACK_GONE = "Этот ответ уже нельзя оценить."
 FEEDBACK_FAILED = "Не удалось сохранить оценку, попробуйте позже."
@@ -159,7 +160,8 @@ CODE_TEXTS = {
     "validation_error": REJECTED,
 }
 # Ошибки вложений: текст сервиса написан для пользователя — показываем как есть.
-SERVICE_TEXT_PREFIXES = ("media_", "audio_", "vision_")
+# Блок 5.5: недоступность базы знаний (rag_not_indexed, vector_store_unavailable, …) — тоже понятный текст.
+SERVICE_TEXT_PREFIXES = ("media_", "audio_", "vision_", "rag_", "vector_store_", "embeddings_", "rerank_")
 
 
 def user_message(exc: BaseException) -> str:

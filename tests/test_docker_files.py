@@ -113,19 +113,32 @@ class TestDockerignore(unittest.TestCase):
 
 
 class TestRagCorpus(unittest.TestCase):
-    """Блок 5.3: корпус RAG в образе — индексация из контейнера (python -m app.services.rag --build)."""
+    """Блоки 5.3, 5.5: корпуса RAG в образе — сервис индексирует корпус ассистента при старте."""
 
     def test_image_has_rag_corpus(self):
-        self.assertIn("COPY data/rag-block-03/ ./data/rag-block-03/", _read("Dockerfile"))
+        self.assertIn("COPY data/ ./data/", _read("Dockerfile"))
         patterns = [line.strip() for line in _read(".dockerignore").splitlines()
                     if line.strip() and not line.startswith("#")]
-        files = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "data" / "rag-block-03").iterdir())
-        self.assertEqual(len(files), 10)
-        for path in files:
+        lab = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "data" / "rag-block-03").iterdir())
+        self.assertEqual(len(lab), 10)
+        corpus = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "data").glob("*/*")
+                        if p.is_file() and p.parts[-2] not in ("archive", "rag-block-03", "uploads"))
+        self.assertGreaterEqual(len(corpus), 50)
+        for path in [*lab, *corpus, "data/.ragignore", "data/knowledge_base.json"]:
             with self.subTest(path=path):
                 self.assertFalse(_ignored(path, patterns))          # и .md корпуса, несмотря на *.md
-        self.assertTrue(_ignored("data/eval/golden.jsonl", patterns))   # остальное data/ — по-прежнему нет
-        self.assertTrue(_ignored("docs/rag.md", patterns))
+        for path in ("data/uploads/new.pdf", "data/billing/broken.pdf.failed", "data/archive/api_v1.md",
+                     "data/faq.md", "data/help_center.jsonl", "docs/rag.md"):
+            with self.subTest(path=path):
+                self.assertTrue(_ignored(path, patterns))           # не корпус — не в образе
+
+    def test_compose_indexes_on_start_and_keeps_state(self):
+        app = _service_block(_read("compose.yaml"), "app")
+        self.assertIn('RAG__INGEST_ON_START: "true"', app)
+        self.assertIn("rag_state:/app/var/ingest", app)
+        self.assertIn("rag_uploads:/app/data/uploads", app)
+        self.assertIn("EMBEDDINGS__CACHE_PATH: /app/var/ingest/", app)
+        self.assertIn("mkdir -p /app/var/chats /app/logs /app/var/ingest /app/data/uploads", _read("Dockerfile"))
 
 
 class TestChatStorageFiles(unittest.TestCase):
@@ -373,13 +386,17 @@ class TestSecrets(unittest.TestCase):
                      "QDRANT_URL", "QDRANT_API_KEY", "QDRANT_COLLECTION", "EMBEDDING_DIM",
                      # блок 5.3
                      "RAG__DATA_DIR", "RAG__COLLECTION", "RAG__BAREMETAL_COLLECTION", "RAG__CHUNK_SIZE",
-                     "RAG__CHUNK_OVERLAP", "RAG__SIMILARITY_TOP_K", "RAG__MIN_SCORE", "RAG__LLM_MODEL",
+                     "RAG__CHUNK_OVERLAP", "RAG__SIMILARITY_TOP_K", "RAG__LLM_MODEL",
                      "RAG__MAX_TOKENS", "RAG__TEMPERATURE",
                      # блок 5.4
                      "RAG__CHUNKING", "RAG__SEMANTIC_BUFFER_SIZE", "RAG__SEMANTIC_BREAKPOINT", "RAG__CANDIDATES_TOP_K",
                      "RERANK__ENABLED", "RERANK__PROVIDER", "RERANK__MODEL", "RERANK__API_KEY", "RERANK__BASE_URL",
                      "RERANK__DEVICE", "RERANK__MAX_LENGTH", "RERANK__BATCH_SIZE", "RERANK__TIMEOUT",
-                     "RERANK__CACHE_ENABLED", "RERANK__CACHE_PATH"):
+                     "RERANK__CACHE_ENABLED", "RERANK__CACHE_PATH",
+                     # блок 5.5
+                     "RAG__SCORE_THRESHOLD", "RAG__LAB_DIR", "RAG__LAB_COLLECTION", "RAG__DOCSTORE_DIR",
+                     "RAG__INGEST_ON_START", "RAG__UPLOAD_DIR", "RAG__UPLOAD_MAX_MB", "RAG__CHAT", "RAG__CONDENSE",
+                     "BOT_EDIT_INTERVAL"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):

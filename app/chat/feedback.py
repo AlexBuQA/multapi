@@ -1,8 +1,12 @@
 """
 Оценки ответов 👍/👎 (блок 4.4).
 
-    POST /chats/{chat_id}/messages/{message_id}/feedback     {"value": "up" | "down"}
+    POST /chats/{chat_id}/messages/{message_id}/feedback     {"value": "up" | "down", "sources": [...]}
     -> 200 {"message_id", "value", "saved"}
+
+sources (блок 5.5, необязательно) — источники RAG-ответа, которые клиент показал под ответом (из
+события sources потока): id, file_name, page, score. Хранятся рядом с оценкой: по 👎 видно, что
+чинить — поиск (нашлись не те документы) или генерацию (документы те, ответ плохой).
 
 message_id — id ответа ассистента из события done потока POST /chats/{id}/messages
 ({"type": "done", "message_id": "…"}): Telegram-бот кладёт его в callback_data кнопок
@@ -16,7 +20,7 @@ UNIQUE (owner_external_id, message_id): повторная оценка не с�
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 import structlog
@@ -29,8 +33,24 @@ from app.schemas.errors import ErrorResponse
 router = APIRouter(prefix="/chats", tags=["feedback"])
 
 
+class FeedbackSource(BaseModel):
+    """Источник, показанный под ответом (блок 5.5): поля события sources, без snippet."""
+
+    id: int = Field(ge=1, le=100, description="Номер цитаты [id] в ответе")
+    file_name: str | None = Field(default=None, max_length=300)
+    source: str | None = Field(default=None, max_length=500, description="Путь в корпусе")
+    page: int | None = Field(default=None, ge=1)
+    score: float | None = Field(default=None, ge=-1, le=1)
+    cited: bool | None = None
+
+    def stored(self) -> dict[str, Any]:
+        return self.model_dump(exclude_none=True)
+
+
 class FeedbackIn(BaseModel):
     value: Literal["up", "down"] = Field(description="up — 👍, down — 👎", examples=["up"])
+    sources: list[FeedbackSource] | None = Field(default=None, max_length=20,
+                                                 description="Источники, показанные под ответом (блок 5.5)")
 
 
 class FeedbackOut(BaseModel):
@@ -49,5 +69,6 @@ class FeedbackOut(BaseModel):
 )
 async def save_feedback(chat_id: UUID, message_id: UUID, body: FeedbackIn, service: ChatServiceDep) -> FeedbackOut:
     structlog.contextvars.bind_contextvars(chat_id=str(chat_id))
-    result = await service.add_feedback(chat_id, message_id, body.value)
+    sources = [item.stored() for item in body.sources] if body.sources else None
+    result = await service.add_feedback(chat_id, message_id, body.value, sources)
     return FeedbackOut(message_id=message_id, value=result.value, saved=result.saved)

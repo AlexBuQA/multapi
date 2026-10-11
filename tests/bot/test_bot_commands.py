@@ -31,7 +31,8 @@ async def test_same_chat_for_every_message(dp, bot, backend):
     assert [chat_id for chat_id, _ in backend.sent] == [backend.chats[(str(chat), "telegram")]] * 2
 
 
-async def test_text_goes_to_backend_and_streams(dp, bot, session):
+async def test_text_goes_to_backend_and_streams(dp, bot, session, settings):
+    settings.bot_streaming = "draft"                                  # черновики (блок 4.3)
     backend = dp["backend"] = FakeBackend(delay=0.05)
     chat = new_chat_id()
     await dp.feed_update(bot, message_update("Как меня зовут?", chat))
@@ -52,8 +53,9 @@ async def test_group_chat_streams_with_edits(dp, bot, session):
     assert session.on_screen(chat) == [backend.answer] and not session.drafts.get(chat)
 
 
-async def test_edit_mode_from_settings(dp, bot, session, settings):
-    settings.bot_streaming = "edit"
+async def test_edit_mode_is_default(dp, bot, session, settings):
+    """Блок 5.5: по умолчанию ответ растёт правками editMessageText (с debounce по чату), не черновиком."""
+    assert settings.bot_streaming == "edit"
     backend = dp["backend"] = FakeBackend(delay=0.05)
     chat = new_chat_id()
     await dp.feed_update(bot, message_update("Как меня зовут?", chat))

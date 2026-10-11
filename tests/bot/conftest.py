@@ -34,13 +34,23 @@ from bot_fakes import ADMIN_ID, FakeBackend, MockedSession  # noqa: E402
 BOT_ENV = ("BOT_TOKEN", "BACKEND_URL", "BOT_ADMIN_IDS", "BACKEND_TIMEOUT", "BOT_USE_SYSTEM_CERTS",
            "BOT_PROXY_URL", "BOT_PRODUCT_NAME", "BACKEND_STREAM_TIMEOUT", "BOT_STREAMING", "INTERNAL_TOKEN",
            "BOT_API_HOST", "BOT_API_PORT", "BOT_DEFAULT_USER_NAME", "ADMIN_TOKEN", "BOT_BROADCAST_POLL",
-           "BOT_EXTRA_CA_FILE")
+           "BOT_EXTRA_CA_FILE", "BOT_EDIT_INTERVAL")
 
 
 @pytest.fixture(autouse=True)
 def clean_bot_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in BOT_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def fast_edits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Общий debounce правок (блок 5.5, 0,7 с на чат) в тестах диалогов не нужен: финальная правка
+    ждала бы его в каждом тесте. Сам debounce проверяют тесты EditDebounce со своими часами."""
+    from bot.services.streaming import EDIT_DEBOUNCE
+
+    monkeypatch.setattr(EDIT_DEBOUNCE, "interval", 0.0)
+    monkeypatch.setattr(EDIT_DEBOUNCE, "last_edit_at", {})
 
 
 @pytest.fixture

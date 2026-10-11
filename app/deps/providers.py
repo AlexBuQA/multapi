@@ -68,9 +68,20 @@ def get_rag(request: Request) -> Any:
     return rag
 
 
+def get_ingestion(request: Request) -> Any:
+    """IngestionService из lifespan (блок 5.5) — один на процесс: у него замок, docstore и статусы
+    загрузок. Нет QDRANT_URL — 503."""
+    ingestion = getattr(request.app.state, "ingestion", None)
+    if ingestion is None:
+        raise RequestError(503, "rag_not_configured",
+                           "RAG выключен: в .env сервиса не задан QDRANT_URL (и EMBEDDING_DIM).")
+    return ingestion
+
+
 LimiterDep = Annotated[asyncio.Semaphore, Depends(get_limiter)]
 VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
 RagDep = Annotated[Any, Depends(get_rag)]
+IngestionDep = Annotated[Any, Depends(get_ingestion)]
 RedactorDep = Annotated[NameRedactor | None, Depends(get_redactor)]
 CanaryDep = Annotated[str | None, Depends(get_canary)]
 

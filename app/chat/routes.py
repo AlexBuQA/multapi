@@ -28,10 +28,20 @@ data: с JSON (блок 4.3; до него фрагменты шли текст�
            "message": "Не могу показать ответ — он мог нарушить правила."}\\n\\n
                                                         ответ не прошёл модерацию (блок 4.4):
                                                         показанный текст заменить на message
+    event: sources
+    data: {"type": "sources", "confident": true, "top_score": 0.71,
+           "sources": [{"id": 1, "file_name": "refunds_v2.docx", "page": null, "score": 0.71,
+                        "snippet": "…", "cited": true, …}]}\\n\\n
+                                                        блок 5.5: источники ответа по базе знаний —
+                                                        последнее событие ответа перед done (только
+                                                        если в сервисе включён RAG; при отказе —
+                                                        confident=false и пустой список)
     data: {"type": "done", "message_id": "<uuid>"}\\n\\n    конец ответа; message_id — id
                                                         сохранённого ответа для оценки (4.4)
     data: {"type": "error", "code": "...", "message": "..."}\\n\\n   ошибка посреди ответа
-Переводы строк внутри фрагмента экранирует JSON, поэтому событие всегда в одну строку.
+Переводы строк внутри фрагмента экранирует JSON, поэтому событие всегда в одну строку; sanitize()
+— страховка для любого текста в поле data: перевод строки там закончил бы поле раньше времени, и
+клиент получил бы обрезанный фрагмент и строку, которую не понял бы (блок 5.5).
 Ошибка до первого фрагмента (чата нет, провайдер недоступен, 429) — обычный JSON-ответ с
 кодом 404/429/502/503/504; вопрос не прошёл модерацию — 403 с detail.code =
 moderation_blocked (блок 4.4). После события error события done нет. Клиент ушёл, не дождавшись
@@ -61,7 +71,7 @@ from app.chat.deps import AudioClientDep, ChatServiceDep, SettingsDep
 from app.chat.domain import Chat, ChatInputError, ChatMessage, ChatStorageError, MediaError, MediaInfo, \
     RequestError, Role
 from app.chat.media import normalize_mime, read_media
-from app.chat.service import AnswerReplaced, AnswerSaved, StreamItem, clean_user_name
+from app.chat.service import AnswerReplaced, AnswerSaved, AnswerSources, StreamItem, clean_user_name
 from app.core.exceptions import LLMError
 from app.observability.logging import get_logger
 from app.schemas.errors import LLM_ERROR_RESPONSES, ErrorResponse
@@ -70,9 +80,19 @@ from app.services.notifier import NotifyError, notify_user
 router = APIRouter(prefix="/chats", tags=["chats"])
 log = get_logger()
 
-def sse_event(payload: dict[str, Any]) -> str:
-    """Одно событие SSE: JSON в одной строке data:. ensure_ascii=False — кириллица как есть."""
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+def sanitize(data: str) -> str:
+    """Значение поля data: SSE в одну строку. В SSE строку заканчивают \\n, \\r и \\r\\n: такой символ
+    внутри фрагмента ответа («…шаги:\\n1. …») оборвал бы поле data, и остаток пришёл бы клиенту
+    отдельной непонятной строкой. json.dumps сам пишет перевод строки как \\n (два символа), так что
+    для JSON это страховка; для любого другого текста — замена на экранированный вид."""
+    return data.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
+
+
+def sse_event(payload: dict[str, Any], event: str | None = None) -> str:
+    """Одно событие SSE: JSON в одной строке data:, с именем event: (блок 5.5 — sources) или без.
+    ensure_ascii=False — кириллица как есть."""
+    head = f"event: {event}\n" if event else ""
+    return f"{head}data: {sanitize(json.dumps(payload, ensure_ascii=False))}\n\n"
 
 
 DONE = sse_event({"type": "done"})
@@ -178,6 +198,9 @@ def sse_item(item: StreamItem) -> str:
     if isinstance(item, AnswerReplaced):
         return sse_event({"type": "moderation", "code": "moderation_blocked", "categories": item.categories,
                           "message": item.text})
+    if isinstance(item, AnswerSources):
+        return sse_event({"type": "sources", "confident": item.confident, "top_score": item.top_score,
+                          "sources": item.sources}, event="sources")
     return sse_token(item)
 
 

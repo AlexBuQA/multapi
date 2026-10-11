@@ -38,7 +38,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, text, update
@@ -142,11 +142,11 @@ class PostgresChatRepository:
             return ChatMessage.model_validate(row, from_attributes=True)
 
     async def add_feedback(self, chat_id: UUID, message_id: UUID, owner_external_id: str,
-                           value: FeedbackValue) -> FeedbackResult:
+                           value: FeedbackValue, sources: list[dict[str, Any]] | None = None) -> FeedbackResult:
         insert = (
             pg_insert(MessageFeedbackRow)
             .values(message_id=message_id, chat_id=chat_id, owner_external_id=owner_external_id, value=value,
-                    created_at=utc_now())
+                    sources=sources or None, created_at=utc_now())
             .on_conflict_do_nothing(constraint="uq_message_feedback_owner_message")
             .returning(MessageFeedbackRow.value)
         )

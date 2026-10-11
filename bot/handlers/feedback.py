@@ -5,8 +5,9 @@
 fb:down:<message_id> (bot/services/streaming.py, attach_feedback). Нажатие:
 1. разбор callback_data (parse_feedback); чужой формат — тихо игнорируется;
 2. чат клиента в сервисе — по chat.id сообщения (POST /chats идемпотентен);
-3. POST /chats/{chat_id}/messages/{message_id}/feedback {"value": "up" | "down"} —
-   сервис хранит одну оценку на пару (owner_external_id, message_id);
+3. POST /chats/{chat_id}/messages/{message_id}/feedback {"value": "up" | "down", "sources": [...]} —
+   сервис хранит одну оценку на пару (owner_external_id, message_id); sources (блок 5.5) —
+   источники, показанные под ответом (bot/services/sources.py, память по id ответа);
 4. кнопки убираются: edit_reply_markup(reply_markup=None), и всплывающее «Спасибо за
    оценку!» (или «Оценка уже учтена», если это повтор).
 Ошибка сервиса — кнопки остаются, чтобы можно было нажать ещё раз; ответ сервиса 404 (ответ
@@ -25,6 +26,7 @@ from bot import texts
 from bot.handlers.common import backend_chat_id
 from bot.keyboards.inline import FEEDBACK_PREFIX, parse_feedback
 from bot.services.backend_client import BACKEND_ERRORS, BackendClient
+from bot.services.sources import SHOWN_SOURCES
 
 router = Router(name="feedback")
 log = logging.getLogger(__name__)
@@ -47,7 +49,9 @@ async def on_feedback(callback: CallbackQuery, backend: BackendClient) -> None:
     value, message_id = parsed
     try:
         chat_id = await backend_chat_id(backend, message.chat)
-        result = await backend.send_feedback(chat_id, message_id, value)
+        sources = SHOWN_SOURCES.get(message_id)
+        result = await backend.send_feedback(chat_id, message_id, value, sources=sources) if sources \
+            else await backend.send_feedback(chat_id, message_id, value)
     except BACKEND_ERRORS as exc:
         log.warning("feedback_failed telegram_chat=%s error=%r", message.chat.id, exc)
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (404, 422):
@@ -56,7 +60,7 @@ async def on_feedback(callback: CallbackQuery, backend: BackendClient) -> None:
         else:
             await callback.answer(texts.FEEDBACK_FAILED)
         return
-    log.info("feedback telegram_chat=%s message_id=%s value=%s saved=%s", message.chat.id, message_id, value,
-             result.get("saved"))
+    log.info("feedback telegram_chat=%s message_id=%s value=%s saved=%s sources=%s", message.chat.id, message_id,
+             value, result.get("saved"), len(sources or []))
     await drop_buttons(message)
     await callback.answer(texts.FEEDBACK_THANKS if result.get("saved") else texts.FEEDBACK_ALREADY)

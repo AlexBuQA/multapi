@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.chat.domain import (Broadcast, Chat, ChatMessage, ChatStats, FeedbackResult, FeedbackValue,
@@ -83,7 +83,7 @@ class OpsRepository(Protocol):
     async def get_message(self, chat_id: UUID, message_id: UUID) -> ChatMessage | None: ...
 
     async def add_feedback(self, chat_id: UUID, message_id: UUID, owner_external_id: str,
-                           value: FeedbackValue) -> FeedbackResult: ...
+                           value: FeedbackValue, sources: list[dict[str, Any]] | None = None) -> FeedbackResult: ...
 
     async def record_moderation(self, incident: ModerationIncident) -> None: ...
 

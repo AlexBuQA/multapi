@@ -117,7 +117,7 @@ class Experiment:
         from app.services.rag import load_corpus
 
         started = time.perf_counter()
-        documents = load_corpus(self.cfg.rag.data_dir, self.embed_model.model_name, config.label)
+        documents = load_corpus(self.cfg.rag.lab_dir, self.embed_model.model_name, config.label)
         splitter = chunking.build_splitter(config.strategy, chunk_size=config.chunk_size,
                                            chunk_overlap=config.chunk_overlap, embed_model=self.embed_model,
                                            buffer_size=config.buffer_size,
@@ -381,7 +381,7 @@ def experiment(exp: Experiment, *, sweep_rerank: bool = True) -> tuple[str, dict
     report = [
         f"## Прогон — {datetime.now().astimezone():%Y-%m-%d %H:%M}",
         "",
-        (f"Корпус `{cfg.rag.data_dir.name}`, эмбеддинги `{first}` (EMBEDDING_DIM={cfg.embedding_dim}), golden dataset — "
+        (f"Корпус `{cfg.rag.lab_dir.name}`, эмбеддинги `{first}` (EMBEDDING_DIM={cfg.embedding_dim}), golden dataset — "
          f"{len(dataset)} вопросов ({types}). Метрики — по документам: id фрагмента — имя его файла. Один вопрос — "
          f"{1 / len(dataset):.3f} любой метрики."),
         "",
@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = get_settings()
         if not cfg.qdrant_url:
             raise RAGError("QDRANT_URL не задан: эксперимент индексирует коллекции в Qdrant")
-        corpus = [p.name for p in cfg.rag.data_dir.iterdir() if p.is_file()]
+        corpus = [p.name for p in cfg.rag.lab_dir.iterdir() if p.is_file()]
         dataset = load_dataset(corpus=corpus)
         client = make_qdrant_client(cfg.qdrant_url, cfg.qdrant_api_key.get_secret_value() if cfg.qdrant_api_key else None,
                                     asynchronous=False)

@@ -97,6 +97,9 @@ class MessageFeedbackRow(Base):
     chat_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
     owner_external_id: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
+    # Блок 5.5: источники RAG-ответа, показанные пользователю (id, file_name, page, score) — по 👎
+    # видно, что чинить: поиск (не те документы) или генерацию (документы те, ответ плохой).
+    sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

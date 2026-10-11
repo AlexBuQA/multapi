@@ -129,7 +129,7 @@ def test_backend_gets_default_user_name():
 def test_settings_for_api():
     settings = BotSettings(bot_token="1:x", _env_file=None)
     assert settings.internal_token is None and (settings.bot_api_host, settings.bot_api_port) == ("127.0.0.1", 9000)
-    assert (settings.backend_timeout, settings.backend_stream_timeout, settings.bot_streaming) == (60, 120, "draft")
+    assert (settings.backend_timeout, settings.backend_stream_timeout, settings.bot_streaming) == (60, 120, "edit")
     with pytest.raises(ValidationError) as caught:
         BotSettings(bot_token="1:x", internal_token="short", _env_file=None)
     assert "short" not in str(caught.value)                                # секрет в текст ошибки не попадает

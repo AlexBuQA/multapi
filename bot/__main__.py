@@ -50,6 +50,7 @@ from bot.handlers import setup_routers
 from bot.services.backend_client import BACKEND_ERRORS, BackendClient, make_http
 from bot.services.broadcast import QuietEmptyPolls, start_broadcasts, stop_broadcasts
 from bot.services.chat_queue import ChatQueue
+from bot.services.streaming import EDIT_DEBOUNCE
 from bot.services.telegram import TelegramSession, proxy_errors
 from bot.web import build_api
 
@@ -176,6 +177,7 @@ async def run(settings: BotSettings) -> None:
     bot = create_bot(settings)
     http = make_http(settings.backend_url, timeout=settings.backend_timeout)   # один на всё приложение
     backend = make_backend(http, settings)
+    EDIT_DEBOUNCE.interval = settings.bot_edit_interval      # блок 5.5: debounce правок по чату
     api = broadcasts = None
     try:
         me = await bot.get_me()
@@ -185,8 +187,9 @@ async def run(settings: BotSettings) -> None:
         broadcasts = start_broadcasts(bot, backend, poll=settings.bot_broadcast_poll,
                                       admin_ids=settings.bot_admin_ids, enabled=settings.admin_token is not None)
         log.info("bot_started username=@%s backend=%s timeout=%ss stream_timeout=%ss streaming=%s "
-                 "default_user_name=%s admins=%s admin_api=%s", me.username, backend.base_url,
+                 "edit_interval=%ss default_user_name=%s admins=%s admin_api=%s", me.username, backend.base_url,
                  settings.backend_timeout, settings.backend_stream_timeout, settings.bot_streaming,
+                 settings.bot_edit_interval,
                  "on" if settings.bot_default_user_name else "off", len(settings.bot_admin_ids),
                  "on" if settings.admin_token else "off")
         await create_dispatcher(backend, settings).start_polling(bot, handle_signals=False)

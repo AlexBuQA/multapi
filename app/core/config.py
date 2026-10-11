@@ -275,55 +275,87 @@ class EmbeddingSettings(BaseModel):
 
 
 class RagSettings(BaseModel):
-    """RAG (блок 5.3), app/services/rag.py и rag_baremetal.py. Переменные — с префиксом RAG__.
+    """RAG (блоки 5.3–5.5): app/services/rag.py, ingestion.py и rag_baremetal.py. Переменные — с
+    префиксом RAG__.
 
     Qdrant (QDRANT_URL, QDRANT_API_KEY), модель эмбеддингов (EMBEDDINGS__*, EMBEDDING_DIM) и модель
     ответа (LLM__*) — общие с остальным сервисом; здесь — корпус, нарезка, коллекции и порог.
     Почему так — docs/rag.md.
+
+    Блок 5.5: корпус ассистента — data/<категория>/… (66 документов, scripts/build_corpus.py), его
+    коллекция — kb_docs. Учебный корпус блоков 5.3–5.4 (10 файлов) — lab_dir и свои коллекции:
+    на нём сравнивают версии RAG (scripts/rag_compare.py) и нарезки (scripts/chunking_experiment.py).
     """
 
-    data_dir: Path = ROOT / "data" / "rag-block-03"   # 10 документов: .md, .txt, .pdf, .docx
-    collection: str = "rag_block_03"                   # коллекция LlamaIndex (формат _node_content)
-    baremetal_collection: str = "rag_block_03_baremetal"   # своя коллекция с плоским payload
+    data_dir: Path = ROOT / "data"                     # корпус ассистента: data/<категория>/…, .ragignore
+    collection: str = "kb_docs"                        # его коллекция LlamaIndex (формат _node_content)
+    lab_dir: Path = ROOT / "data" / "rag-block-03"     # учебный корпус блоков 5.3–5.4: .md, .txt, .pdf, .docx
+    lab_collection: str = "rag_block_03"               # коллекция LlamaIndex для учебного корпуса
+    baremetal_collection: str = "rag_block_03_baremetal"   # версия без фреймворка: свой плоский payload
+    # Состояние инкрементальной индексации (UPSERTS): <коллекция>_docstore.json — hash каждого документа.
+    docstore_dir: Path = ROOT / "var" / "ingest"
+    # Куда POST /documents/upload сохраняет файлы; пусто — <data_dir>/uploads (категория uploads).
+    upload_dir: Path | None = None
+    upload_max_mb: int = Field(default=20, ge=1, le=200)   # предел размера загружаемого файла
+    # Индексировать корпус в фоне при старте сервиса (в compose — true): новые и изменённые файлы.
+    ingest_on_start: bool = False
     chunk_size: int = Field(default=512, ge=64, le=8192)    # токенов в фрагменте (cl100k_base)
     chunk_overlap: int = Field(default=64, ge=0, le=2048)   # токенов перекрытия соседних фрагментов
-    similarity_top_k: int = Field(default=3, ge=1, le=20)   # фрагментов в контекст модели и в sources
-    # Ниже этой близости лучшего фрагмента ответ — «в базе знаний ответа нет», модель не вызывается.
-    # 0.5 — по замерам блока 5.2 на bge-m3: нужное — 0.6–0.8, постороннее — 0.3–0.4.
-    min_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Фрагментов в контекст модели и в sources (top_n после re-ranker); кандидатов из Qdrant —
+    # candidates_top_k (10).
+    similarity_top_k: int = Field(default=5, ge=1, le=20)
+    # Score-guard: лучший фрагмент ближе этого порога нет — модель не вызывается, ответ «По базе не
+    # нашёл, могу эскалировать.». 0.5 — по распределению близости на корпусе для bge-m3 (docs/rag.md,
+    # «Порог отказа»); у OpenAI text-embedding-3-small шкала другая — там порядка 0.3.
+    # RAG__MIN_SCORE (блок 5.3) — прежнее имя, тоже принимается.
+    score_threshold: float = Field(default=0.5, ge=0.0, le=1.0,
+                                   validation_alias=AliasChoices("score_threshold", "min_score"))
+    # Чаты (/chats/{id}/messages): отвечать по базе знаний с источниками; condense — переписать
+    # короткий follow-up («а при оплате по счёту?») в самостоятельный вопрос для поиска (+1 вызов модели).
+    chat: bool = True
+    condense: bool = True
     llm_model: str | None = None                       # пусто — LLM__DEFAULT_MODEL
     max_tokens: int = Field(default=512, ge=16, le=4096)    # предел длины ответа
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)   # низкая: ответ по контексту, без фантазий
     # Блок 5.4: стратегия нарезки (app/services/chunking.py) и кандидаты для re-ranker. Итог замеров
     # на golden dataset (docs/chunking_experiment.md, «Итог»): recursive, chunk_size 512, overlap 64,
-    # 10 кандидатов, re-ranker выключен. Смена нарезки требует пересборки коллекции:
-    # python -m app.services.rag --rebuild.
+    # 10 кандидатов, re-ranker выключен. Блок 5.5: метка нарезки — в hash документа, после её смены
+    # python scripts/ingest.py data/ переиндексирует документы сам.
     chunking: Literal["fixed", "recursive", "semantic"] = "recursive"
     semantic_buffer_size: int = Field(default=1, ge=0, le=5)     # semantic: соседних предложений с каждой стороны
     semantic_breakpoint: int = Field(default=95, ge=50, le=99)   # semantic: перцентиль расстояния для границы
-    # Сколько кандидатов взять из Qdrant для re-ranker (RERANK__ENABLED); модели уходят первые similarity_top_k.
+    # Сколько кандидатов взять из Qdrant: score-guard по лучшему из них, затем re-ranker (RERANK__ENABLED) и
+    # первые similarity_top_k — модели.
     candidates_top_k: int = Field(default=10, ge=1, le=100)
 
-    @field_validator("data_dir")
+    @field_validator("data_dir", "lab_dir", "docstore_dir", "upload_dir")
     @classmethod
-    def _data_from_root(cls, value: Path) -> Path:
-        return value if value.is_absolute() else ROOT / value
+    def _data_from_root(cls, value: Path | None) -> Path | None:
+        return value if value is None or value.is_absolute() else ROOT / value
 
-    @field_validator("collection", "baremetal_collection")
+    @field_validator("collection", "lab_collection", "baremetal_collection")
     @classmethod
     def _collection_name(cls, value: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", value):
-            raise ValueError("RAG__COLLECTION: латинские буквы, цифры, _ и -, например rag_block_03")
+            raise ValueError("RAG__COLLECTION: латинские буквы, цифры, _ и -, например kb_docs")
         return value
+
+    @property
+    def uploads(self) -> Path:
+        """Папка загрузок: RAG__UPLOAD_DIR или <data_dir>/uploads."""
+        return self.upload_dir or self.data_dir / "uploads"
 
     @model_validator(mode="after")
     def _overlap_smaller_than_chunk(self) -> RagSettings:
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError(f"RAG__CHUNK_OVERLAP={self.chunk_overlap} не меньше RAG__CHUNK_SIZE={self.chunk_size}: "
                              "перекрытие должно быть меньше фрагмента")
-        if self.collection == self.baremetal_collection:
-            raise ValueError("RAG__COLLECTION и RAG__BAREMETAL_COLLECTION совпадают: у двух версий RAG разный "
-                             "формат точек, им нужны разные коллекции")
+        if self.baremetal_collection in (self.collection, self.lab_collection):
+            raise ValueError("RAG__BAREMETAL_COLLECTION совпадает с RAG__COLLECTION или RAG__LAB_COLLECTION: у версии "
+                             "RAG без фреймворка плоский payload, а у LlamaIndex — свой формат; нужны разные коллекции")
+        if not self.uploads.resolve().is_relative_to(self.data_dir.resolve()):
+            raise ValueError(f"RAG__UPLOAD_DIR={self.uploads} — вне RAG__DATA_DIR={self.data_dir}: загруженные "
+                             "файлы индексируются как часть корпуса и должны лежать внутри него")
         if self.candidates_top_k < self.similarity_top_k:
             raise ValueError(f"RAG__CANDIDATES_TOP_K={self.candidates_top_k} меньше RAG__SIMILARITY_TOP_K="
                              f"{self.similarity_top_k}: re-ranker выбирает фрагменты для модели из кандидатов")

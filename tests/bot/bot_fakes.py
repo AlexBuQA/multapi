@@ -148,12 +148,15 @@ class MockedSession(BaseSession):
 
 
 class FakeAnswer:
-    """Как AnswerStream: фрагменты, а после конца потока — message_id и replacement."""
+    """Как AnswerStream: фрагменты, а после конца потока — message_id, replacement и (блок 5.5)
+    sources и confident из события sources."""
 
     def __init__(self) -> None:
         self.message_id: UUID | None = None
         self.replacement: str | None = None
         self.categories: list[str] = []
+        self.sources: list[dict[str, Any]] = []
+        self.confident: bool | None = None
         self.chunks: AsyncIterator[str] | None = None
 
     def __aiter__(self) -> FakeAnswer:
@@ -178,14 +181,17 @@ class FakeBackend:
                  chat_error: Exception | None = None, delay: float = 0.0,
                  replacement: str | None = None, replaced_after: int | None = None,
                  admin_token: str | None = "admin-token-for-tests", admin_error: Exception | None = None,
-                 feedback_error: Exception | None = None) -> None:
+                 feedback_error: Exception | None = None, sources: list[dict[str, Any]] | None = None,
+                 confident: bool | None = None) -> None:
         self.answer, self.chunk, self.delay = answer, chunk, delay
         self.error, self.error_after, self.chat_error = error, error_after, chat_error
         # блок 4.4: ответ заменён модерацией после replaced_after фрагментов (None — после всех)
         self.replacement, self.replaced_after = replacement, replaced_after
         self.admin_token, self.admin_error, self.feedback_error = admin_token, admin_error, feedback_error
+        self.sources, self.confident = sources or [], confident     # блок 5.5: событие sources
         self.answers: list[FakeAnswer] = []
         self.feedback: dict[tuple[UUID, UUID], str] = {}
+        self.feedback_sources: dict[tuple[UUID, UUID], list[dict[str, Any]] | None] = {}
         self.stats: dict[str, Any] = {"period_hours": 24, "total_messages": 12, "active_users": 3,
                                       "avg_latency_ms": 2450.0, "moderation_blocks": 1, "moderation_block_rate": 0.1667,
                                       "feedback_votes": 4, "feedback_up_ratio": 0.75,
@@ -232,6 +238,7 @@ class FakeBackend:
                 raise self.error
             if self.replacement is not None:
                 answer.replacement, answer.categories = self.replacement, ["violence"]
+            answer.sources, answer.confident = self.sources, self.confident      # событие sources
             answer.message_id = uuid4()                    # событие done
         finally:
             self.active -= 1
@@ -248,9 +255,11 @@ class FakeBackend:
         return {"status": "ok"}
 
     # ------------------------------------------------------------------ блок 4.4
-    async def send_feedback(self, chat_id: UUID, message_id: UUID, value: str) -> dict[str, Any]:
+    async def send_feedback(self, chat_id: UUID, message_id: UUID, value: str,
+                            sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.feedback_error is not None:
             raise self.feedback_error
+        self.feedback_sources[(chat_id, message_id)] = sources
         saved = (chat_id, message_id) not in self.feedback
         self.feedback.setdefault((chat_id, message_id), value)
         return {"message_id": str(message_id), "value": self.feedback[(chat_id, message_id)], "saved": saved}

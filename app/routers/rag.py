@@ -1,5 +1,6 @@
 """
-POST /rag/query — ответ по базе знаний через RAG на LlamaIndex (блок 5.3).
+POST /rag/query — ответ по базе знаний через RAG на LlamaIndex (блоки 5.3–5.5): синхронно, с цитатами
+[1], [2], источниками {id, file_name, page, score, snippet} и флагом confident.
 
 Отдельно от /chat: там обычный ответ модели (блок 3.4) и история чатов (блок 4.1). Индекс
 (RAGService) создаёт lifespan один раз на процесс; эндпоинт только задаёт вопрос. RAGService
@@ -32,8 +33,9 @@ log = get_logger()
     "/query",
     response_model=RagAnswer,
     summary="Ответ по базе знаний (RAG)",
-    description="Вопрос → эмбеддинг → top-k фрагментов из Qdrant → ответ модели только по ним. Если лучший "
-                "фрагмент ниже порога RAG__MIN_SCORE, модель не вызывается: ответ «В базе знаний ответа нет.».",
+    description="Вопрос → эмбеддинг → 10 кандидатов из Qdrant → score-guard → (re-ranker) → 5 фрагментов → ответ "
+                "модели только по ним, с цитатами [1], [2]. Если лучший фрагмент ниже порога RAG__SCORE_THRESHOLD, "
+                "модель не вызывается: ответ «По базе не нашёл, могу эскалировать.», confident=false.",
     responses={400: {"description": "Вопрос не прошёл проверку безопасности"},
                502: {"description": "Модель ответа не ответила"},
                503: {"description": "RAG не настроен, корпус не проиндексирован, нет Qdrant, модели эмбеддингов "
@@ -68,6 +70,7 @@ async def rag_query(body: RagQuery, rag: RagDep, limiter: LimiterDep, settings: 
         raise RequestError(503, "rerank_unavailable", str(exc)) from exc
     except RAGError as exc:
         raise RequestError(503, "rag_error", str(exc)) from exc
-    log.info("rag_answered", top_score=result["top_score"], sources=[s["source"] for s in result["sources"]],
-             answered=result["top_score"] >= settings.rag.min_score)
+    log.info("rag_answered", top_score=result["top_score"], confident=result["confident"],
+             sources=[s["source"] for s in result["sources"]],
+             cited=[s["id"] for s in result["sources"] if s["cited"]])
     return RagAnswer(**result)
