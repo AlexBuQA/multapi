@@ -7,8 +7,8 @@
 # После изменения списка зависимостей обновите lock-файл: uv lock
 [project]
 name = "multapi-llm-service"
-version = "5.2.0"
-description = "HTTP-сервис ассистента техподдержки на FastAPI и Telegram-бот: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов, модерация, эмбеддинги, векторный поиск"
+version = "5.3.0"
+description = "HTTP-сервис ассистента техподдержки на FastAPI и Telegram-бот: чат, поток SSE, кеш в Redis, логи и трейсы, история чатов, модерация, эмбеддинги, векторный поиск, RAG"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.142,<1.0",   # 0.142 — встроенная трассировка HTTP-запросов (блок 3.6)
@@ -42,6 +42,13 @@ dependencies = [
     # блок 5.2: векторная база Qdrant (app/services/vector_store.py). Минорная версия — в паре с
     # образом qdrant/qdrant в compose.yaml (расхождение не больше 1)
     "qdrant-client>=1.19,<2.0",
+    # блок 5.3: RAG на LlamaIndex (app/services/rag.py, POST /rag/query). Версии точные: API
+    # LlamaIndex меняется между минорными выпусками; проверенные версии — docs/rag.md
+    "llama-index==0.14.25",                      # ядро + OpenAI LLM и эмбеддинги
+    "llama-index-vector-stores-qdrant==0.10.3",  # QdrantVectorStore
+    "llama-index-readers-file==0.7.0",           # PDF, DOCX и другие форматы в SimpleDirectoryReader
+    "llama-index-llms-openai-like==0.8.0",       # OpenAI-совместимый API: Ollama, OpenRouter
+    "docx2txt==0.9",                             # DocxReader из readers-file без него не работает
 ]
 
 [tool.uv]

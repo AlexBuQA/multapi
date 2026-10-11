@@ -50,3 +50,12 @@ aiohttp-socks>=0.10,<1.0
 # Версия клиента — в паре с образом qdrant/qdrant:v1.19.x в compose.yaml.
 qdrant-client>=1.19,<2.0
 tqdm>=4.66,<5.0               # прогресс загрузки в Qdrant
+
+# Блок 5.3: RAG на LlamaIndex (app/services/rag.py, docs/rag.md). Версии точные — API LlamaIndex
+# меняется между минорными выпусками. Бандл llama-index — ядро + OpenAI LLM и эмбеддинги; Qdrant,
+# файловые ридеры и OpenAI-совместимые модели (Ollama) — отдельными пакетами.
+llama-index==0.14.25
+llama-index-vector-stores-qdrant==0.10.3
+llama-index-readers-file==0.7.0
+llama-index-llms-openai-like==0.8.0
+docx2txt==0.9                 # DocxReader из llama-index-readers-file без него не читает .docx

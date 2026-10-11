@@ -274,6 +274,50 @@ class EmbeddingSettings(BaseModel):
         return value
 
 
+class RagSettings(BaseModel):
+    """RAG (блок 5.3), app/services/rag.py и rag_baremetal.py. Переменные — с префиксом RAG__.
+
+    Qdrant (QDRANT_URL, QDRANT_API_KEY), модель эмбеддингов (EMBEDDINGS__*, EMBEDDING_DIM) и модель
+    ответа (LLM__*) — общие с остальным сервисом; здесь — корпус, нарезка, коллекции и порог.
+    Почему так — docs/rag.md.
+    """
+
+    data_dir: Path = ROOT / "data" / "rag-block-03"   # 10 документов: .md, .txt, .pdf, .docx
+    collection: str = "rag_block_03"                   # коллекция LlamaIndex (формат _node_content)
+    baremetal_collection: str = "rag_block_03_baremetal"   # своя коллекция с плоским payload
+    chunk_size: int = Field(default=512, ge=64, le=8192)    # токенов в фрагменте (cl100k_base)
+    chunk_overlap: int = Field(default=64, ge=0, le=2048)   # токенов перекрытия соседних фрагментов
+    similarity_top_k: int = Field(default=3, ge=1, le=20)   # фрагментов в контекст модели и в sources
+    # Ниже этой близости лучшего фрагмента ответ — «в базе знаний ответа нет», модель не вызывается.
+    # 0.5 — по замерам блока 5.2 на bge-m3: нужное — 0.6–0.8, постороннее — 0.3–0.4.
+    min_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    llm_model: str | None = None                       # пусто — LLM__DEFAULT_MODEL
+    max_tokens: int = Field(default=512, ge=16, le=4096)    # предел длины ответа
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)   # низкая: ответ по контексту, без фантазий
+
+    @field_validator("data_dir")
+    @classmethod
+    def _data_from_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else ROOT / value
+
+    @field_validator("collection", "baremetal_collection")
+    @classmethod
+    def _collection_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", value):
+            raise ValueError("RAG__COLLECTION: латинские буквы, цифры, _ и -, например rag_block_03")
+        return value
+
+    @model_validator(mode="after")
+    def _overlap_smaller_than_chunk(self) -> RagSettings:
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError(f"RAG__CHUNK_OVERLAP={self.chunk_overlap} не меньше RAG__CHUNK_SIZE={self.chunk_size}: "
+                             "перекрытие должно быть меньше фрагмента")
+        if self.collection == self.baremetal_collection:
+            raise ValueError("RAG__COLLECTION и RAG__BAREMETAL_COLLECTION совпадают: у двух версий RAG разный "
+                             "формат точек, им нужны разные коллекции")
+        return self
+
+
 # Postgres из compose.yaml, опубликованный на 127.0.0.1:5433 (а не localhost: на Windows
 # localhost сначала пробует IPv6 ::1, и каждое новое соединение ждёт отказа по нему).
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://multapi:multapi@127.0.0.1:5433/multapi"
@@ -413,6 +457,8 @@ class Settings(BaseSettings):
     # bge-m3 — 1024, multilingual-e5-small — 384, text-embedding-3-small — 1536. Обязательна,
     # если задан QDRANT_URL: угадывать её по умолчанию — значит однажды залить чужие векторы.
     embedding_dim: int | None = Field(default=None, ge=1, le=65536)
+    # Блок 5.3: RAG — корпус, нарезка, коллекции, порог «не знаю» (RAG__*).
+    rag: RagSettings = Field(default_factory=RagSettings)
 
     @field_validator("log_level")
     @classmethod
