@@ -26,6 +26,13 @@
 #
 # Блок 5.2, задача 7: в образе postgres есть расширение pgvector — для сравнения с Qdrant
 # (scripts/load_to_pgvector.py, scripts/compare_pgvector.py, docs/vector_store.md, «pgvector»).
+#
+# Блок 5.5: корпоративный RAG-ассистент одной командой. app при старте в фоне индексирует корпус
+# data/<категория>/… из образа в коллекцию kb_docs (новые и изменённые файлы; повторный старт —
+# «0 changed»), /rag/query и чаты отвечают по базе с цитатами, бот показывает ответ правками
+# сообщения и источники. Состояние индексации и кеш эмбеддингов — в томе rag_state, документы из
+# POST /documents/upload — в томе rag_uploads: всё переживает docker compose down / up.
+# Модель эмбеддингов (bge-m3) и модель ответа — Ollama на хосте, как и раньше.
 
 services:
   app:
@@ -57,11 +64,20 @@ services:
       # Блок 5.2: Qdrant — по имени сервиса; QDRANT_API_KEY, QDRANT_COLLECTION и EMBEDDING_DIM —
       # из .env (env_file выше).
       QDRANT_URL: http://qdrant:6333
+      # Блок 5.5: индексация корпуса при старте (в фоне — сервис отвечает сразу) и её состояние в томе
+      # rag_state: docstore (hash документов) и кеш эмбеддингов — пересоздание контейнера не
+      # переиндексирует корпус заново.
+      RAG__INGEST_ON_START: "true"
+      RAG__DOCSTORE_DIR: /app/var/ingest
+      EMBEDDINGS__CACHE_PATH: /app/var/ingest/embeddings_cache.sqlite
     extra_hosts:
       # Docker Desktop знает host.docker.internal сам; строка нужна для Docker на Linux.
       - "host.docker.internal:host-gateway"
     volumes:
       - chat_data:/app/var/chats
+      # Блок 5.5: состояние индексации RAG и загруженные через POST /documents/upload документы.
+      - rag_state:/app/var/ingest
+      - rag_uploads:/app/data/uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -234,3 +250,5 @@ volumes:
   pg-data: {}
   chat_data: {}
   qdrant_storage: {}
+  rag_state: {}
+  rag_uploads: {}

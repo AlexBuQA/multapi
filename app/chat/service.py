@@ -70,6 +70,13 @@ send_message(chat_id, текст):
 stream_message — поток для POST /chats/{id}/messages: фрагменты текста (str), AnswerReplaced
 и в конце AnswerSaved(message_id) — id сохранённого ответа, для оценки 👍/👎 (блок 4.4).
 send_message — только фрагменты текста, как раньше: для тестов и скриптов.
+
+База знаний (блок 5.5, app/chat/knowledge.py): если сервису дали RAGService (lifespan, RAG__CHAT),
+текстовый вопрос сначала ищется в базе — с переписыванием follow-up (condense) по истории чата.
+Лучший фрагмент ниже RAG__SCORE_THRESHOLD — ответ «По базе не нашёл, могу эскалировать.» без
+вызова модели; иначе модель получает контекст и правило цитировать [N], а поток после текста
+отдаёт AnswerSources (событие sources в SSE) перед AnswerSaved. База недоступна — RequestError 503
+до записи вопроса в историю. Вопрос с вложением (фото, голос, документ) идёт без базы, как в блоке 4.3.
 """
 from __future__ import annotations
 
@@ -98,15 +105,19 @@ from app.chat.context import (
 )
 from app.chat.domain import (Chat, ChatInputError, ChatMessage, ChatNotFoundError, ChatStorageError, FeedbackResult,
                              FeedbackValue, MediaError, MediaRef, ModerationIncident, RequestError)
+from app.chat.knowledge import (CONDENSE_MAX_TOKENS, CONDENSE_TURNS, KnowledgeTurn, clean_query, condense_messages,
+                                rag_error, with_knowledge)
 from app.chat.media import placeholder
 from app.chat.repository import ChatRepository, OpsRepository
 from app.core.config import Settings
-from app.core.exceptions import LLMContentFiltered
+from app.core.exceptions import LLMContentFiltered, LLMError
 from app.moderation import OUTPUT_REFUSAL, ModerationBlocked, ModerationResult, ModerationService, log_incident, text_hash
 from app.observability.logging import get_logger
+from app.observability.pii import redact_pii
 from app.schemas.chat import ChatDelta, ChatRequest, MediaChatRequest, Usage, content_parts, has_image, map_text
 from app.schemas.models import supports_images
 from app.services.guardrails import mask_message
+from app.services.rag_common import CHAT_RULES, NO_ANSWER, is_no_answer
 from app.services.security import refusal_for, screen_messages
 from app.services.security.canary import canary_message, with_canary
 from app.services.security.input_validator import validate_document, validate_input
@@ -132,7 +143,17 @@ class AnswerSaved:
     message_id: UUID | None
 
 
-StreamItem = str | AnswerReplaced | AnswerSaved
+@dataclass(frozen=True)
+class AnswerSources:
+    """Источники ответа по базе знаний (блок 5.5): событие sources перед done. confident=false —
+    score-guard или модель отказалась по промпту; тогда sources пустой."""
+
+    sources: list[dict[str, Any]]
+    confident: bool
+    top_score: float
+
+
+StreamItem = str | AnswerReplaced | AnswerSources | AnswerSaved
 
 # Имя по умолчанию (блок 4.3). Оно попадает в системный промпт, поэтому строже вопроса: одно-три
 # слова из букв (дефис, апостроф), до 40 знаков и без шаблонов инъекции.
@@ -204,13 +225,14 @@ def _elapsed_ms(started: float) -> float:
 class ChatService:
     def __init__(self, repository: ChatRepository, llm_client: LLMClient, settings: Settings,
                  *, strategy: ContextStrategy | None = None, locks: ChatLocks | None = None,
-                 moderation: ModerationService | None = None) -> None:
+                 moderation: ModerationService | None = None, rag: Any = None) -> None:
         self.repo = repository
         self.llm = llm_client
         self.settings = settings
         self.strategy = strategy or make_strategy(settings.chat_context_strategy, settings.chat_context_window)
         self.locks = locks or ChatLocks()
         self.moderation = moderation
+        self.rag = rag            # RAGService (блок 5.5) или None — чат без базы знаний, как в блоке 4
 
     async def _incident(self, direction: str, result: ModerationResult, text: str, chat_id: UUID) -> None:
         """Инцидент модерации — в лог и, если хранилище умеет, в счётчики /chats/admin/stats.
@@ -281,9 +303,12 @@ class ChatService:
             raise RequestError(501, "not_supported", "Хранилище чатов не поддерживает оценки и статистику.")
         return self.repo
 
-    async def add_feedback(self, chat_id: UUID, message_id: UUID, value: FeedbackValue) -> FeedbackResult:
+    async def add_feedback(self, chat_id: UUID, message_id: UUID, value: FeedbackValue,
+                           sources: list[dict[str, Any]] | None = None) -> FeedbackResult:
         """Оценка ответа 👍/👎 (блок 4.4). Оценивает владелец чата (owner_external_id): одна
-        оценка на ответ, повтор её не меняет. Оценить можно только ответ ассистента."""
+        оценка на ответ, повтор её не меняет. Оценить можно только ответ ассистента. sources (блок
+        5.5) — источники, которые клиент показал под ответом: по 👎 видно, что чинить — поиск или
+        генерацию."""
         chat = await self.get_chat(chat_id)
         ops = self.ops()
         message = await ops.get_message(chat_id, message_id)
@@ -291,9 +316,11 @@ class ChatService:
             raise RequestError(404, "message_not_found", "В этом чате нет сообщения с таким id.")
         if message.role != "assistant":
             raise RequestError(422, "not_an_answer", "Оценить можно только ответ ассистента.")
-        result = await ops.add_feedback(chat_id, message_id, chat.owner_external_id, value)
+        result = (await ops.add_feedback(chat_id, message_id, chat.owner_external_id, value, sources=sources)
+                  if sources else await ops.add_feedback(chat_id, message_id, chat.owner_external_id, value))
         log.info("chat_feedback", chat_id=str(chat_id), message_id=str(message_id), value=value,
-                 saved=result.saved, stored=result.value)
+                 saved=result.saved, stored=result.value,
+                 sources=[s.get("source") or s.get("file_name") for s in sources or []])
         return result
 
     async def add_system_message(self, chat_id: UUID, text: str) -> tuple[Chat, ChatMessage]:
@@ -343,10 +370,17 @@ class ChatService:
         защитным слоем — app.state.canary, у фейков в тестах и без защиты — None."""
         return getattr(self.llm, "canary", None)
 
-    def build_request(self, chat: Chat, history: list[ChatMessage],
-                      user_name: str | None = None) -> tuple[ChatRequest, dict[str, Any]]:
-        """Запрос к модели по стратегии контекста и бюджету токенов + цифры для лога."""
-        messages = self.strategy.build(self.system_prompt(chat, user_name), history)
+    def build_request(self, chat: Chat, history: list[ChatMessage], user_name: str | None = None,
+                      knowledge: KnowledgeTurn | None = None) -> tuple[ChatRequest, dict[str, Any]]:
+        """Запрос к модели по стратегии контекста и бюджету токенов + цифры для лога. knowledge
+        (блок 5.5) — правило цитировать в конце системного промпта и контекст из базы знаний
+        отдельным системным сообщением (app/chat/knowledge.py)."""
+        system = self.system_prompt(chat, user_name)
+        if knowledge is not None:
+            system = f"{system}\n\n{CHAT_RULES}"
+        messages = self.strategy.build(system, history)
+        if knowledge is not None:
+            messages = with_knowledge(messages, knowledge.retrieval)
         screened_out = 0
         if self.settings.security.enabled:
             screened = screen_messages(messages, self.settings.security.max_input_chars)
@@ -383,9 +417,73 @@ class ChatService:
             stats["shrunk_by_budget"] = report["shrunk"]
         if images:
             stats["context_images"] = images
+        if knowledge is not None:
+            stats.update(knowledge.stats())
+        extra = {"temperature": self.settings.rag.temperature} if knowledge is not None else {}
         req = MediaChatRequest(messages=fitted, max_tokens=self.settings.response_tokens, session_id=str(chat.id),
-                               model=image_model if images else None)
+                               model=image_model if images else None, **extra)
         return req, stats
+
+    # ------------------------------------------------------------------ #
+    # База знаний (блок 5.5)
+    async def _condense(self, chat: Chat, messages: list[dict[str, Any]]) -> str | None:
+        """Follow-up → самостоятельный вопрос одним вызовом модели. Не вышло — None (ищем по вопросу
+        как есть): ответ пользователю важнее точности поиска."""
+        # Маскируется диалог этого чата — последнее сообщение; образцы перед ним — постоянный текст.
+        messages = [*messages[:-1], {**messages[-1], "content": mask_message(messages[-1]["content"])}]
+        if self.settings.security.enabled:
+            screened = screen_messages(messages, self.settings.security.max_input_chars)
+            if not screened.verdict.ok:          # LLMService ответил бы отказом вместо вопроса
+                log.info("chat_condense_skipped", chat_id=str(chat.id), rule=screened.verdict.rule)
+                return None
+        req = MediaChatRequest(messages=messages, max_tokens=CONDENSE_MAX_TOKENS, temperature=0.0,
+                               session_id=str(chat.id))
+        parts: list[str] = []
+        try:
+            async with contextlib.aclosing(self.llm.stream(req)) as deltas:
+                async for delta in deltas:
+                    if delta.content:
+                        parts.append(delta.content)
+        except (LLMError, LLMContentFiltered) as exc:
+            log.warning("chat_condense_failed", chat_id=str(chat.id), error=type(exc).__name__)
+            return None
+        return clean_query("".join(parts))
+
+    def _retrieve(self, query: str) -> Any:
+        self.rag.ensure_ready()
+        return self.rag.retrieve(query)
+
+    async def _knowledge(self, chat: Chat, question: str) -> KnowledgeTurn:
+        """Поиск по базе для хода: condense по последним сообщениям чата (до записи вопроса) и
+        RAGService.retrieve в потоке. База недоступна — RequestError 503."""
+        query, condensed = question.strip(), False
+        if self.settings.rag.condense:
+            prior = await self.repo.list_messages(chat.id, limit=CONDENSE_TURNS)
+            messages = condense_messages(prior, query)
+            if messages is not None:
+                rewritten = await self._condense(chat, messages)
+                if rewritten and rewritten != query:
+                    query, condensed = rewritten, True
+                    log.info("chat_rag_condensed", chat_id=str(chat.id), query_preview=redact_pii(query)[:120])
+        try:
+            retrieval = await asyncio.to_thread(self._retrieve, query)
+        except Exception as exc:
+            error = rag_error(exc)
+            if error is None:
+                raise
+            log.warning("chat_rag_unavailable", chat_id=str(chat.id), code=error.code, error=str(exc)[:300])
+            raise error from exc
+        return KnowledgeTurn(retrieval, query, condensed)
+
+    async def _refuse(self, chat_id: UUID, knowledge: KnowledgeTurn, started: float) -> AsyncIterator[StreamItem]:
+        """Score-guard в чате: модель не вызывается, ответ — NO_ANSWER."""
+        knowledge.retrieval.log_guard(where="chat", chat_id=str(chat_id), condensed=knowledge.condensed)
+        saved_id = await self._save_answer(chat_id, NO_ANSWER, None, "completed")
+        log.info("chat_turn_finished", chat_id=str(chat_id), outcome="completed", rag="score_guard",
+                 answer_chars=len(NO_ANSWER), latency_ms=_elapsed_ms(started), **knowledge.stats())
+        yield NO_ANSWER
+        yield AnswerSources([], False, round(knowledge.retrieval.top_score, 3))
+        yield AnswerSaved(saved_id)
 
     # ------------------------------------------------------------------ #
     async def stream_message(self, chat_id: UUID, user_content: str, media: MediaRef | None = None,
@@ -425,9 +523,18 @@ class ChatService:
     async def _turn(self, chat: Chat, user_content: str, media: MediaRef | None,
                     started: float, user_name: str | None = None) -> AsyncIterator[StreamItem]:
         chat_id = chat.id
+        knowledge = None
+        if self.rag is not None and media is None and user_content.strip():
+            # До записи вопроса: база недоступна — 503, и вопрос без ответа в истории не остаётся.
+            knowledge = await self._knowledge(chat, user_content)
         await self.repo.append_message(chat_id, self.user_message(chat_id, user_content, media))
+        if knowledge is not None and not knowledge.confident:
+            async with contextlib.aclosing(self._refuse(chat_id, knowledge, started)) as items:
+                async for item in items:
+                    yield item
+            return
         history = await self.repo.list_messages(chat_id, limit=self.strategy.history_limit)
-        req, stats = self.build_request(chat, history, user_name)
+        req, stats = self.build_request(chat, history, user_name, knowledge)
         if user_name:
             stats = {**stats, "default_user_name": True}      # само имя в лог не пишется
         if media is not None:
@@ -491,6 +598,14 @@ class ChatService:
                      prompt_tokens=usage.prompt_tokens if usage else None,
                      latency_ms=_elapsed_ms(started), **stats)
         # Сюда доходит только ход без исключения: ответ уже сохранён (finally выше).
+        if knowledge is not None:
+            answer = "".join(parts)
+            answered = outcome == "completed" and bool(answer.strip()) and not is_no_answer(answer)
+            if not answered and outcome == "completed":
+                log.info("rag_refused", reason="model", top_score=round(knowledge.retrieval.top_score, 3),
+                         where="chat", chat_id=str(chat_id))
+            yield AnswerSources(knowledge.sources(answer) if answered else [], answered,
+                                round(knowledge.retrieval.top_score, 3))
         yield AnswerSaved(saved_id)
 
     async def _moderate_partial(self, chat_id: UUID, parts: list[str]) -> list[str]:

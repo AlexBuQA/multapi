@@ -44,6 +44,11 @@ Swagger: http://localhost:8000/docs
 - RAG (блок 5.3): если задан QDRANT_URL, lifespan создаёт RAGService (LlamaIndex) и подключается
   к коллекции RAG__COLLECTION — один раз на процесс; коллекции ещё нет — подключится при первом
   запросе. POST /rag/query — вопрос → top-k фрагментов → ответ модели только по ним;
+- корпоративный RAG (блок 5.5): корпус data/<категория>/… в PDF, DOCX, HTML и Markdown, индексатор
+  IngestionService (app.state.ingestion, UPSERTS) — один на процесс; RAG__INGEST_ON_START=true (в
+  compose) — индексация новых и изменённых файлов в фоне при старте. /rag/query отвечает с цитатами
+  [1], [2] и флагом confident, чаты /chats/{id}/messages — по базе знаний с событием sources в SSE,
+  POST /documents/upload — новый документ в индекс через BackgroundTasks (app/routers/documents.py);
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -53,6 +58,7 @@ ValidationError — так и задумано.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -95,7 +101,7 @@ from app.observability.middleware import (
 )
 from app.observability.pii_presidio import load_redactor
 from app.observability.tracing import fastapi_telemetry, setup_tracing, shutdown_tracing
-from app.routers import chat, health, kb, models, rag
+from app.routers import chat, documents, health, kb, models, rag
 from app.services.llm import CACHE_ERRORS
 from app.services.security.canary import new_canary
 from app.services.security.rate_limit import (
@@ -193,6 +199,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.rag = await asyncio.to_thread(open_rag, cfg)
     else:
         app.state.rag = None
+    # Блок 5.5: индексатор корпуса — один на процесс (замок, docstore, статусы загрузок), с тем же
+    # клиентом Qdrant и эмбеддингами, что у RAG. Индексация при старте — в фоновом потоке: сервис
+    # отвечает сразу, а RAG подключится к коллекции, когда она появится.
+    app.state.ingestion = app.state.rag.ingestion() if app.state.rag is not None else None
+    if app.state.ingestion is not None and cfg.rag.ingest_on_start:
+        threading.Thread(target=documents.index_files, args=(app.state.ingestion, app.state.rag, None),
+                         name="ingest-on-start", daemon=True).start()
 
     log.info("service_started", default_model=cfg.llm.default_model,
              provider=cfg.llm.base_url or "https://api.openai.com/v1",
@@ -204,7 +217,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
              if cfg.moderation.enabled else None,
              admin_api=cfg.admin_token is not None,
              vector_store=cfg.qdrant_collection if app.state.vector_store is not None else None,
-             rag=cfg.rag.collection if app.state.rag is not None else None)
+             rag=cfg.rag.collection if app.state.rag is not None else None,
+             rag_chat=cfg.rag.chat if app.state.rag is not None else None,
+             ingest_on_start=cfg.rag.ingest_on_start if app.state.rag is not None else None)
     if not cfg.security.enabled:
         log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
                                               "(только для прогона garak baseline)")
@@ -243,7 +258,8 @@ app = FastAPI(
         {"name": "chats", "description": "Чаты с историей на сервере (блок 4.1)"},
         {"name": "models", "description": "Каталог моделей и цен"},
         {"name": "kb", "description": "Поиск по базе знаний в Qdrant (блок 5.2)"},
-        {"name": "rag", "description": "Ответ по базе знаний: RAG на LlamaIndex (блок 5.3)"},
+        {"name": "rag", "description": "Ответ по базе знаний с цитатами: RAG на LlamaIndex (блоки 5.3–5.5)"},
+        {"name": "documents", "description": "Загрузка документов в базу знаний и переиндексация (блок 5.5)"},
         {"name": "health", "description": "Проверка состояния"},
     ],
 )
@@ -373,4 +389,5 @@ app.include_router(chat_feedback.router)
 app.include_router(models.router)
 app.include_router(kb.router)
 app.include_router(rag.router)
+app.include_router(documents.router)
 app.include_router(health.router)

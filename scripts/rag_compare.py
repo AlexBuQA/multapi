@@ -1,6 +1,8 @@
 """
 Две версии RAG на пяти вопросах (блок 5.3): LlamaIndex (app/services/rag.py) против версии без
-фреймворка (app/services/rag_baremetal.py).
+фреймворка (app/services/rag_baremetal.py). Корпус — учебный (RAG__LAB_DIR, data/rag-block-03), у
+LlamaIndex-версии — своя коллекция RAG__LAB_COLLECTION (rag_block_03): корпус ассистента блока 5.5
+(data/<категория>/…, kb_docs) скрипт не трогает. С блока 5.5 обе версии отвечают с цитатами [1], [2].
 
     python scripts/rag_compare.py                  # обе версии; коллекций нет — проиндексирует
     python scripts/rag_compare.py --rebuild        # пересобрать обе коллекции
@@ -16,7 +18,7 @@
 2. По каждому вопросу и версии — короткий ответ, top-1 файл и близость, релевантен ли top-1
    (да — файл с ответом, частично — соседний по теме, нет), есть ли в ответе ожидаемые факты (да —
    все части ответа, частично — не все; у вопроса об API это лимиты и код 429) и сработал ли отказ
-   «В базе знаний ответа нет.» (порог RAG__MIN_SCORE или сама модель).
+   «По базе не нашёл, могу эскалировать.» (score-guard RAG__SCORE_THRESHOLD или сама модель).
 3. Строки кода конвейера (индексация и запрос) — по PIPELINE в обоих модулях, без импортов,
    docstring-ов, комментариев и пустых строк.
 
@@ -142,7 +144,8 @@ def open_services(cfg: Any, only: str | None, rebuild: bool) -> dict[str, Any]:
         if only and version != only:
             continue
         started = time.perf_counter()
-        service = factory(cfg).build(rebuild=rebuild)
+        lab = {"data_dir": cfg.rag.lab_dir, "collection": cfg.rag.lab_collection} if version == "llamaindex" else {}
+        service = factory(cfg, **lab).build(rebuild=rebuild)
         state = (f"проиндексировано фрагментов — {service.indexed}" if service.indexed
                  else "подключились к готовой")
         print(f"{VERSIONS[version]}: коллекция {service.collection}, {state} "
@@ -158,11 +161,12 @@ def run(cfg: Any, services: dict[str, Any]) -> list[dict[str, Any]]:
             started = time.perf_counter()
             answer = service.answer(item["question"])
             seconds = time.perf_counter() - started
-            top = answer["sources"][0] if answer["sources"] else {"source": None, "score": 0.0}
+            top = answer["sources"][0] if answer["sources"] else {"file_name": None, "score": 0.0}
             results.append({"n": number, "kind": item["kind"], "question": item["question"], "version": version,
-                            "seconds": round(seconds, 1), "top_source": top["source"], "top_score": answer["top_score"],
-                            "relevant": relevance(item, top["source"]), "fact": has_fact(item, answer["answer"]),
-                            "below_threshold": answer["top_score"] < cfg.rag.min_score, **answer})
+                            "seconds": round(seconds, 1), "top_source": top["file_name"],
+                            "top_score": answer["top_score"], "relevant": relevance(item, top["file_name"]),
+                            "fact": has_fact(item, answer["answer"]),
+                            "below_threshold": answer["top_score"] < cfg.rag.score_threshold, **answer})
             print(f"{number}/{len(QUESTIONS)} {VERSIONS[version]}: {seconds:.1f} с", file=sys.stderr)
     return results
 
@@ -175,7 +179,8 @@ def report(cfg: Any, services: dict[str, Any], results: list[dict[str, Any]]) ->
         "",
         (f"Эмбеддинги `{embed}` (EMBEDDING_DIM={cfg.embedding_dim}), модель ответа "
          f"`{cfg.rag.llm_model or cfg.llm.default_model}`, top-k={cfg.rag.similarity_top_k}, "
-         f"RAG__MIN_SCORE={cfg.rag.min_score}, фрагменты {cfg.rag.chunk_size}/{cfg.rag.chunk_overlap} токенов."),
+         f"RAG__SCORE_THRESHOLD={cfg.rag.score_threshold}, фрагменты {cfg.rag.chunk_size}/{cfg.rag.chunk_overlap} "
+         "токенов."),
         "",
         "| # | Тип | Вопрос | Версия | Ответ (кратко) | top-1 (близость) | Релевантен | Факт в ответе | Время, с |",
         "|---|---|---|---|---|---|---|---|---:|",
@@ -185,9 +190,9 @@ def report(cfg: Any, services: dict[str, Any], results: list[dict[str, Any]]) ->
         lines.append(f"| {row['n']} | {row['kind']} | {row['question']} | {VERSIONS[row['version']]} | "
                      f"{short(row['answer'])}{threshold} | {row['top_source']} ({row['top_score']:.3f}) | "
                      f"{row['relevant']} | {row['fact']} | {row['seconds']} |")
-    lines += ["", "Top-3 источника:", ""]
+    lines += ["", f"Источники (top-{cfg.rag.similarity_top_k}; при отказе — нет):", ""]
     for row in results:
-        sources = ", ".join(f"{s['source']} {s['score']:.3f}" for s in row["sources"])
+        sources = ", ".join(f"[{s['id']}] {s['file_name']} {s['score']:.3f}" for s in row["sources"]) or "—"
         lines.append(f"- {row['n']}, {VERSIONS[row['version']]}: {sources}")
     lines += ["", "## Строки кода конвейера", "", loc_table(), ""]
     return "\n".join(lines)

@@ -7,13 +7,15 @@ BackendClient (блоки 4.2–4.4) — тонкий async-клиент chat-с
                                             POST /chats/{id}/messages, форма + поток SSE
     clear_messages(chat_id)              -> None   DELETE /chats/{id}/messages
     health()                             -> dict   GET /health — для /status
-    send_feedback(chat_id, message_id, value)      POST …/messages/{id}/feedback (блок 4.4)
+    send_feedback(chat_id, message_id, value, sources=None)
+                                                   POST …/messages/{id}/feedback (блоки 4.4, 5.5)
     admin_stats(), admin_users(), admin_broadcast(), claim_broadcast(), finish_broadcast()
                                                    /chats/admin/* с X-Admin-Token (блок 4.4)
 
 AnswerStream (блок 4.4) — async-итератор фрагментов текста, как раньше; после конца потока в
 нём же message_id (из события done — для кнопок 👍/👎) и replacement — текст, которым
-сервис заменил ответ, не прошедший модерацию (событие moderation).
+сервис заменил ответ, не прошедший модерацию (событие moderation). Блок 5.5: sources и
+confident — из события sources (ответ по базе знаний): источники с номерами цитат [N].
 
 Все вопросы бота — и текст, и фото, голос, документ — идут через один send_message: без
 media это обычный вопрос, с media — форма multipart/form-data с полями content и media.
@@ -23,6 +25,8 @@ media это обычный вопрос, с media — форма multipart/form
 Поток ответа — события SSE, в каждом одна строка data: с JSON (блок 4.3):
     {"type": "token", "delta": "..."}   фрагмент ответа
     {"type": "moderation", "code", "categories", "message"}   ответ не прошёл модерацию (4.4)
+    event: sources + {"type": "sources", "confident", "top_score", "sources": [...]}
+                                        источники ответа по базе знаний (5.5), перед done
     {"type": "done", "message_id"}      конец; message_id — id сохранённого ответа (4.4)
     {"type": "error", "code", "message"} ошибка посреди ответа -> BackendStreamError
 Строки режет sse_lines (bot/services/sse.py), а не Response.aiter_lines(): та делит текст
@@ -108,6 +112,8 @@ class AnswerStream:
         self.message_id: UUID | None = None
         self.replacement: str | None = None
         self.categories: list[str] = []
+        self.sources: list[dict[str, Any]] = []      # блок 5.5: событие sources
+        self.confident: bool | None = None           # None — сервис ответил без базы знаний
         self._events: AsyncIterator[str] | None = None
 
     def __aiter__(self) -> AnswerStream:
@@ -246,6 +252,9 @@ class BackendClient:
                 elif kind == "moderation":
                     stream.replacement = str(payload.get("message") or "")
                     stream.categories = [str(c) for c in payload.get("categories") or []]
+                elif kind == "sources" or event.event == "sources":
+                    stream.sources = [dict(s) for s in payload.get("sources") or [] if isinstance(s, dict)]
+                    stream.confident = bool(payload.get("confident"))
                 elif kind == "done":
                     done = True
                     stream.message_id = parse_uuid(payload.get("message_id"))
@@ -266,10 +275,16 @@ class BackendClient:
         return dict(response.json())
 
     # ------------------------------------------------------------------ блок 4.4
-    async def send_feedback(self, chat_id: UUID, message_id: UUID, value: str) -> dict[str, Any]:
-        """Оценка ответа: {"message_id", "value", "saved"}; saved=False — уже оценён."""
+    async def send_feedback(self, chat_id: UUID, message_id: UUID, value: str,
+                            sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Оценка ответа: {"message_id", "value", "saved"}; saved=False — уже оценён. sources (блок
+        5.5) — источники, показанные под ответом: id, file_name, source, page, score, cited."""
+        body: dict[str, Any] = {"value": value}
+        if sources:
+            keys = ("id", "file_name", "source", "page", "score", "cited")
+            body["sources"] = [{key: item[key] for key in keys if item.get(key) is not None} for item in sources]
         response = await self._request("POST", f"/chats/{chat_id}/messages/{message_id}/feedback",
-                                       json={"value": value}, headers=user_header(chat_id))
+                                       json=body, headers=user_header(chat_id))
         return dict(response.json())
 
     def _admin_headers(self) -> dict[str, str]:

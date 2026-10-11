@@ -49,6 +49,8 @@ dependencies = [
     "llama-index-readers-file==0.7.0",           # PDF, DOCX и другие форматы в SimpleDirectoryReader
     "llama-index-llms-openai-like==0.8.0",       # OpenAI-совместимый API: Ollama, OpenRouter
     "docx2txt==0.9",                             # DocxReader из readers-file без него не работает
+    # блок 5.5: PDF в ingestion (app/services/ingestion.py) — PyMuPDFReader, страница — документ
+    "pymupdf==1.28.2",
 ]
 
 [tool.uv]

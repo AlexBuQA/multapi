@@ -34,17 +34,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # пользователя: по нему /chat отвечает как ассистент техподдержки (блок 3.7).
 # Блок 4.1: миграции Alembic (docker compose exec app alembic upgrade head) и папка для
 # истории чатов в JSONL — её владельцем станет appuser, и том chat_data унаследует права.
-COPY data/knowledge_base.json ./data/knowledge_base.json
-# Блок 5.3: корпус RAG — для индексации из контейнера (python -m app.services.rag --build).
-COPY data/rag-block-03/ ./data/rag-block-03/
+# Блок 5.5: папка data/ целиком (что в неё не входит — .dockerignore): руководство пользователя
+# (data/knowledge_base.json), учебный корпус RAG блоков 5.3–5.4 (data/rag-block-03/) и корпус
+# ассистента data/<категория>/ — его сервис индексирует при старте (RAG__INGEST_ON_START в compose).
+COPY data/ ./data/
 COPY alembic.ini ./
 COPY migrations/ ./migrations/
 COPY app/ ./app/
 # Блок 4.4: Telegram-бот — тот же образ, другая команда (compose.yaml, сервис bot).
 COPY bot/ ./bot/
 # Папки, куда сервис пишет: история JSONL (том chat_data) и LOG_FILE=logs/… из .env (блок 4.4:
-# без неё сервис в контейнере не мог создать logs/ — /app принадлежит root).
-RUN mkdir -p /app/var/chats /app/logs
+# без неё сервис в контейнере не мог создать logs/ — /app принадлежит root). Блок 5.5: состояние
+# индексации и кеш эмбеддингов (том rag_state) и загруженные документы (том rag_uploads) — тома
+# наследуют владельца папки, appuser.
+RUN mkdir -p /app/var/chats /app/logs /app/var/ingest /app/data/uploads
 
 # ========== Стадия 2: runtime ==========
 FROM python:3.13-slim-bookworm AS runtime

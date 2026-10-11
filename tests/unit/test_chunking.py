@@ -24,7 +24,7 @@ from qdrant_client import QdrantClient
 from rag_fakes import CORPUS, DIM, RecordingLLM, TrigramEmbeddings, threaded
 
 from app.core.config import Settings
-from app.services import chunking, retrieval_eval
+from app.services import chunking, ingestion, retrieval_eval
 from app.services.embeddings import count_tokens
 from app.services.rag import ProjectEmbedding, RAGService, load_corpus
 from app.services.rag_baremetal import read_file
@@ -47,7 +47,8 @@ def settings(rerank: dict[str, Any] | None = None, **rag: Any) -> Settings:
     return Settings(_env_file=None, qdrant_url="http://127.0.0.1:6333", embedding_dim=DIM,
                     llm={"openai_api_key": "test-key", "base_url": "http://127.0.0.1:11434/v1",
                          "default_model": "llama3.2"},
-                    rag={"data_dir": CORPUS, "min_score": 0.0, **rag}, rerank=rerank or {})
+                    rag={"data_dir": CORPUS, "collection": "rag_block_03", "score_threshold": 0.0,
+                         "similarity_top_k": 3, **rag}, rerank=rerank or {})
 
 
 def corpus(label: str = "test") -> list[Document]:
@@ -339,7 +340,7 @@ def test_rerank_settings_and_factory():
     assert (cfg.rag.chunking, cfg.rag.candidates_top_k, cfg.rerank.enabled) == ("recursive", 10, False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, rag={"chunking": "hierarchical"})
-    with pytest.raises(ValidationError, match="RAG__CANDIDATES_TOP_K=2 меньше RAG__SIMILARITY_TOP_K=3"):
+    with pytest.raises(ValidationError, match="RAG__CANDIDATES_TOP_K=2 меньше RAG__SIMILARITY_TOP_K=5"):
         Settings(_env_file=None, rag={"candidates_top_k": 2})
 
 
@@ -378,11 +379,14 @@ def test_rag_service_uses_chunking_and_reranker():
     cfg = settings(chunking="fixed", chunk_size=256, chunk_overlap=32, candidates_top_k=6)
     service = RAGService(cfg, client=client, embed_model=ProjectEmbedding(TrigramEmbeddings()), llm=RecordingLLM(),
                          reranker=reranker).build()
-    expected = chunking.fixed_size(256, 32).get_nodes_from_documents(corpus())
+    # Блок 5.5: сервис индексирует через IngestionService — те же ридеры (PDF по страницам, Markdown по
+    # разделам), что и ingestion.read_file.
+    documents = [doc for path in ingestion.list_files(CORPUS) for doc in ingestion.read_file(path, CORPUS)]
+    expected = chunking.fixed_size(256, 32).get_nodes_from_documents(documents)
     assert service.indexed == len(expected)
     record = client.scroll("rag_block_03", limit=1, with_payload=["chunking"])[0][0]
     assert record.payload["chunking"] == "fixed:256/32"
-    vector_only = threaded(service.query_engine.retrieve, QueryBundle("Сколько стоит тариф «Команда»?"))
+    vector_only = threaded(service.retriever.retrieve, QueryBundle("Сколько стоит тариф «Команда»?"))
     answer = threaded(service.answer, "Сколько стоит тариф «Команда»?")
     assert reranker.seen == [6] and len(answer["sources"]) == 3
     assert [s["score"] for s in answer["sources"]] == [round(n.score, 3) for n in vector_only][::-1][:3]

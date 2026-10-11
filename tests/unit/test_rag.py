@@ -1,15 +1,18 @@
 """
-RAG (блок 5.3) без сети: версия на LlamaIndex и версия без фреймворка на настоящем корпусе
+RAG (блоки 5.3, 5.5) без сети: версия на LlamaIndex и версия без фреймворка на учебном корпусе
 data/rag-block-03 (10 файлов, в том числе PDF и DOCX), Qdrant в режиме :memory:, модель
 эмбеддингов — триграммы текста, модель ответа — заглушка, которая запоминает промпт.
 
-Проверяется механика: чтение форматов, нарезка, коллекции и их сверка, порог «не знаю»,
-форма ответа, промпт, POST /rag/query и lifespan. Ответы настоящих моделей — прогон пяти
-вопросов (scripts/rag_compare.py, docs/rag.md).
+Проверяется механика: чтение форматов, нарезка, коллекции и их сверка, score-guard, контракт
+ответа блока 5.5 (цитаты, sources с id/file_name/page/score/snippet, confident), промпт,
+POST /rag/query и lifespan. Ответы настоящих моделей — прогон пяти вопросов
+(scripts/rag_compare.py, docs/rag.md). Корпус ассистента и инкрементальная индексация —
+tests/unit/test_ingestion.py.
 """
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,15 +26,21 @@ from rag_fakes import CORPUS, DIM, RecordingLLM, TrigramEmbeddings, threaded
 
 from app.core.config import Settings
 from app.services import rag_baremetal as bare
-from app.services.rag import ProjectEmbedding, RAGService, build_llm
+from app.services.ingestion import list_files, read_file
+from app.services.rag import ProjectEmbedding, RAGService, build_llm, chat_messages
 from app.services.rag_baremetal import BareMetalRAG
 from app.services.rag_common import (
+    ANSWER_FORMAT,
     NO_ANSWER,
+    SOURCES_RULE,
     RAGError,
     RAGLLMError,
     RAGNotIndexed,
+    final_answer,
     is_no_answer,
     llm_error,
+    source,
+    strip_citations,
     system_prompt,
 )
 from app.services.reranker import RerankError
@@ -40,6 +49,16 @@ pytestmark = pytest.mark.filterwarnings("ignore:Payload indexes have no effect")
 
 ROOT = Path(__file__).resolve().parents[2]
 QUESTION = "Сколько запросов в минуту можно делать к API?"
+SOURCE_KEYS = {"id", "file_name", "source", "category", "page", "score", "snippet", "cited"}
+STATE: dict[str, Path] = {}
+
+
+@pytest.fixture(autouse=True)
+def docstore_in_tmp(tmp_path):
+    """docstore индексации (блок 5.5) — во временной папке теста, а не в var/ingest проекта."""
+    STATE["docstore"] = tmp_path / "ingest"
+    yield
+    STATE.pop("docstore", None)
 
 
 class RecordingOpenAI:
@@ -56,10 +75,13 @@ class RecordingOpenAI:
 
 
 def settings(**rag: Any) -> Settings:
+    """Учебный корпус в коллекции rag_block_03 (как у scripts/rag_compare.py), порог 0 — score-guard
+    проверяют отдельно."""
     return Settings(_env_file=None, qdrant_url="http://127.0.0.1:6333", embedding_dim=DIM,
                     llm={"openai_api_key": "test-key", "base_url": "http://127.0.0.1:11434/v1",
                          "default_model": "llama3.2"},
-                    rag={"data_dir": CORPUS, "min_score": 0.0, **rag})
+                    rag={"data_dir": CORPUS, "collection": "rag_block_03", "score_threshold": 0.0,
+                         "docstore_dir": STATE.get("docstore", ROOT / "var" / "pytest-ingest"), **rag})
 
 
 def llama_rag(client: QdrantClient, embedder: TrigramEmbeddings | None = None, **rag: Any) -> RAGService:
@@ -67,14 +89,16 @@ def llama_rag(client: QdrantClient, embedder: TrigramEmbeddings | None = None, *
                       llm=RecordingLLM())
 
 
-def assert_contract(answer: dict[str, Any], k: int = 3) -> None:
-    assert set(answer) == {"answer", "top_score", "sources"}
-    assert isinstance(answer["answer"], str) and answer["answer"]
-    assert len(answer["sources"]) >= k
+def assert_contract(answer: dict[str, Any], k: int = 5) -> None:
+    """Контракт блока 5.5: answer, top_score, confident, sources с id = номер цитаты [id]."""
+    assert set(answer) == {"answer", "top_score", "confident", "sources"}
+    assert isinstance(answer["answer"], str) and answer["answer"] and answer["confident"] is True
+    assert [item["id"] for item in answer["sources"]] == list(range(1, k + 1))
     files = {p.name for p in CORPUS.iterdir()}
     for item in answer["sources"]:
-        assert set(item) == {"text", "source", "score"}
-        assert 0 < len(item["text"]) <= 300 and item["source"] in files and isinstance(item["score"], float)
+        assert set(item) == SOURCE_KEYS
+        assert 0 < len(item["snippet"]) <= 200 and item["file_name"] in files and isinstance(item["score"], float)
+        assert item["page"] is None or item["file_name"].endswith(".pdf")
     assert answer["top_score"] == max(item["score"] for item in answer["sources"])
 
 
@@ -86,42 +110,55 @@ def test_corpus_has_ten_documents_of_four_formats_and_one_off_topic():
     assert "10_houseplants.txt" in files                 # заведомо не по теме — для проверки «не знаю»
 
 
-def test_rag_settings_defaults_and_validation():
+def test_rag_settings_defaults_and_validation(monkeypatch):
+    monkeypatch.delenv("RAG__DOCSTORE_DIR", raising=False)        # tests/conftest.py уводит его во временную папку
+    monkeypatch.delenv("RAG__INGEST_ON_START", raising=False)
     cfg = Settings(_env_file=None).rag
-    assert (cfg.chunk_size, cfg.chunk_overlap, cfg.similarity_top_k) == (512, 64, 3)
-    assert (cfg.collection, cfg.baremetal_collection) == ("rag_block_03", "rag_block_03_baremetal")
-    assert cfg.data_dir == CORPUS and cfg.min_score == 0.5
+    assert (cfg.chunk_size, cfg.chunk_overlap, cfg.similarity_top_k, cfg.candidates_top_k) == (512, 64, 5, 10)
+    assert (cfg.collection, cfg.lab_collection, cfg.baremetal_collection) == (
+        "kb_docs", "rag_block_03", "rag_block_03_baremetal")
+    assert cfg.data_dir == ROOT / "data" and cfg.lab_dir == CORPUS and cfg.uploads == ROOT / "data" / "uploads"
+    assert cfg.score_threshold == 0.5 and cfg.docstore_dir == ROOT / "var" / "ingest"
+    assert (cfg.chat, cfg.condense, cfg.ingest_on_start, cfg.upload_max_mb) == (True, True, False, 20)
     with pytest.raises(ValueError, match="RAG__CHUNK_OVERLAP=128 не меньше RAG__CHUNK_SIZE=128"):
         Settings(_env_file=None, rag={"chunk_size": 128, "chunk_overlap": 128})
-    with pytest.raises(ValueError, match="RAG__COLLECTION и RAG__BAREMETAL_COLLECTION совпадают"):
+    with pytest.raises(ValueError, match="RAG__BAREMETAL_COLLECTION совпадает"):
         Settings(_env_file=None, rag={"collection": "same", "baremetal_collection": "same"})
+    with pytest.raises(ValueError, match="RAG__UPLOAD_DIR=.* вне RAG__DATA_DIR"):
+        Settings(_env_file=None, rag={"upload_dir": "/tmp/elsewhere"})
 
 
 def test_rag_settings_from_environment(monkeypatch):
     monkeypatch.setenv("RAG__CHUNK_SIZE", "256")
     monkeypatch.setenv("RAG__SIMILARITY_TOP_K", "5")
-    monkeypatch.setenv("RAG__MIN_SCORE", "0.42")
+    monkeypatch.setenv("RAG__MIN_SCORE", "0.42")                # имя блока 5.3 — тоже принимается
     monkeypatch.setenv("RAG__COLLECTION", "rag_test")
     cfg = Settings(_env_file=None).rag
-    assert (cfg.chunk_size, cfg.similarity_top_k, cfg.min_score, cfg.collection) == (256, 5, 0.42, "rag_test")
+    assert (cfg.chunk_size, cfg.similarity_top_k, cfg.score_threshold, cfg.collection) == (256, 5, 0.42, "rag_test")
+    monkeypatch.delenv("RAG__MIN_SCORE")
+    monkeypatch.setenv("RAG__SCORE_THRESHOLD", "0.37")
+    monkeypatch.setenv("RAG__INGEST_ON_START", "true")
+    cfg = Settings(_env_file=None).rag
+    assert (cfg.score_threshold, cfg.ingest_on_start) == (0.37, True)
 
 
 # ---------------------------------------------------------------- LlamaIndex
-def test_documents_keep_only_file_name_not_paths():
-    service = llama_rag(QdrantClient(":memory:"))
-    documents = service.load_documents()
+def test_documents_keep_only_relative_names_not_paths():
+    documents = [doc for path in list_files(CORPUS) for doc in read_file(path, CORPUS)]
     assert len({d.metadata["file_name"] for d in documents}) == 10        # PDF и DOCX прочитаны
     for document in documents:
-        assert set(document.metadata) <= {"file_name", "embed_model", "chunking", "page_label"}
-        assert document.metadata["chunking"] == "recursive:512/64"           # блок 5.4: метка нарезки
+        assert document.metadata["source"] == document.metadata["file_name"]   # файлы — в корне корпуса
+        assert document.metadata["category"] == "general"
         assert "/" not in document.id_ and "\\" not in document.id_       # без пути с именем пользователя
         assert set(document.excluded_embed_metadata_keys) == set(document.metadata)   # в вектор — только текст
-        assert document.excluded_llm_metadata_keys == ["embed_model", "chunking"]
+        assert not any(str(value).startswith(("/", "C:")) for value in document.metadata.values())
+    pdf = [d for d in documents if d.metadata["file_name"] == "09_support_rules.pdf"]
+    assert [d.id_ for d in pdf] == [f"09_support_rules.pdf#p{n}" for n in range(1, len(pdf) + 1)]
     docx = next(d for d in documents if d.metadata["file_name"] == "08_integrations_1c.docx")
     assert "1С" in docx.text and "30 минут" in docx.text
 
 
-def test_llamaindex_builds_and_answers_with_three_sources():
+def test_llamaindex_builds_and_answers_with_numbered_sources():
     client = QdrantClient(":memory:")
     service = llama_rag(client).build()
     assert service.indexed > 10                             # фрагменты всех файлов
@@ -130,11 +167,65 @@ def test_llamaindex_builds_and_answers_with_three_sources():
     answer = threaded(service.answer, QUESTION)
     assert_contract(answer)
     assert answer["answer"].startswith("Лимит зависит от тарифа")
-    assert answer["sources"][0]["source"] == "04_api.md"
+    assert answer["sources"][0]["file_name"] == "04_api.md"
+    assert not any(item["cited"] for item in answer["sources"])      # заглушка модели номеров не ставит
     prompt = service.llm.prompts[-1]
     assert system_prompt("Личный кабинет") in prompt         # русский промпт, а не английский по умолчанию
-    assert "file_name: 04_api.md" in prompt and QUESTION in prompt
+    assert "[1] (04_api.md)" in prompt and QUESTION in prompt   # нумерованный контекст для цитат
     assert "embed_model" not in prompt
+    # Формат цитат — ещё и последней строкой перед ответом: llama3.2 лучше выполняет то, что стоит прямо
+    # перед ответом; сам формат — строка «Источники: …» (замер, docs/rag.md «Цитаты (Windows)»).
+    assert f"Ответ ({ANSWER_FORMAT}):\nassistant:" in prompt and "«Источники: [номера фрагментов]»" in ANSWER_FORMAT
+
+
+def test_llamaindex_marks_cited_sources():
+    service = llama_rag(QdrantClient(":memory:")).build()
+    service.llm.reply = "«Команда» — 300 запросов в минуту [1], при превышении — код 429 [2][7]."
+    answer = threaded(service.answer, QUESTION)
+    assert [item["cited"] for item in answer["sources"]] == [True, True, False, False, False]   # [7] — не было
+
+
+@pytest.mark.parametrize(("reply", "cited", "confident"), [
+    # ответы llama3.2 из замера на Windows (docs/rag.md, «Цитаты (Windows)»)
+    ("Срок вернуть оплату составляет 14 дней после списания. Источники: [2][3].", [False, True, True, False, False], True),
+    ("Ссылка для сброса пароля действует 30 минут.\nИсточники: [1], [4]", [True, False, False, True, False], True),
+    ("По базе не нашёл. Мобильное приложение не поддерживает Apple Watch. Источники: [5]", [], False),
+])
+def test_sources_line_marks_cited_and_refusal_drops_it(reply, cited, confident):
+    answer = final_answer(reply, 0.7, [source(n, "текст", file_name=f"{n}.md", page=None, score=0.7) for n in range(1, 6)])
+    assert [item["cited"] for item in answer["sources"]] == cited and answer["confident"] is confident
+    if not confident:                                   # отказ — ровно фраза, без додуманного моделью
+        assert answer["answer"] == NO_ANSWER
+
+
+@pytest.mark.parametrize(("text", "clean"), [
+    ("Срок — 14 дней после списания. Источники: [2][3].", "Срок — 14 дней после списания."),
+    ("Срок — 14 дней [1].\nИсточники: [1], [3]", "Срок — 14 дней."),
+    ("Источники платежей: карта [2].", "Источники платежей: карта."),
+])
+def test_strip_citations_drops_sources_line_for_chat_history(text, clean):
+    assert strip_citations(text) == clean
+
+
+def test_prompts_have_no_sample_sentences_to_echo():
+    """llama3.2 в боте вставила в ответ образец из правил дословно: «Первое утверждение [1]. Возврат
+    оплаты…». В промптах ответа нет готовых фраз — только формат строки «Источники: [1], [3]»."""
+    from app.chat.knowledge import CONDENSE_SYSTEM
+    from app.services.rag_common import CHAT_CONTEXT, CHAT_RULES, USER_TEMPLATE
+
+    for text in (system_prompt("Личный кабинет"), CHAT_RULES, USER_TEMPLATE, CHAT_CONTEXT, CONDENSE_SYSTEM):
+        assert "утверждение" not in text.lower() and "Пример формата" not in text
+    assert re.findall(r"«([^«»]*\[\d\][^«»]*)»", system_prompt("Личный кабинет")) == ["Источники: [1], [3]"]
+
+
+def test_service_prompt_is_the_measured_sources_variant():
+    """Промпт сервиса — ровно вариант sources из scripts/citation_experiment.py, выигравший замер."""
+    experiment = load_script("citation_experiment")
+    context = "[1] (a.md)\nТекст."
+    measured = experiment.variants("Личный кабинет")["sources"]("Каков срок?", context)
+    service = chat_messages("Личный кабинет", "Каков срок?", context)
+    assert [(m.role, m.content) for m in service] == [(m.role, m.content) for m in measured]
+    assert SOURCES_RULE in service[0].content and service[1].content.endswith(f"Ответ ({ANSWER_FORMAT}):")
 
 
 def test_llamaindex_reconnects_without_reindexing():
@@ -149,12 +240,25 @@ def test_llamaindex_reconnects_without_reindexing():
     assert rebuilt.indexed == client.count("rag_block_03").count > 0
 
 
-def test_llamaindex_fallback_below_threshold_skips_model():
-    service = llama_rag(QdrantClient(":memory:"), min_score=0.99).build()
-    answer = threaded(service.answer, "Как часто поливать фикус зимой?")
-    assert answer["answer"] == NO_ANSWER and is_no_answer(answer["answer"])
-    assert len(answer["sources"]) == 3 and answer["top_score"] < 0.99
+def test_llamaindex_score_guard_skips_model_and_logs():
+    from log_capture import captured_logs, events
+
+    service = llama_rag(QdrantClient(":memory:"), score_threshold=0.99).build()
+    with captured_logs("INFO") as records:
+        answer = threaded(service.answer, "Как часто поливать фикус зимой?")
+    assert answer["answer"] == NO_ANSWER == "По базе не нашёл, могу эскалировать." and is_no_answer(answer["answer"])
+    assert answer["sources"] == [] and answer["confident"] is False and answer["top_score"] < 0.99
     assert service.llm.prompts == []                         # модель не вызывалась
+    guard = events(records, "rag_score_guard")
+    assert guard and guard[0]["threshold"] == 0.99 and guard[0]["candidates"] == 10
+    assert "фикус" not in str(guard[0])                      # текст вопроса в лог не пишется
+
+
+def test_llamaindex_model_refusal_is_not_confident():
+    service = llama_rag(QdrantClient(":memory:")).build()
+    service.llm.reply = "По базе не нашёл, могу эскалировать."
+    answer = threaded(service.answer, QUESTION)
+    assert (answer["answer"], answer["confident"], answer["sources"]) == (NO_ANSWER, False, [])
 
 
 def test_llamaindex_refuses_collection_of_other_model_or_dimension():
@@ -172,7 +276,7 @@ def test_llamaindex_refuses_collection_of_other_model_or_dimension():
 def test_llamaindex_not_indexed_and_ensure_ready():
     client = QdrantClient(":memory:")
     service = llama_rag(client)
-    with pytest.raises(RAGNotIndexed, match="python -m app.services.rag --build"):
+    with pytest.raises(RAGNotIndexed, match="python scripts/ingest.py data/"):
         service.ensure_ready()
     with pytest.raises(RAGError, match="Индекс не готов"):
         threaded(service.answer, QUESTION)
@@ -265,11 +369,12 @@ def test_baremetal_builds_and_answers_with_same_contract():
     assert set(record.payload) == {"text", "file_name", "chunk_index", "embed_model"}   # плоский payload
     answer = threaded(service.answer, QUESTION)
     assert_contract(answer)
-    assert answer["sources"][0]["source"] == "04_api.md"
+    assert answer["sources"][0]["file_name"] == "04_api.md"
     call = service.llm.calls[-1]
     assert call["model"] == "llama3.2" and call["max_tokens"] == 512 and call["temperature"] == 0.1
     assert call["messages"][0] == {"role": "system", "content": system_prompt("Личный кабинет")}
-    assert "file_name: 04_api.md" in call["messages"][1]["content"] and QUESTION in call["messages"][1]["content"]
+    assert "[1] (04_api.md)" in call["messages"][1]["content"] and QUESTION in call["messages"][1]["content"]
+    assert call["messages"][1]["content"].endswith(f"Ответ ({ANSWER_FORMAT}):")
 
 
 def test_baremetal_reindex_is_idempotent_and_checks_model():
@@ -288,9 +393,10 @@ def test_baremetal_reindex_is_idempotent_and_checks_model():
 
 def test_baremetal_fallback_below_threshold_skips_model():
     llm = RecordingOpenAI()
-    service = baremetal(QdrantClient(":memory:"), llm=llm, min_score=0.99).build()
+    service = baremetal(QdrantClient(":memory:"), llm=llm, score_threshold=0.99).build()
     answer = threaded(service.answer, "Как часто поливать фикус зимой?")
-    assert answer["answer"] == NO_ANSWER and len(answer["sources"]) == 3 and llm.calls == []
+    assert answer["answer"] == NO_ANSWER and answer["sources"] == [] and llm.calls == []
+    assert answer["confident"] is False
 
 
 def test_both_versions_share_embeddings_and_differ_in_chunking():
@@ -298,7 +404,8 @@ def test_both_versions_share_embeddings_and_differ_in_chunking():
     embedder = TrigramEmbeddings()
     llama = llama_rag(client, embedder).build()
     metal = baremetal(client, embedder).build()
-    assert threaded(llama.answer, QUESTION)["sources"][0]["source"] == threaded(metal.answer, QUESTION)["sources"][0]["source"]
+    assert threaded(llama.answer, QUESTION)["sources"][0]["file_name"] == \
+        threaded(metal.answer, QUESTION)["sources"][0]["file_name"]
     llama_payload = client.scroll("rag_block_03", limit=1, with_payload=True)[0][0].payload
     assert "_node_content" in llama_payload and llama_payload["embed_model"] == embedder.label
     assert client.count("rag_block_03").count != client.count("rag_block_03_baremetal").count
@@ -325,10 +432,12 @@ class FakeRag:
 
     def answer(self, question: str) -> dict[str, Any]:
         self.questions.append(question)
-        return {"answer": "300 запросов в минуту.", "top_score": 0.71,
-                "sources": [{"text": "Лимит зависит от тарифа", "source": "04_api.md", "score": 0.71},
-                            {"text": "Ошибка 429", "source": "04_api.md", "score": 0.62},
-                            {"text": "Тарифы", "source": "02_tariffs_and_payment.md", "score": 0.55}]}
+        return {"answer": "300 запросов в минуту [1], при превышении — 429 [2].", "top_score": 0.71, "confident": True,
+                "sources": [{"id": 1, "file_name": "api-limits.md", "source": "api/api-limits.md", "category": "api",
+                             "page": None, "score": 0.71, "snippet": "Лимит зависит от тарифа", "cited": True},
+                            {"id": 2, "file_name": "support-regulation_v2.3.pdf",
+                             "source": "support/support-regulation_v2.3.pdf", "category": "support", "page": 2,
+                             "score": 0.62, "snippet": "Ошибка 429", "cited": True}]}
 
 
 @pytest.fixture
@@ -350,8 +459,11 @@ async def test_rag_query_returns_answer_and_sources(rag_http):
     response = await http.post("/rag/query", json={"question": "  Сколько запросов в минуту?  "})
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"answer", "top_score", "sources"} and len(body["sources"]) == 3
-    assert body["sources"][0] == {"text": "Лимит зависит от тарифа", "source": "04_api.md", "score": 0.71}
+    assert set(body) == {"answer", "top_score", "confident", "sources"} and len(body["sources"]) == 2
+    assert body["confident"] is True and "[1]" in body["answer"]
+    assert body["sources"][1] == {"id": 2, "file_name": "support-regulation_v2.3.pdf",
+                                  "source": "support/support-regulation_v2.3.pdf", "category": "support", "page": 2,
+                                  "score": 0.62, "snippet": "Ошибка 429", "cited": True}
     assert holder["rag"].questions == ["Сколько запросов в минуту?"]
 
 
@@ -443,7 +555,7 @@ def test_compare_runs_five_questions_on_both_versions():
     assert [r["kind"] for r in results[::2]] == ["хороший", "хороший", "хороший", "средний", "вне базы"]
     for row in results:
         assert row["relevant"] in {"да", "частично", "нет", "— (в базе нет)"}
-        assert len(row["sources"]) == 3
+        assert len(row["sources"]) == 5
     # Заглушка модели отвечает одно и то же: на вопрос вне базы это «ответ без базы», а не отказ.
     assert {r["fact"] for r in results if r["kind"] == "вне базы"} == {"**ответил без базы**"}
     report = compare.report(settings(), services, results)
@@ -463,3 +575,98 @@ def test_compare_fact_check_needs_every_part_of_the_answer():
     assert compare.has_fact(compare.QUESTIONS[0], NO_ANSWER) == "отказ"
     assert compare.has_fact(compare.QUESTIONS[4], NO_ANSWER) == "отказ"
     assert compare.has_fact(compare.QUESTIONS[4], "Да, есть.") == "**ответил без базы**"
+
+
+# ---------------------------------------------------------------- scripts/calibrate_threshold.py (блок 5.5)
+def load_calibration():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("calibrate_threshold", ROOT / "scripts" / "calibrate_threshold.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_calibration_recommends_threshold_between_groups():
+    calibrate = load_calibration()
+    assert calibrate.recommend([0.62, 0.7, 0.81], [0.31, 0.44]) == (0.53, 0, "середина зазора между группами")
+    threshold, errors, how = calibrate.recommend([0.45, 0.6, 0.7], [0.3, 0.5])
+    assert (threshold, errors) == (0.31, 1) and "пересекаются" in how   # 0.31 и 0.51 — по ошибке, берём меньший
+    assert calibrate.summary([0.5, 0.1, 0.9])["median"] == 0.5
+    groups = calibrate.questions()
+    assert [len(groups[g]) for g in ("in", "off", "near", "follow")] == [28, 8, 4, 4]
+
+
+def test_calibration_threshold_ignores_product_questions_without_answer():
+    """Прогон на Windows (bge-m3, корпус 5.5): вопросы о продукте без ответа в базе (0.478–0.662)
+    перекрываются с вопросами по базе (0.593–0.823) — в подбор порога они не входят, иначе вышло бы
+    0.56: на 0.001 выше «тёмной темы» и на 0.033 ниже худшего вопроса по базе."""
+    calibrate = load_calibration()
+    inside, off, near = [0.593, 0.601, 0.823], [0.242, 0.448], [0.478, 0.559, 0.617, 0.662]
+    assert calibrate.recommend(inside, off) == (0.52, 0, "середина зазора между группами")
+    assert calibrate.recommend(inside, off + near)[0] == 0.56
+    rows = [{"group": g, "question": f"{g}{i}", "top_score": s, "top_file": "x.md"}
+            for g, scores in (("in", inside), ("off", off), ("near", near)) for i, s in enumerate(scores)]
+    report = calibrate.report(rows, 0.5, "bge-m3", "kb_docs")
+    assert "Зазор между посторонними и вопросами по базе: 0.448–0.593; рекомендуемый порог — его середина, **0.52**" in report
+    assert "отклонено 0 из 3, посторонних пропущено к модели 0 из 2" in report and "до модели доходит 3 из 4" in report
+    assert "⚠️" not in report
+
+
+def load_script(name: str):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_citation_experiment_counts_citations_per_prompt_variant():
+    """scripts/citation_experiment.py: варианты промпта на одних и тех же фрагментах; пример диалога —
+    на посторонней теме (библиотека), в промпте без примера его нет."""
+    experiment = load_script("citation_experiment")
+    service = llama_rag(QdrantClient(":memory:")).build()
+    service.llm.reply = "«Команда» — 300 запросов в минуту [1]."
+    rows = threaded(experiment.run, service, "Личный кабинет", ["rules", "example", "example_sources"],
+                    {"in": [QUESTION], "near": [QUESTION]})
+    assert [(r["variant"], r["cited"], r["refused"]) for r in rows] == [
+        ("rules", [1], False), ("rules", [1], False), ("example", [1], False), ("example", [1], False),
+        ("example_sources", [1], False), ("example_sources", [1], False)]
+    rules_prompt, _, example_prompt, _, line_prompt, _ = service.llm.prompts
+    assert "library" not in rules_prompt and "[1] (04_api.md)" in rules_prompt
+    assert experiment.DEMO_INLINE in example_prompt and "[1] (library-rules.md)" in example_prompt
+    assert example_prompt.index(experiment.DEMO_INLINE) < example_prompt.index(QUESTION)   # пример — до вопроса
+    assert "Источники: [1], [2]" in line_prompt and SOURCES_RULE in line_prompt and SOURCES_RULE not in rules_prompt
+    report = experiment.report(rows, ["rules", "example", "example_sources"], "recording")
+    assert "| rules | 1 из 1 | 1 из 1 | 0 из 1 |" in report and "| example | 1 из 1 | 1 из 1 | 0 из 1 |" in report
+
+
+def test_condense_experiment_compares_queries_for_search():
+    """scripts/condense_experiment.py: запрос к поиску без condense, condense без образцов и с ними,
+    склейка двух вопросов — и попал ли нужный файл в top-5."""
+    experiment = load_script("condense_experiment")
+    service = llama_rag(QdrantClient(":memory:")).build()
+    service.llm.reply = f"Самостоятельный вопрос: «{QUESTION}»"
+    pairs = [("Какой лимит у API?", "Лимит зависит от тарифа.", "А на тарифе «Команда»?", ("04_api.md",))]
+    rows = threaded(experiment.run, service, pairs)
+    by = {r["variant"]: r for r in rows}
+    assert list(by) == ["as_is", "plain", "examples", "concat"]
+    assert by["as_is"]["query"] == "А на тарифе «Команда»?"
+    assert by["concat"]["query"] == "Какой лимит у API? А на тарифе «Команда»?"
+    assert by["plain"]["query"] == by["examples"]["query"] == QUESTION      # clean_query снял подпись и кавычки
+    assert by["examples"]["rank"] == 1
+    plain_prompt, examples_prompt = service.llm.prompts                    # модель — только для plain и examples
+    assert "учебник" not in plain_prompt and "На сколько дней выдают учебник?" in examples_prompt
+    assert "| examples | 1 из 1 | 1 |" in experiment.report(rows, "recording")
+
+
+def test_calibration_measures_top_score_without_model():
+    calibrate = load_calibration()
+    service = llama_rag(QdrantClient(":memory:")).build()
+    rows = threaded(calibrate.measure, service, {"in": [QUESTION], "off": ["Как часто поливать фикус зимой?"],
+                                                 "follow": ["А для них?"]})
+    assert [r["group"] for r in rows] == ["in", "off", "follow"] and rows[0]["top_file"] == "04_api.md"
+    assert service.llm.prompts == []                                         # модель ответа не вызывалась
+    report = calibrate.report(rows, 0.5, "trigram", "rag_block_03")
+    assert "| по базе | 1 |" in report and "рекомендуемый порог" in report.lower() and "RAG__SCORE_THRESHOLD=0.5" in report

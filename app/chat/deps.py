@@ -137,14 +137,21 @@ def get_moderation(request: Request, settings: SettingsDep) -> ModerationService
 ModerationDep = Annotated[ModerationService, Depends(get_moderation)]
 
 
+def get_chat_rag(request: Request, settings: SettingsDep) -> Any | None:
+    """RAGService из lifespan (блок 5.5) для ответов чата по базе знаний. None — без базы, как в
+    блоке 4: QDRANT_URL не задан или RAG__CHAT=false."""
+    return getattr(request.app.state, "rag", None) if settings.rag.chat else None
+
+
 def get_chat_service(
     repo: Annotated[ChatRepository, Depends(get_repository)],
     llm: Annotated[LLMService, Depends(get_llm_client)],
     settings: SettingsDep,
     locks: Annotated[ChatLocks | None, Depends(get_chat_locks)],
     moderation: ModerationDep,
+    rag: Annotated[Any | None, Depends(get_chat_rag)],
 ) -> ChatService:
-    return ChatService(repo, llm, settings, locks=locks, moderation=moderation)
+    return ChatService(repo, llm, settings, locks=locks, moderation=moderation, rag=rag)
 
 
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]

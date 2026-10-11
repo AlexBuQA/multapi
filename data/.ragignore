@@ -1,0 +1,16 @@
+# Что в data/ не входит в корпус RAG (блок 5.5, app/services/ingestion.py). Синтаксис — как у
+# .gitignore, упрощённо: «папка/» — вся папка, остальное — шаблон имени или пути от data/.
+#
+# Корпус — папки категорий data/<категория>/: account, api, billing, … (scripts/build_corpus.py)
+# и uploads/ — документы, загруженные через POST /documents/upload.
+
+# База знаний блоков 5.1–5.2: из неё собран корпус, в индексе она дала бы дубли
+faq.md
+release_notes.md
+help_center.jsonl
+knowledge_base.json
+service_status.json
+# Прежние редакции статей: в ответах ассистента им не место
+archive/
+# Учебный корпус блоков 5.3–5.4 (10 файлов) — у него своя коллекция rag_block_03
+rag-block-03/

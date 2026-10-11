@@ -36,3 +36,8 @@ samples/*.mp3
 
 # Блок 4.4: корневые сертификаты Windows для бота в Docker (BOT_EXTRA_CA_FILE) — у каждого свои
 certs/
+
+# Блок 5.5: документы, загруженные через POST /documents/upload, и файлы, которые ingestion не смог
+# прочитать (<имя>.failed) — данные стенда, не репозитория
+data/uploads/
+data/**/*.failed

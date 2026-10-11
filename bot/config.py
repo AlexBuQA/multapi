@@ -22,9 +22,11 @@
                                  корня проекта, например certs/windows-roots.pem) — для бота в
                                  Docker в сети, которая подменяет HTTPS-сертификат
     BOT_PRODUCT_NAME=Личный кабинет   название продукта в приветствии
-    BOT_STREAMING=draft          как показывать ответ (блок 4.3): draft — черновик
-                                 sendMessageDraft (только личные чаты, в группах — правки),
-                                 edit — правки сообщения, как в блоке 4.2
+    BOT_STREAMING=edit           как показывать ответ: edit (по умолчанию с блока 5.5) — правки
+                                 сообщения editMessageText с debounce по чату; draft (блок 4.3) —
+                                 черновик sendMessageDraft (только личные чаты, в группах — правки)
+    BOT_EDIT_INTERVAL=0.7        блок 5.5: с между правками в одном чате, не меньше 0,7 — Telegram
+                                 на частые правки отвечает 429 Too Many Requests
     BOT_DEFAULT_USER_NAME=Александра   как модель обращается к пользователю, пока он сам не
                                  представился (блок 4.3); «-» — не подсказывать имя
 
@@ -92,7 +94,8 @@ class BotSettings(BaseSettings):
     bot_proxy_url: SecretStr | None = None
     bot_extra_ca_file: Path | None = None
     bot_product_name: str = "Личный кабинет"
-    bot_streaming: Literal["draft", "edit"] = "draft"
+    bot_streaming: Literal["draft", "edit"] = "edit"
+    bot_edit_interval: float = Field(default=0.7, ge=0.7, le=5.0)
     bot_default_user_name: str | None = DEFAULT_USER_NAME
     internal_token: SecretStr | None = None
     bot_api_host: str = "127.0.0.1"

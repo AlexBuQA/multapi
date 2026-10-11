@@ -59,3 +59,7 @@ llama-index-vector-stores-qdrant==0.10.3
 llama-index-readers-file==0.7.0
 llama-index-llms-openai-like==0.8.0
 docx2txt==0.9                 # DocxReader из llama-index-readers-file без него не читает .docx
+
+# Блок 5.5: корпоративный RAG — PDF в ingestion (PyMuPDFReader: страница — документ с номером) и
+# генерация PDF корпуса (scripts/build_corpus.py). Лицензия PyMuPDF — AGPL-3.0 (docs/rag.md, «Версии»).
+pymupdf==1.28.2

@@ -1,5 +1,6 @@
 """
-Предел размера тела запроса с файлом (блок 4.3): POST /chats/{chat_id}/messages.
+Предел размера тела запроса с файлом: POST /chats/{chat_id}/messages (блок 4.3) и
+POST /documents/upload (блок 5.5).
 
 Starlette разбирает форму multipart целиком до вызова обработчика: файл любого размера
 лёг бы на диск (SpooledTemporaryFile), а проверка MEDIA__MAX_*_BYTES в app/chat/media.py
@@ -8,7 +9,8 @@ Starlette разбирает форму multipart целиком до вызов
 - без Content-Length (chunked) или с неверным — байты считаются по мере чтения, и на
   превышении разбор формы прерывается с тем же 413.
 
-Предел — самый большой из MEDIA__MAX_*_BYTES плюс 1 МБ на поле content и разметку формы.
+Предел — самый большой из MEDIA__MAX_*_BYTES плюс 1 МБ на поле content и разметку формы; у загрузки
+документа в корпус — RAG__UPLOAD_MAX_MB плюс тот же 1 МБ.
 Настройки берутся так же, как в обработчиках: get_settings с учётом
 app.dependency_overrides (тесты подменяют настройки именно так).
 """
@@ -25,6 +27,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.core.config import Settings, get_settings
 
 MESSAGES_PATH = re.compile(r"^/chats/[^/]+/messages/?$")
+UPLOAD_PATH = re.compile(r"^/documents/upload/?$")
 FORM_OVERHEAD = 1024 * 1024
 CODE = "request_too_large"
 
@@ -47,6 +50,10 @@ def request_limit(settings: Settings) -> int:
     return max(media.max_image_bytes, media.max_audio_bytes, media.max_document_bytes) + FORM_OVERHEAD
 
 
+def upload_limit(settings: Settings) -> int:
+    return settings.rag.upload_max_mb * 1024 * 1024 + FORM_OVERHEAD
+
+
 class BodyLimitMiddleware:
     def __init__(self, app: ASGIApp, limit: Callable[[Scope], int] | None = None) -> None:
         self.app = app
@@ -56,10 +63,12 @@ class BodyLimitMiddleware:
     def _limit_from_settings(scope: Scope) -> int:
         app = scope.get("app")
         overrides: dict[Any, Any] = getattr(app, "dependency_overrides", {}) or {}
-        return request_limit(overrides.get(get_settings, get_settings)())
+        settings = overrides.get(get_settings, get_settings)()
+        return upload_limit(settings) if UPLOAD_PATH.match(scope["path"]) else request_limit(settings)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["method"] != "POST" or not MESSAGES_PATH.match(scope["path"]):
+        if (scope["type"] != "http" or scope["method"] != "POST"
+                or not (MESSAGES_PATH.match(scope["path"]) or UPLOAD_PATH.match(scope["path"]))):
             await self.app(scope, receive, send)
             return
         limit = self.limit(scope)

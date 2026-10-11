@@ -1,12 +1,14 @@
 """
-Живой RAG (блок 5.3, маркер llm): обе версии на настоящих Qdrant, модели эмбеддингов и модели
-ответа из .env (bge-m3 и llama3.2 в Ollama).
+Живой RAG (блоки 5.3, 5.5, маркер llm): обе версии на учебном корпусе и LlamaIndex-версия на
+корпусе ассистента data/<категория>/… — на настоящих Qdrant, модели эмбеддингов и модели ответа из
+.env (bge-m3 и llama3.2 в Ollama).
 
     docker compose up -d qdrant
     pytest -m llm tests/integration/test_rag_live.py -v -s
 
-Корпус индексируется во временные коллекции pytest_rag_<суффикс> (боевые rag_block_03 и
-rag_block_03_baremetal не трогаются) и удаляется в конце. Qdrant или модель не отвечают — тест
+Корпус индексируется во временные коллекции pytest_rag_<суффикс> (боевые kb_docs, rag_block_03 и
+rag_block_03_baremetal не трогаются) и удаляется в конце; docstore — во временной папке
+(tests/conftest.py). Qdrant или модель не отвечают — тест
 пропускается. На CPU — несколько минут: два вопроса × две версии плюс эмбеддинги корпуса (при
 повторе — из кеша).
 
@@ -35,6 +37,8 @@ URL = os.environ.get("QDRANT_TEST_URL") or ENV.get("QDRANT_URL") or ""
 
 GOOD = "Сколько стоит тариф «Команда» в месяц?"
 OUT_OF_BASE = "Есть ли интеграция с Битрикс24?"
+REFUND = "Каков срок возврата оплаты?"
+OFF_TOPIC = "Как приготовить борщ?"
 
 
 def reachable(url: str) -> bool:
@@ -58,6 +62,7 @@ def cfg():
 
     suffix = uuid.uuid4().hex[:8]
     settings = Settings(qdrant_url=URL, rag={"collection": f"pytest_rag_{suffix}",
+                                             "lab_collection": f"pytest_rag_lab_{suffix}",
                                              "baremetal_collection": f"pytest_rag_bm_{suffix}"})
     if settings.llm.base_url and not reachable(settings.llm.base_url):
         pytest.skip(f"Модель ответа недоступна: LLM__BASE_URL={settings.llm.base_url}")
@@ -70,7 +75,8 @@ def service(request, cfg):
     from app.services.rag_baremetal import BareMetalRAG
 
     no_implicit_event_loop()
-    rag = RAGService(cfg) if request.param == "llamaindex" else BareMetalRAG(cfg)
+    rag = (RAGService(cfg, data_dir=cfg.rag.lab_dir, collection=cfg.rag.lab_collection)
+           if request.param == "llamaindex" else BareMetalRAG(cfg))
     try:
         rag.build()
         yield rag
@@ -80,8 +86,9 @@ def service(request, cfg):
 
 
 def show(name: str, answer: dict) -> None:
-    top = answer["sources"][0]
-    print(f"\n{name}: {answer['answer']!r}\n  top_score={answer['top_score']} top-1={top['source']} ({top['score']})")
+    top = answer["sources"][0] if answer["sources"] else {"source": None, "score": None}
+    print(f"\n{name}: {answer['answer']!r}\n  top_score={answer['top_score']} confident={answer['confident']} "
+          f"top-1={top['source']} ({top['score']})")
 
 
 def test_good_question(service):
@@ -89,8 +96,8 @@ def test_good_question(service):
 
     answer = service.answer(GOOD)
     show(type(service).__name__, answer)
-    assert len(answer["sources"]) >= 3
-    assert answer["sources"][0]["source"] == "02_tariffs_and_payment.md"
+    assert len(answer["sources"]) >= 3 and answer["confident"] is True
+    assert answer["sources"][0]["file_name"] == "02_tariffs_and_payment.md"
     assert not is_no_answer(answer["answer"])
 
 
@@ -102,3 +109,35 @@ def test_out_of_base_question(service):
     show(type(service).__name__, answer)
     assert answer["top_score"] < good["top_score"]
     assert is_no_answer(answer["answer"]), "модель ответила на вопрос, которого нет в базе"
+
+
+@pytest.fixture(scope="module")
+def assistant(cfg):
+    """Блок 5.5: корпус ассистента data/<категория>/… (66 файлов) во временной коллекции."""
+    from app.services.rag import RAGService, no_implicit_event_loop
+
+    no_implicit_event_loop()
+    rag = RAGService(cfg)
+    try:
+        rag.build()
+        yield rag
+    finally:
+        rag.client.delete_collection(rag.collection)
+        rag.close()
+
+
+def test_assistant_corpus_answers_with_citations(assistant):
+    answer = assistant.answer(REFUND)
+    show("assistant", answer)
+    assert answer["confident"] is True and "14" in answer["answer"]
+    assert any(s["source"] in ("billing/refunds_v2.docx", "billing/faq-billing.md") for s in answer["sources"])
+    assert {s["id"] for s in answer["sources"]} == set(range(1, len(answer["sources"]) + 1))
+    assert any(s["cited"] for s in answer["sources"]), "в ответе нет ни одной цитаты [N]"
+
+
+def test_assistant_refuses_off_topic(assistant):
+    from app.services.rag_common import NO_ANSWER
+
+    answer = assistant.answer(OFF_TOPIC)
+    show("assistant", answer)
+    assert answer["answer"] == NO_ANSWER and answer["confident"] is False and answer["sources"] == []
