@@ -21,6 +21,7 @@ from app.observability.logging import get_logger
 from app.schemas.rag import RagAnswer, RagQuery
 from app.services import embeddings
 from app.services.rag_common import RAGError, RAGLLMError, RAGNotIndexed, RAGUnavailable
+from app.services.reranker import RerankError
 from app.services.security.input_validator import validate_input
 
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -35,7 +36,8 @@ log = get_logger()
                 "фрагмент ниже порога RAG__MIN_SCORE, модель не вызывается: ответ «В базе знаний ответа нет.».",
     responses={400: {"description": "Вопрос не прошёл проверку безопасности"},
                502: {"description": "Модель ответа не ответила"},
-               503: {"description": "RAG не настроен, корпус не проиндексирован, нет Qdrant или модели эмбеддингов"}},
+               503: {"description": "RAG не настроен, корпус не проиндексирован, нет Qdrant, модели эмбеддингов "
+                                    "или re-ranker"}},
 )
 async def rag_query(body: RagQuery, rag: RagDep, limiter: LimiterDep, settings: SettingsDep) -> RagAnswer:
     question = body.question.strip()
@@ -62,6 +64,8 @@ async def rag_query(body: RagQuery, rag: RagDep, limiter: LimiterDep, settings: 
         raise RequestError(502, "llm_unavailable", str(exc)) from exc
     except embeddings.EmbeddingError as exc:
         raise RequestError(503, "embeddings_unavailable", str(exc)) from exc
+    except RerankError as exc:
+        raise RequestError(503, "rerank_unavailable", str(exc)) from exc
     except RAGError as exc:
         raise RequestError(503, "rag_error", str(exc)) from exc
     log.info("rag_answered", top_score=result["top_score"], sources=[s["source"] for s in result["sources"]],

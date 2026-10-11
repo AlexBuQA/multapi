@@ -10,21 +10,16 @@ data/rag-block-03 (10 файлов, в том числе PDF и DOCX), Qdrant в
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import math
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
-from llama_index.core.llms import CompletionResponse, CustomLLM, LLMMetadata
-from llama_index.core.llms.callbacks import llm_completion_callback
-from pydantic import Field
 from qdrant_client import QdrantClient
+from rag_fakes import CORPUS, DIM, RecordingLLM, TrigramEmbeddings, threaded
 
 from app.core.config import Settings
 from app.services import rag_baremetal as bare
@@ -39,60 +34,12 @@ from app.services.rag_common import (
     llm_error,
     system_prompt,
 )
+from app.services.reranker import RerankError
 
 pytestmark = pytest.mark.filterwarnings("ignore:Payload indexes have no effect")
 
 ROOT = Path(__file__).resolve().parents[2]
-CORPUS = ROOT / "data" / "rag-block-03"
-DIM = 256
 QUESTION = "Сколько запросов в минуту можно делать к API?"
-
-
-class TrigramEmbeddings:
-    """Заглушка модуля эмбеддингов блока 5.1: тот же интерфейс (label, embed_query,
-    embed_documents), вектор — триграммы текста, нормированный. Считает вызовы."""
-
-    def __init__(self, label: str = "openai:local:11434/trigram-test") -> None:
-        self.label = label
-        self.document_calls = 0
-        self.query_calls = 0
-
-    @staticmethod
-    def vector(text: str) -> list[float]:
-        v = [0.0] * DIM
-        padded = f"  {text.lower()} "
-        for i in range(len(padded) - 2):
-            v[int(hashlib.md5(padded[i:i + 3].encode()).hexdigest()[:8], 16) % DIM] += 1.0
-        norm = math.sqrt(sum(x * x for x in v)) or 1.0
-        return [x / norm for x in v]
-
-    def embed_query(self, text: str) -> list[float]:
-        self.query_calls += 1
-        return self.vector(text)
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        self.document_calls += 1
-        return [self.vector(text) for text in texts]
-
-
-class RecordingLLM(CustomLLM):
-    """Модель ответа для LlamaIndex: запоминает промпты, отвечает заданной строкой."""
-
-    reply: str = "Лимит зависит от тарифа: «Команда» — 300 запросов в минуту."
-    prompts: list[str] = Field(default_factory=list)
-
-    @property
-    def metadata(self) -> LLMMetadata:
-        return LLMMetadata(context_window=4096, num_output=256, model_name="recording")
-
-    @llm_completion_callback()
-    def complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponse:
-        self.prompts.append(prompt)
-        return CompletionResponse(text=self.reply)
-
-    @llm_completion_callback()
-    def stream_complete(self, prompt: str, formatted: bool = False, **kwargs: Any):
-        raise NotImplementedError
 
 
 class RecordingOpenAI:
@@ -118,13 +65,6 @@ def settings(**rag: Any) -> Settings:
 def llama_rag(client: QdrantClient, embedder: TrigramEmbeddings | None = None, **rag: Any) -> RAGService:
     return RAGService(settings(**rag), client=client, embed_model=ProjectEmbedding(embedder or TrigramEmbeddings()),
                       llm=RecordingLLM())
-
-
-def threaded(fn: Any, *args: Any) -> Any:
-    """Вызов RAG так же, как в сервисе (asyncio.to_thread), — в потоке без цикла событий. Из главного
-    потока LlamaIndex на Python 3.12–3.13 создал бы цикл неявно (rag.no_implicit_event_loop)."""
-    with ThreadPoolExecutor(1) as pool:
-        return pool.submit(fn, *args).result()
 
 
 def assert_contract(answer: dict[str, Any], k: int = 3) -> None:
@@ -172,10 +112,11 @@ def test_documents_keep_only_file_name_not_paths():
     documents = service.load_documents()
     assert len({d.metadata["file_name"] for d in documents}) == 10        # PDF и DOCX прочитаны
     for document in documents:
-        assert set(document.metadata) <= {"file_name", "embed_model", "page_label"}
+        assert set(document.metadata) <= {"file_name", "embed_model", "chunking", "page_label"}
+        assert document.metadata["chunking"] == "recursive:512/64"           # блок 5.4: метка нарезки
         assert "/" not in document.id_ and "\\" not in document.id_       # без пути с именем пользователя
         assert set(document.excluded_embed_metadata_keys) == set(document.metadata)   # в вектор — только текст
-        assert document.excluded_llm_metadata_keys == ["embed_model"]
+        assert document.excluded_llm_metadata_keys == ["embed_model", "chunking"]
     docx = next(d for d in documents if d.metadata["file_name"] == "08_integrations_1c.docx")
     assert "1С" in docx.text and "30 минут" in docx.text
 
@@ -418,6 +359,8 @@ async def test_rag_query_returns_answer_and_sources(rag_http):
     (RAGNotIndexed("Коллекция rag_block_03 пуста"), 503, "rag_not_indexed"),
     (RAGLLMError("Модель llama3.2 не ответила"), 502, "llm_unavailable"),
     (RAGError("Коллекция проиндексирована моделью x"), 503, "rag_error"),
+    (RerankError("Cohere Rerank не ответил"), 503,
+     "rerank_unavailable"),
 ])
 async def test_rag_query_errors(rag_http, error, status, code):
     http, holder = rag_http
@@ -506,3 +449,17 @@ def test_compare_runs_five_questions_on_both_versions():
     report = compare.report(settings(), services, results)
     assert report.startswith("## Прогон 5 вопросов") and report.count("| хороший |") == 6
     assert "## Строки кода конвейера" in report
+
+
+def test_compare_fact_check_needs_every_part_of_the_answer():
+    compare = load_compare()
+    api, card = compare.QUESTIONS[1], compare.QUESTIONS[3]
+    assert compare.has_fact(api, "«Команда» — 300 запросов в минуту, при превышении — 429.") == "да"
+    assert compare.has_fact(api, "Лимит зависит от тарифа. При превышении — код 429.") == "частично"
+    assert compare.has_fact(api, "Обратитесь в поддержку.") == "нет"
+    assert compare.has_fact(card, "Первый ответ — за 1 рабочий день.") == "нет"
+    assert compare.has_fact(card, "Высокий приоритет: первый ответ за 1 час.") == "да"
+    assert compare.has_fact(compare.QUESTIONS[0], "4\u00a0900 ₽ в месяц") == "да"
+    assert compare.has_fact(compare.QUESTIONS[0], NO_ANSWER) == "отказ"
+    assert compare.has_fact(compare.QUESTIONS[4], NO_ANSWER) == "отказ"
+    assert compare.has_fact(compare.QUESTIONS[4], "Да, есть.") == "**ответил без базы**"
