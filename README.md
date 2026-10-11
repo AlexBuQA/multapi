@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.3
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.4
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -23,6 +23,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 5.1 — Эмбеддинги и семантический поиск:** `app/services/embeddings.py` — `embed_texts` / `embed_query` / `embed_documents` с батчами, повторами tenacity, L2-нормализацией и кешем (память процесса + SQLite, ключ зависит от модели); модель — `bge-m3` в Ollama, выбор обоснован ruMTEB и мини-бенчмарком на своих данных, посчитана стоимость индексации — см. раздел [«Блок 5.1»](#блок-51--эмбеддинги-и-семантический-поиск) и [`docs/embeddings.md`](docs/embeddings.md).
 - **Блок 5.2 — Векторная база Qdrant:** сервис `qdrant` в `compose.yaml` (ключ API, том, проверка по TCP), коллекция `documents` под `bge-m3` (1024, COSINE, HNSW m=16) с payload-индексами, база знаний из 110 фрагментов с датами и разделами, идемпотентная загрузка `scripts/load_to_qdrant.py`, `app/services/vector_store.py` на `AsyncQdrantClient`, `GET /kb/search`, сравнение cosine и dot, три примера фильтров — см. раздел [«Блок 5.2»](#блок-52--векторная-база-qdrant) и [`docs/vector_store.md`](docs/vector_store.md) Опционально (задача 7) — pgvector 0.8 в том же Postgres: задержка, halfvec, фильтры SQL против `Filter`; выбор — остаётся Qdrant.
 - **Блок 5.3 — Архитектура RAG с LlamaIndex:** корпус из 10 документов (`.md`, `.txt`, `.pdf`, `.docx`) в своей коллекции Qdrant `rag_block_03`, `RAGService` на компонентах LlamaIndex (`SimpleDirectoryReader`, `SentenceSplitter`, `QdrantVectorStore`, query engine) и та же цепочка без фреймворка, порог «не знаю», `POST /rag/query`, сравнение версий и прогон пяти вопросов — см. раздел [«Блок 5.3»](#блок-53--архитектура-rag-с-llamaindex) и [`docs/rag.md`](docs/rag.md).
+- **Блок 5.4 — Chunking и оптимизация качества:** golden dataset из 28 вопросов, три стратегии нарезки (fixed, recursive, semantic) в коллекциях `docs_fixed` / `docs_recursive` / `docs_semantic`, метрики Hit Rate@5, MRR@10, Recall@10 по документам и строже — по фрагменту с ответом, re-ranker `bge-reranker-v2-m3`, подбор `chunk_size`, `overlap` и `top-K` — см. раздел [«Блок 5.4»](#блок-54--chunking-и-оптимизация-качества) и [`docs/chunking_experiment.md`](docs/chunking_experiment.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -120,6 +121,9 @@ multapi/
 │   │   ├── rag.py           # блок 5.3: RAGService на LlamaIndex — индексация, ответ, CLI
 │   │   ├── rag_baremetal.py # блок 5.3: тот же RAG без фреймворка — для сравнения
 │   │   ├── rag_common.py    # блок 5.3: промпт, отказ «нет в базе», форма ответа, ошибки — общие для обеих
+│   │   ├── chunking.py      # блок 5.4: нарезка fixed / recursive / semantic, русские предложения, статистика
+│   │   ├── retrieval_eval.py # блок 5.4: Hit Rate@5, MRR@10, Recall@10 по golden dataset
+│   │   ├── reranker.py      # блок 5.4: bge-reranker-v2-m3 (cross-encoder) или Cohere Rerank, кеш оценок
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -176,7 +180,8 @@ multapi/
 │   ├── qdrant_filters_demo.py # блок 5.2: фильтры match, по дате, must + must_not
 │   ├── load_to_pgvector.py  # блок 5.2, задача 7: та же база знаний в kb.documents (pgvector)
 │   ├── compare_pgvector.py  # блок 5.2, задача 7: Qdrant против pgvector — задержка, halfvec, фильтры
-│   └── rag_compare.py       # блок 5.3: пять вопросов на LlamaIndex и bare-metal, строки кода
+│   ├── rag_compare.py       # блок 5.3: пять вопросов на LlamaIndex и bare-metal, строки кода
+│   └── chunking_experiment.py # блок 5.4: три стратегии, re-ranker, подбор параметров, итоговый .env
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
@@ -184,6 +189,7 @@ multapi/
 │   ├── embeddings.md        # блок 5.1: требования, кандидаты, выбор модели, стоимость, устройство модуля
 │   ├── vector_store.md      # блок 5.2: Qdrant — compose, коллекция, загрузка, метрика, фильтры, pgvector
 │   ├── rag.md               # блок 5.3: версии, коллекция, конвейер, LlamaIndex против bare-metal, 5 вопросов
+│   ├── chunking_experiment.md # блок 5.4: golden dataset, метрики, стратегии, re-ranker, подбор, итог
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -203,9 +209,12 @@ multapi/
 │   │                        #   5.1: test_embeddings.py — батчи, кеш, повторы, префиксы, скрипты;
 │   │                        #   5.2: test_vector_store.py — Qdrant :memory:, загрузка, метрика, фильтры, /kb/search;
 │   │                        #   test_pgvector_store.py — SQL поиска и фильтров, ошибки, без базы;
-│   │                        #   5.3: test_rag.py — обе версии RAG на Qdrant :memory:, порог, /rag/query
+│   │                        #   5.3: test_rag.py — обе версии RAG на Qdrant :memory:, порог, /rag/query;
+│   │                        #   5.4: test_chunking.py — нарезка, метрики, golden dataset, re-ranker, эксперимент;
+│   │                        #   rag_fakes.py — подставные эмбеддинги и модель ответа для тестов RAG
 │   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env (5.3: и RAG)
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
+│   ├── eval/retrieval_dataset.json # блок 5.4: golden dataset — 28 вопросов, нужные документы, цитаты ответа
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
 │   │                        #   4.3: медиа, черновики, /notify; 4.4: admin-команды, оценки, рассылки
@@ -221,6 +230,7 @@ multapi/
 ├── outputs/                 # сюда пишутся аудио-ответы TTS
 ├── var/chats/               # блок 4.1: история чатов в JSONL (CHAT_STORAGE_DIR, в git не попадает)
 ├── var/embeddings_cache.sqlite # блок 5.1: кеш эмбеддингов (EMBEDDINGS__CACHE_PATH, в git не попадает)
+├── var/rerank_cache.sqlite  # блок 5.4: оценки re-ranker (RERANK__CACHE_PATH, в git не попадает)
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
                              # app.log, tool_calls.jsonl, llm_calls.jsonl (локальные прогоны, в git не попадают)
 ```
@@ -2679,10 +2689,10 @@ flowchart LR
 - **Порог «не знаю»** `RAG__MIN_SCORE` (0.5): лучший фрагмент ниже порога — ответ «В базе знаний ответа нет.» без вызова модели; выше, но ответа во фрагментах нет — ту же фразу требует промпт.
 - **Настройки** `RAG__*` в `.env.example` и `Settings.rag`: папка корпуса, коллекции, нарезка, top-k, порог, модель ответа, `max_tokens`, `temperature`. В коде только значения по умолчанию.
 - **`POST /rag/query`** `{"question": "…"}` → `answer`, `top_score`, `sources`. Индекс создаёт lifespan один раз на процесс; не проиндексирован — `503 rag_not_indexed` с командой, а после индексации с хоста первый же запрос подключается без перезапуска. Вопрос проходит проверку входа блока 3.8, одновременных запросов к модели — не больше `LLM__MAX_CONCURRENCY`.
-- **`scripts/rag_compare.py`** — пять вопросов (три хороших, средний, вне базы) на обеих версиях: короткий ответ, top-1 файл и близость, релевантность, найден ли ожидаемый факт, сработал ли отказ; таблица строк кода обеих версий. Вывод — Markdown для `docs/rag.md`.
+- **`scripts/rag_compare.py`** — пять вопросов (три хороших, средний, вне базы) на обеих версиях: короткий ответ, top-1 файл и близость, релевантность, полон ли ответ (есть ли все ожидаемые факты), сработал ли отказ; таблица строк кода обеих версий. Вывод — Markdown для `docs/rag.md`.
 - **`docs/rag.md`** — версии, корпус, решение о коллекции, конвейер, настройки, запуск и коды ответа, порог, сравнение LlamaIndex и bare-metal с выводом, пять вопросов, подводные камни.
-- **Тесты:** +31.
-  - `tests/unit/test_rag.py` — 30, без сети: настоящий корпус, Qdrant `:memory:`, эмбеддинги из триграмм, модели-заглушки, которые запоминают промпт. Обе версии: контракт и ≥3 источника, промпт на русском с именем файла, повторное подключение без индексации, отказ ниже порога без вызова модели, отказ работать с коллекцией другой модели или размерности, метаданные без путей, чтение четырёх форматов, нарезка с перекрытием, CLI; bare-metal не импортирует LlamaIndex; `/rag/query` — ответ, коды ошибок, проверка входа; lifespan; подсчёт строк в `rag_compare.py`;
+- **Тесты:** +32.
+  - `tests/unit/test_rag.py` — 31, без сети: настоящий корпус, Qdrant `:memory:`, эмбеддинги из триграмм, модели-заглушки, которые запоминают промпт. Обе версии: контракт и ≥3 источника, промпт на русском с именем файла, повторное подключение без индексации, отказ ниже порога без вызова модели, отказ работать с коллекцией другой модели или размерности, метаданные без путей, чтение четырёх форматов, нарезка с перекрытием, CLI; bare-metal не импортирует LlamaIndex; `/rag/query` — ответ, коды ошибок, проверка входа; lifespan; подсчёт строк и проверка полноты ответа в `rag_compare.py`;
   - `TestRagCorpus` в `tests/test_docker_files.py` — корпус в образе, `.md` корпуса не отсеиваются правилом `*.md`;
   - `tests/integration/test_rag_live.py` (маркер `llm`, по умолчанию не запускается) — обе версии на настоящих Qdrant, `bge-m3` и `llama3.2` во временных коллекциях.
 
@@ -2691,7 +2701,7 @@ flowchart LR
 ```powershell
 pip install -r requirements.txt                 # llama-index 0.14.25 и др.
 docker compose up -d qdrant
-python -m pytest -q                             # 1187 passed
+python -m pytest -q                             # 1188 passed
 python -m app.services.rag --build              # «проиндексировано фрагментов — 29»
 python -m app.services.rag --build              # «подключились к готовой»
 python -m app.services.rag                      # «Сколько стоит тариф «Команда» в месяц?» — JSON
@@ -2714,22 +2724,101 @@ curl.exe -s -X POST http://127.0.0.1:8000/rag/query -H "Content-Type: applicatio
 - **Ответ:** модель получила русский системный промпт и фрагменты с именами файлов, без пути и метки модели эмбеддингов; `max_tokens=512`, `temperature=0.1`. `rag_compare.py`: на вопросах 1–3 ожидаемый файл первый у обеих версий даже на подставных эмбеддингах.
 - **Сервис:** uvicorn — `rag_ready` на старте, `POST /rag/query` — 200 и три источника, пустой вопрос — 422 `empty_question`, инъекция — 400 `input_rejected`.
 - **Образ:** `docker build` с LlamaIndex — 705 МБ против 452 МБ у образа блока 5.2 (site-packages 444 МБ против 258; больше всех — `pandas`, 75 МБ, его требует `llama-index-readers-file`). В контейнере: индексация из корпуса образа (29 фрагментов), сервис с `rag_ready`, `/rag/query` — 200.
-- **Тесты:** `pytest` — 1186 passed и 1 skipped, с `-W error` тоже.
+- **Тесты:** `pytest` — 1187 passed и 1 skipped, с `-W error` тоже.
 
-**Windows** — после прогона.
+**Windows** (11.10.2026, CPU, `bge-m3` и `llama3.2` в Ollama):
+- **Тесты:** `pytest` — 1187 passed (до проверки полноты ответа в `rag_compare.py`, с ней — 1188); живой тест обеих версий `pytest -m llm tests/integration/test_rag_live.py` — 4 passed за 90 с.
+- **Индексация:** LlamaIndex — 29 фрагментов, повторный запуск — «подключились к готовой»; bare-metal — 37.
+- **Пять вопросов** (`scripts/rag_compare.py`, таблица и разбор — в [`docs/rag.md`](docs/rag.md#результаты-windows)): на трёх хороших нужный файл первым у обеих версий (близость 0.70–0.78), ответы верные: «4 900 ₽», «каждые 30 минут», лимиты API — у LlamaIndex с числами 60 / 300 / 1 200 и кодом 429, у bare-metal только «зависит от тарифа… 429». Средний вопрос (ответ — в таблице PDF) трудный для обеих: первым идёт файл об оплате картой (0.64), регламент — вторым (0.60). LlamaIndex скопировал строку таблицы с «1 час», bare-metal взял не ту колонку — «1 рабочий день». Вопрос о Битрикс24 — честный отказ у обеих: лучший фрагмент 0.44 ниже порога 0.5, модель не вызывалась. Порог 0.5 оставлен: релевантные — от 0.639, вне базы — до 0.448.
+- **Время ответа:** LlamaIndex — 38.7–55.2 с, bare-metal — 22.0–30.7 с. На ответ один запрос к модели; гипотеза — у LlamaIndex фрагменты длиннее (в среднем 395 токенов против 320), и промпт больше.
+- **Сервис:** `docker compose up -d --build` — образ собран за 67 с, `app` — healthy, в логе `rag_ready` (`rag_block_03`, `min_score 0.5`, `llama3.2`, `bge-m3`). `POST /rag/query` — «4 900 ₽.» с `top_score` 0.709 и тремя источниками, как у CLI; вопрос о Битрикс24 — «В базе знаний ответа нет.», 0.443.
 
 ### Соответствие критериям блока 5.3
 
 | Критерий | Реализация |
 |---|---|
-| `python -m app.services.rag` работает отдельно от сервиса | CLI в `app/services/rag.py`: индексация или подключение + ответ в JSON; `test_cli_prints_json` |
+| `python -m app.services.rag` работает отдельно от сервиса | CLI в `app/services/rag.py`: индексация или подключение + ответ в JSON; `test_cli_prints_json`; на Windows — 29 фрагментов и «4 900 ₽.» |
 | `RAGService.build()` / `answer()` на `SimpleDirectoryReader`, `SentenceSplitter(512, 64)`, `QdrantVectorStore` + `StorageContext`, `from_documents` / `from_vector_store`, `as_query_engine(similarity_top_k=3)` | `app/services/rag.py`; `test_llamaindex_builds_and_answers_with_three_sources`, `test_llamaindex_reconnects_without_reindexing` |
 | Ответ — `answer`, `top_score`, не меньше трёх `sources` с `text` (300 символов), `source`, `score` | `rag_common.result` / `source`; `assert_contract` в тестах обеих версий |
 | Конфигурация — в `.env`, без хардкода | `RAG__*` в `Settings.rag` и `.env.example`; `test_rag_settings_from_environment` |
-| Bare-metal на тех же Qdrant и модели эмбеддингов, тот же контракт | `app/services/rag_baremetal.py`; `test_baremetal_builds_and_answers_with_same_contract`, `test_both_versions_share_embeddings_and_differ_in_chunking`, `test_baremetal_does_not_import_llamaindex` |
-| `POST /rag/query`, индекс инициализируется один раз в lifespan | `app/routers/rag.py`, `open_rag` в lifespan; `test_rag_query_*`, `test_lifespan_opens_rag_once_and_closes_it` |
-| Нерелевантный документ и честный «не знаю» | `10_houseplants.txt`, порог `RAG__MIN_SCORE` и промпт; `test_*_fallback_below_threshold_skips_model`; вопрос 5 прогона |
+| Bare-metal на тех же Qdrant и модели эмбеддингов, тот же контракт | `app/services/rag_baremetal.py`; на Windows — те же ответы на вопросы 1, 3, 5; `test_baremetal_builds_and_answers_with_same_contract`, `test_both_versions_share_embeddings_and_differ_in_chunking`, `test_baremetal_does_not_import_llamaindex` |
+| `POST /rag/query`, индекс инициализируется один раз в lifespan | `app/routers/rag.py`, `open_rag` в lifespan; `test_rag_query_*`, `test_lifespan_opens_rag_once_and_closes_it`; на Windows — `rag_ready` в полном стеке `docker compose`, ответ с тремя источниками |
+| Нерелевантный документ и честный «не знаю» | `10_houseplants.txt`, порог `RAG__MIN_SCORE` и промпт; `test_*_fallback_below_threshold_skips_model`; на Windows вопрос 5 — отказ у обеих версий (0.44 < 0.5) |
 | `docs/rag.md`: версии, решение о коллекции, таблица сравнения с выводом, прогон пяти вопросов | разделы «Версии», «Коллекция», «LlamaIndex против bare-metal», «Прогон 5 вопросов» |
+
+## Блок 5.4 — Chunking и оптимизация качества
+
+RAG блока 5.3 настроен по замерам, а не на глаз. Golden dataset из 28 вопросов, три стратегии нарезки в отдельных коллекциях Qdrant, метрики Hit Rate@5, MRR@10 и Recall@10, re-ranker `bge-reranker-v2-m3` и подбор `chunk_size`, `overlap` и `top-K`. Подробно — [`docs/chunking_experiment.md`](docs/chunking_experiment.md).
+
+### Что сделано
+
+- **Golden dataset** `tests/eval/retrieval_dataset.json` — 28 вопросов по корпусу `data/rag-block-03`: 12 точечных фактов, 5 перефразированных, 5 сравнений, 6 многошаговых. У каждого 1–3 нужных документа (`relevant_doc_ids` — имена файлов) и части ответа дословно (`evidence`). `10_houseplants.txt` не нужен ни одному вопросу: это отвлекающий документ.
+- **`app/services/chunking.py`** — три стратегии:
+  - `fixed_size` — `TokenTextSplitter(512, 64)`, baseline, режет по токенам без учёта предложений;
+  - `recursive` — `SentenceSplitter(paragraph_separator="\n\n", chunking_tokenizer_fn=split_sentences_ru)`: абзацы → русские предложения (NLTK Punkt для русского из данных `llama-index-core`) → части предложений → слова;
+  - `semantic` — `SemanticSplitterNodeParser(buffer_size=1, breakpoint_percentile_threshold=95)` на той же `bge-m3`.
+
+  Там же статистика фрагментов: всего, на документ, средняя длина в токенах и символах.
+- **`app/services/retrieval_eval.py`** — `evaluate(retrieve, dataset)` → `{"hit_rate@5", "mrr@10", "recall@10"}` по документам; определения совпадают с `HitRate`, `MRR` и `Recall` LlamaIndex (тест сверяет). `evaluate_evidence()` — те же метрики строже: фрагмент засчитывается, если в нём есть часть ответа дословно. На 10 файлах документный уровень почти всегда 1.0, а строгий видит, разрезала ли граница фрагмента ответ.
+- **`app/services/reranker.py`** — вход: вопрос и кандидаты; выход: пересортированный top-N.
+  - `CrossEncoderReranker` — `BAAI/bge-reranker-v2-m3` через `sentence-transformers` (`requirements-embeddings.txt`);
+  - `CohereReranker` — `rerank-v3.5` по API;
+  - кеш оценок пар в памяти и SQLite.
+- **`scripts/chunking_experiment.py`**:
+  - индексирует `docs_fixed`, `docs_recursive`, `docs_semantic`; повторный запуск подключается к готовым коллекциям;
+  - считает метрики обоих уровней, длину фрагментов, токены в top-5 и скорость поиска;
+  - сравнивает лучшую стратегию с re-ranker и без, на 10 и 20 кандидатах;
+  - подбирает параметры: 4 нарезки × top-K 10/20, с re-ranker и без;
+  - печатает итоговые строки `.env`. Вывод — Markdown для `docs/chunking_experiment.md`.
+- **Сервис:**
+  - `RAGService` режет корпус стратегией `RAG__CHUNKING` и пишет метку нарезки в payload. Если коллекция нарезана иначе, в лог пишется предупреждение, CLI подсказывает `--rebuild`;
+  - с `RERANK__ENABLED=true` из Qdrant берутся `RAG__CANDIDATES_TOP_K` кандидатов, модели уходят первые `RAG__SIMILARITY_TOP_K` после re-ranker;
+  - `POST /rag/query` при недоступном re-ranker отвечает `503 rerank_unavailable`;
+  - в Docker re-ranker выключен: в образе нет `sentence-transformers`.
+- **Тесты:** +33.
+  - `tests/unit/test_chunking.py` — 32: русские предложения, три стратегии на настоящем корпусе (размер, границы, перекрытие, смена темы у semantic), метрики по ручным примерам и сверка с LlamaIndex, golden dataset (схема, цитаты есть в нужных файлах), re-ranker (подменный cross-encoder, кеш в SQLite, Cohere через `httpx.MockTransport`, ошибки), нарезка и re-ranker в `RAGService`, эксперимент целиком на Qdrant `:memory:`;
+  - в `test_rag.py` — `503 rerank_unavailable`; переменные `RAG__*` и `RERANK__*` — в проверке `.env.example`.
+
+### Проверка на Windows
+
+```powershell
+pip install -r requirements.txt
+pip install -r requirements-embeddings.txt      # sentence-transformers для bge-reranker-v2-m3
+python -m pytest -q                             # 1221 passed
+docker compose up -d qdrant
+python scripts/chunking_experiment.py --out var\chunking_experiment.md --json var\chunking_experiment.json
+python -m app.services.rag --rebuild            # коллекция сервиса — с итоговой нарезкой: 28 фрагментов
+```
+
+### Результаты
+
+**Песочница (Linux).** Ollama и Hugging Face недоступны: эмбеддинги — подставной сервер (триграммы символов), re-ranker — подставной Cohere. Проверена механика:
+- **Коллекции:** три коллекции стратегий и три — подбора параметров проиндексированы, повтор подключается к готовым.
+- **Метрики:** документный Hit Rate@5 — 1.000 у всех конфигураций даже на триграммах, строгие различают их.
+- **Скорость:** поиск — 5–9 мс.
+- **Итог:** итоговые строки `.env` печатаются.
+- **Тесты:** `pytest` — 1220 passed и 1 skipped, с `-W error` тоже.
+
+**Windows** (11.10.2026, CPU, `bge-m3` в Ollama, `bge-reranker-v2-m3` на CPU; таблицы и разбор — в [`docs/chunking_experiment.md`](docs/chunking_experiment.md#результаты-windows)):
+- **Индексация:** `docs_fixed` — 29 фрагментов (32 с), `docs_recursive` — 28 (20 с), `docs_semantic` — 28 (87 с: эмбеддинг каждого предложения, фрагменты до 1 019 токенов).
+- **По документам все три стратегии у потолка:** Hit Rate@5 и Recall@10 — 1.000; MRR@10 — 1.000 у fixed и recursive, 0.982 у semantic. Требование Hit Rate@5 ≥ 0.5 выполнено с запасом.
+- **Строгие метрики** (фрагмент с ответом): Hit Rate@5 и Recall@10 — 1.000 везде, MRR@10 — recursive 0.964, fixed 0.958, semantic 0.946. Разница меньше одного вопроса.
+- **Размер фрагмента:** 256 токенов — строгий MRR@10 0.905 против 0.964 при вдвое меньшем контексте (978 токенов в top-5 против 2003). Overlap 32 и 64 не различаются.
+- **Re-ranker:** на 512 токенах метрики не меняет, на 256 поднимает строгий MRR@10 до 0.946 — всё равно ниже 512 без него. Стоит ~0,4 с на пару, то есть ~4–8 с на вопрос, против 7 мс поиска. top-K 20 вместо 10 ничего не даёт.
+- **Итог:** recursive, chunk_size 512, overlap 64, top-K 10, без re-ranker. Это значения по умолчанию в `RagSettings` и `.env.example`. Ограничения и план следующей итерации — в документе: больше вопросов, корпус больше, гибридный поиск.
+- **Тесты:** 1220 passed. Упал один тест 5.3 — в коммите 5.3 был `scripts/rag_compare.py` из первого архива, он есть в архиве v2 этого блока.
+
+### Соответствие критериям блока 5.4
+
+| Критерий | Реализация |
+|---|---|
+| `tests/eval/retrieval_dataset.json` — ≥ 20 вопросов, у каждого 1–3 эталонных документа | 28 вопросов четырёх типов; `test_golden_dataset`, `test_load_dataset_rejects_bad_items` |
+| Три стратегии реализованы и проиндексированы в `docs_fixed`, `docs_recursive`, `docs_semantic` | `app/services/chunking.py`, `scripts/chunking_experiment.py`; `test_fixed_size_*`, `test_recursive_*`, `test_semantic_*`, `test_experiment_offline` |
+| `docs/chunking_experiment.md` — таблица по трём стратегиям и строки до/после re-ranker | разделы «Результаты»; столбцы — стратегия, Hit Rate@5, MRR@10, Recall@10, средняя длина chunk, скорость retrieval |
+| Re-ranker подключён, метрики до/после | `app/services/reranker.py`; `test_cross_encoder_*`, `test_cohere_*`, `test_rag_service_uses_chunking_and_reranker`; на Windows — `bge-reranker-v2-m3`, строки до/после на 10 и 20 кандидатах |
+| Лучшая конфигурация (chunk_size, overlap, top-K) — в `app/config.py` или `.env` | `RagSettings` / `RerankSettings` в `app/core/config.py`, `.env.example`: recursive, 512 / 64, top-K 10, re-ranker выключен |
+| Финальный Hit Rate@5 ≥ 0.5 или анализ причин | 1.000 на Windows; почему метрики у потолка и что делать дальше — «Разбор» и «Ограничения и следующая итерация» |
+| Параграф «выбираю стратегию X с конфигом Y, потому что …» | раздел «Итог» в `docs/chunking_experiment.md` |
 
 ## Конфигурация (.env)
 

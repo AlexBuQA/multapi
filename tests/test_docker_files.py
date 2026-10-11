@@ -370,7 +370,16 @@ class TestSecrets(unittest.TestCase):
                      "EMBEDDINGS__DOCUMENT_PREFIX", "EMBEDDINGS__CACHE_ENABLED", "EMBEDDINGS__CACHE_PATH",
                      "EMBEDDINGS__TIMEOUT", "EMBEDDINGS__MAX_ATTEMPTS", "EMBEDDINGS__DEVICE",
                      # блок 5.2
-                     "QDRANT_URL", "QDRANT_API_KEY", "QDRANT_COLLECTION", "EMBEDDING_DIM"):
+                     "QDRANT_URL", "QDRANT_API_KEY", "QDRANT_COLLECTION", "EMBEDDING_DIM",
+                     # блок 5.3
+                     "RAG__DATA_DIR", "RAG__COLLECTION", "RAG__BAREMETAL_COLLECTION", "RAG__CHUNK_SIZE",
+                     "RAG__CHUNK_OVERLAP", "RAG__SIMILARITY_TOP_K", "RAG__MIN_SCORE", "RAG__LLM_MODEL",
+                     "RAG__MAX_TOKENS", "RAG__TEMPERATURE",
+                     # блок 5.4
+                     "RAG__CHUNKING", "RAG__SEMANTIC_BUFFER_SIZE", "RAG__SEMANTIC_BREAKPOINT", "RAG__CANDIDATES_TOP_K",
+                     "RERANK__ENABLED", "RERANK__PROVIDER", "RERANK__MODEL", "RERANK__API_KEY", "RERANK__BASE_URL",
+                     "RERANK__DEVICE", "RERANK__MAX_LENGTH", "RERANK__BATCH_SIZE", "RERANK__TIMEOUT",
+                     "RERANK__CACHE_ENABLED", "RERANK__CACHE_PATH"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -380,7 +389,8 @@ class TestSecrets(unittest.TestCase):
         self.assertNotRegex(example, r"sk-[A-Za-z0-9_-]{20,}")
         for line in example.splitlines():
             if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL|INTERNAL_TOKEN|"
-                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY|EMBEDDINGS__API_KEY|QDRANT_API_KEY)\s*=", line):
+                        r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY|EMBEDDINGS__API_KEY|QDRANT_API_KEY|"
+                        r"RERANK__API_KEY)\s*=", line):
                 self.assertRegex(line, r'=\s*(""\s*)?(#|$)', line)        # значение пустое
 
     def test_empty_values_survive_docker_compose(self):

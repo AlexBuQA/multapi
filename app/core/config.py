@@ -294,6 +294,15 @@ class RagSettings(BaseModel):
     llm_model: str | None = None                       # пусто — LLM__DEFAULT_MODEL
     max_tokens: int = Field(default=512, ge=16, le=4096)    # предел длины ответа
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)   # низкая: ответ по контексту, без фантазий
+    # Блок 5.4: стратегия нарезки (app/services/chunking.py) и кандидаты для re-ranker. Итог замеров
+    # на golden dataset (docs/chunking_experiment.md, «Итог»): recursive, chunk_size 512, overlap 64,
+    # 10 кандидатов, re-ranker выключен. Смена нарезки требует пересборки коллекции:
+    # python -m app.services.rag --rebuild.
+    chunking: Literal["fixed", "recursive", "semantic"] = "recursive"
+    semantic_buffer_size: int = Field(default=1, ge=0, le=5)     # semantic: соседних предложений с каждой стороны
+    semantic_breakpoint: int = Field(default=95, ge=50, le=99)   # semantic: перцентиль расстояния для границы
+    # Сколько кандидатов взять из Qdrant для re-ranker (RERANK__ENABLED); модели уходят первые similarity_top_k.
+    candidates_top_k: int = Field(default=10, ge=1, le=100)
 
     @field_validator("data_dir")
     @classmethod
@@ -315,6 +324,43 @@ class RagSettings(BaseModel):
         if self.collection == self.baremetal_collection:
             raise ValueError("RAG__COLLECTION и RAG__BAREMETAL_COLLECTION совпадают: у двух версий RAG разный "
                              "формат точек, им нужны разные коллекции")
+        if self.candidates_top_k < self.similarity_top_k:
+            raise ValueError(f"RAG__CANDIDATES_TOP_K={self.candidates_top_k} меньше RAG__SIMILARITY_TOP_K="
+                             f"{self.similarity_top_k}: re-ranker выбирает фрагменты для модели из кандидатов")
+        return self
+
+
+class RerankSettings(BaseModel):
+    """Re-ranker (блок 5.4), app/services/reranker.py. Переменные — с префиксом RERANK__.
+
+    provider=cross-encoder — BAAI/bge-reranker-v2-m3 через sentence-transformers в процессе (пакеты —
+    requirements-embeddings.txt, веса ~2,3 ГБ скачиваются при первом запуске); provider=cohere —
+    Cohere Rerank API (rerank-v3.5), нужен RERANK__API_KEY. Выключен по умолчанию: в Docker-образе
+    нет sentence-transformers, а на CPU переранжирование — секунды на вопрос. Замеры —
+    docs/chunking_experiment.md.
+    """
+
+    enabled: bool = False
+    provider: Literal["cross-encoder", "cohere"] = "cross-encoder"
+    model: str | None = None                     # пусто — BAAI/bge-reranker-v2-m3 или rerank-v3.5
+    api_key: SecretStr | None = None             # только cohere
+    base_url: str = "https://api.cohere.com"     # только cohere
+    device: str = "cpu"                          # cross-encoder: cpu или cuda
+    max_length: int = Field(default=512, ge=64, le=8192)   # токенов пары «вопрос + фрагмент»
+    batch_size: int = Field(default=8, ge=1, le=256)
+    timeout: float = Field(default=30.0, gt=0, le=600)     # с на запрос к Cohere
+    cache_enabled: bool = True                   # оценки пар — в SQLite: повторный прогон не считает заново
+    cache_path: Path = ROOT / "var" / "rerank_cache.sqlite"
+
+    @field_validator("cache_path")
+    @classmethod
+    def _cache_from_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else ROOT / value
+
+    @model_validator(mode="after")
+    def _cohere_needs_key(self) -> RerankSettings:
+        if self.enabled and self.provider == "cohere" and not (self.api_key and self.api_key.get_secret_value()):
+            raise ValueError("RERANK__PROVIDER=cohere: задайте RERANK__API_KEY (ключ Cohere) в .env")
         return self
 
 
@@ -459,6 +505,8 @@ class Settings(BaseSettings):
     embedding_dim: int | None = Field(default=None, ge=1, le=65536)
     # Блок 5.3: RAG — корпус, нарезка, коллекции, порог «не знаю» (RAG__*).
     rag: RagSettings = Field(default_factory=RagSettings)
+    # Блок 5.4: re-ranker кандидатов поиска (RERANK__*).
+    rerank: RerankSettings = Field(default_factory=RerankSettings)
 
     @field_validator("log_level")
     @classmethod

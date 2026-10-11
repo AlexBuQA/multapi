@@ -14,8 +14,9 @@
 1. Пять вопросов: три «хороших» (ответ — в одном файле), один средний (ответ — в таблице PDF, а
    слова вопроса тянут и соседний файл про оплату картой) и один вне базы (честный отказ).
 2. По каждому вопросу и версии — короткий ответ, top-1 файл и близость, релевантен ли top-1
-   (да — файл с ответом, частично — соседний по теме, нет), есть ли в ответе ожидаемый факт и
-   сработал ли отказ «В базе знаний ответа нет.» (порог RAG__MIN_SCORE или сама модель).
+   (да — файл с ответом, частично — соседний по теме, нет), есть ли в ответе ожидаемые факты (да —
+   все части ответа, частично — не все; у вопроса об API это лимиты и код 429) и сработал ли отказ
+   «В базе знаний ответа нет.» (порог RAG__MIN_SCORE или сама модель).
 3. Строки кода конвейера (индексация и запрос) — по PIPELINE в обоих модулях, без импортов,
    docstring-ов, комментариев и пустых строк.
 
@@ -36,18 +37,19 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# kind: good — ответ в одном файле; medium — нужный факт в таблице PDF, рядом отвлекающий файл;
-# out — ответа в базе нет. answer — файлы с ответом, related — соседние по теме, expect — факт в ответе.
+# kind: хороший — ответ в одном файле; средний — нужный факт в таблице PDF, рядом отвлекающий файл;
+# вне базы — ответа нет. answer — файлы с ответом, related — соседние по теме. expect — части ответа:
+# каждая часть — варианты написания; ответ полный, если в нём есть все части.
 QUESTIONS: list[dict[str, Any]] = [
     {"kind": "хороший", "question": "Сколько стоит тариф «Команда» в месяц?",
-     "answer": {"02_tariffs_and_payment.md"}, "related": set(), "expect": ["4 900", "4900"]},
+     "answer": {"02_tariffs_and_payment.md"}, "related": set(), "expect": [["4 900", "4900"]]},
     {"kind": "хороший", "question": "Сколько запросов в минуту можно делать к API и что будет при превышении лимита?",
-     "answer": {"04_api.md"}, "related": set(), "expect": ["429"]},
+     "answer": {"04_api.md"}, "related": set(), "expect": [["60", "300", "1 200", "1200"], ["429"]]},
     {"kind": "хороший", "question": "Как часто счета и акты выгружаются в 1С?",
-     "answer": {"08_integrations_1c.docx"}, "related": set(), "expect": ["30 минут"]},
+     "answer": {"08_integrations_1c.docx"}, "related": set(), "expect": [["30 минут"]]},
     {"kind": "средний", "question": "Ночью не проходит оплата картой — как быстро ответит поддержка?",
      "answer": {"09_support_rules.pdf"}, "related": {"03_refunds_and_card_payments.txt"},
-     "expect": ["1 час", "час"]},
+     "expect": [["1 час"]]},
     {"kind": "вне базы", "question": "Есть ли интеграция с Битрикс24?",
      "answer": set(), "related": {"08_integrations_1c.docx"}, "expect": []},
 ]
@@ -120,8 +122,9 @@ def has_fact(item: dict[str, Any], answer: str) -> str:
         return "отказ" if is_no_answer(answer) else "**ответил без базы**"
     if is_no_answer(answer):
         return "отказ"
-    text = answer.replace(" ", " ").replace(" ", " ")
-    return "да" if any(fact in text for fact in item["expect"]) else "нет"
+    text = answer.replace("\u00a0", " ").replace("\u202f", " ")      # неразрывные пробелы в «4 900»
+    found = sum(any(variant in text for variant in part) for part in item["expect"])
+    return "да" if found == len(item["expect"]) else "частично" if found else "нет"
 
 
 def short(text: str) -> str:
