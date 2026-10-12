@@ -23,7 +23,7 @@ import pytest
 pytest.importorskip("ragas", reason="группа eval: pip install -r requirements-eval.txt")
 
 from rag_fakes import TrigramEmbeddings  # noqa: E402
-from ragas_fakes import FakeEmbeddings, FakeJudge, make_generator_llm  # noqa: E402
+from ragas_fakes import FakeEmbeddings, FakeJudge, make_generator_judge  # noqa: E402
 
 from app.core.config import RagasSettings, Settings  # noqa: E402
 from app.eval import metrics as m  # noqa: E402
@@ -168,8 +168,6 @@ def test_openrouter_judge_requires_json_parameters_and_hides_key(tmp_path):
     info = m.judge_info(cfg)
     assert info["judge_host"] == "openrouter.ai" and "test-openrouter-key" not in json.dumps(info)
     assert m.build_embeddings(cfg).model == "openai/text-embedding-3-small"
-    llama = m.build_judge_llama_index(cfg)                   # тот же судья для TestsetGenerator
-    assert llama.model == cfg.ragas.judge_model and llama.additional_kwargs["extra_body"]["provider"]
 
 
 def test_judge_cache_folder_per_model(tmp_path):
@@ -340,45 +338,121 @@ def small_corpus(tmp_path):
     return data
 
 
-def test_generate_testset_with_fake_model(tmp_path, small_corpus, monkeypatch):
+def generator_env(tmp_path: Path, small_corpus: Path, monkeypatch: Any, judge: Any) -> Any:
+    """generate_testset без сети: настройки с маленьким корпусом, модель — подставной судья."""
     script = load_script("generate_testset")
     cfg = Settings(_env_file=None, llm={"openai_api_key": "test-key"},
                    rag={"data_dir": small_corpus, "docstore_dir": tmp_path / "ingest"})
-    fake = make_generator_llm()
     monkeypatch.setattr("app.core.config.get_settings", lambda: cfg)
-    monkeypatch.setattr(m, "build_judge_llama_index", lambda cfg: fake)
+    monkeypatch.setattr(m, "build_judge", lambda cfg, **kwargs: judge)
+    monkeypatch.setattr(m, "judge_cache", lambda cfg: None)
     monkeypatch.setattr("app.services.embeddings.default_service", lambda: TrigramEmbeddings())
+    return script
+
+
+def test_generate_testset_with_fake_model(tmp_path, small_corpus, monkeypatch, capsys):
+    """Модель — тот же судья llm_factory, что у метрик (JSON по схеме); граф — сущности и связи по ним."""
+    fake = make_generator_judge()
+    script = generator_env(tmp_path, small_corpus, monkeypatch, fake)
     out, kg = tmp_path / "raw.csv", tmp_path / "kg.json"
 
     assert script.main(["--size", "4", "--out", str(out), "--kg", str(kg)]) == 0
     assert kg.is_file()
+    err = capsys.readouterr().err
+    assert "6 узлов, сущности у 6, краткие содержания у 0; связи: entities_overlap" in err
     with out.open(encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     assert rows and [r["id"] for r in rows] == [f"raw_{n:03d}" for n in range(1, len(rows) + 1)]
     assert list(rows[0]) == ["id", "user_input", "reference", "reference_contexts", "reference_sources",
                              "synthesizer_name"]
+    assert {r["synthesizer_name"] for r in rows} <= {"single_hop_specific_query_synthesizer",
+                                                    "multi_hop_specific_query_synthesizer"}
     for row in rows:
         assert row["user_input"] and row["reference"] and json.loads(row["reference_contexts"])
         sources = json.loads(row["reference_sources"])
         assert sources and all(s.startswith("api/") for s in sources)          # путь в корпусе, без uploads/
+    titles = [p for p in fake.prompts if '"title": "NEROutput"' in p]
+    assert len(titles) == 6 and all(script.RUSSIAN_EXTRACT.strip() in p for p in titles)   # вызов на документ
+    assert not [p for p in fake.prompts if '"title": "StringIO"' in p]                  # кратких содержаний нет
     generation = [p for p in fake.prompts if '"title": "GeneratedQueryAnswer"' in p]
     assert generation and all(script.RUSSIAN.strip() in p for p in generation)
 
     calls = len(fake.prompts)                 # граф сохранён: второй запуск строит только вопросы
     assert script.main(["--size", "2", "--out", str(out), "--kg", str(kg)]) == 0
-    assert '"title": "StringIO"' not in "".join(fake.prompts[calls:])
+    assert not [p for p in fake.prompts[calls:] if '"title": "NEROutput"' in p]
+
+
+def test_generate_testset_model_without_json_fails_without_saving_graph(tmp_path, small_corpus, monkeypatch, capsys):
+    """Windows, первая версия: модель отвечала обычным текстом, все вызовы извлечения падали — граф без
+    сущностей. Такой граф не сохраняется, скрипт выходит с кодом 2 и понятной причиной."""
+    script = generator_env(tmp_path, small_corpus, monkeypatch, make_generator_judge(plain_text=True))
+    kg = tmp_path / "kg.json"
+    assert script.main(["--size", "4", "--out", str(tmp_path / "raw.csv"), "--kg", str(kg)]) == 2
+    err = capsys.readouterr().err
+    assert not kg.exists() and "не вернула сущности" in err
+    assert "Сбоев модели при извлечении: 6" in err and "NERExtractor · api/" in err and "Invalid json output" in err
+
+
+def test_generate_testset_one_failed_document_does_not_break_graph(tmp_path, small_corpus, monkeypatch, capsys):
+    """RAGAS дожидается всех задач и поднимает первое исключение: без tolerant() один сбой модели из сотни
+    обрывал бы построение графа. Документ со сбоем — без сущностей, остальные — в графе."""
+    fake = make_generator_judge()
+    real = fake.agenerate
+    calls = {"ner": 0}
+
+    async def flaky(prompt: str, response_model: Any) -> Any:
+        if response_model.__name__ == "NEROutput":
+            calls["ner"] += 1
+            if calls["ner"] == 2:
+                raise TimeoutError("модель не ответила за 600 с")
+        return await real(prompt, response_model)
+
+    fake.agenerate = flaky
+    script = generator_env(tmp_path, small_corpus, monkeypatch, fake)
+    assert script.main(["--size", "3", "--out", str(tmp_path / "raw.csv"), "--kg", str(tmp_path / "kg.json")]) == 0
+    err = capsys.readouterr().err
+    assert "сущности у 5" in err and "Сбоев модели при извлечении: 1" in err and "TimeoutError" in err
+
+
+def test_generate_testset_rebuilds_unusable_saved_graph(tmp_path, small_corpus, monkeypatch, capsys):
+    from ragas.testset.graph import KnowledgeGraph, Node, NodeType
+
+    kg = tmp_path / "kg.json"
+    KnowledgeGraph(nodes=[Node(type=NodeType.DOCUMENT, properties={"page_content": "текст"})] * 3).save(str(kg))
+    fake = make_generator_judge()
+    script = generator_env(tmp_path, small_corpus, monkeypatch, fake)
+    assert script.main(["--size", "2", "--out", str(tmp_path / "raw.csv"), "--kg", str(kg)]) == 0
+    assert "не годится" in capsys.readouterr().err
+    assert [p for p in fake.prompts if '"title": "NEROutput"' in p]           # построен заново
+    assert script.graph_usable(script.graph_stats(KnowledgeGraph.load(str(kg))), abstract=False)
+
+
+def test_generate_testset_abstract_adds_summaries_and_themes(tmp_path, small_corpus, monkeypatch):
+    fake = make_generator_judge()
+    script = generator_env(tmp_path, small_corpus, monkeypatch, fake)
+    assert script.main(["--size", "4", "--abstract", "--out", str(tmp_path / "raw.csv"),
+                        "--kg", str(tmp_path / "kg.json")]) == 0
+    titles = {t for p in fake.prompts for t in ("StringIO", "ThemesAndConcepts", "NEROutput") if f'"title": "{t}"' in p}
+    assert titles == {"StringIO", "ThemesAndConcepts", "NEROutput"}
 
 
 def test_testset_documents_and_transforms(small_corpus):
     script = load_script("generate_testset")
     docs = script.corpus_documents(small_corpus)
     assert docs and {d.metadata["source"].split("/")[0] for d in docs} == {"api"}
+    from ragas.testset.transforms import OverlapScoreBuilder, Parallel
+    from ragas.testset.transforms.extractors.llm_based import NERExtractor, NERPrompt
     from ragas.testset.transforms.filters import CustomNodeFilter
 
-    llm = SimpleNamespace()
-    transforms = script.transforms_for(docs, llm, FakeEmbeddings())
-    flat = [t for item in transforms for t in (getattr(item, "transformations", None) or [item])]
-    assert flat and not any(isinstance(t, CustomNodeFilter) for t in flat)
+    llm = make_generator_judge()
+    ner, overlap = script.transforms_for(llm, FakeEmbeddings())
+    assert isinstance(ner, NERExtractor) and isinstance(overlap, OverlapScoreBuilder) and ner.max_num_entities == 6
+    assert ner.prompt.instruction.endswith(script.RUSSIAN_EXTRACT)
+    assert script.RUSSIAN_EXTRACT not in NERPrompt().instruction                  # промпт класса не тронут
+    assert script.RUSSIAN_EXTRACT not in NERExtractor(llm=llm).prompt.instruction
+    full = script.transforms_for(llm, FakeEmbeddings(), abstract=True)
+    flat = [t for item in full for t in (item.transformations if isinstance(item, Parallel) else [item])]
+    assert len(flat) == 6 and not any(isinstance(t, CustomNodeFilter) for t in flat)
 
 
 def test_testset_sources_of_multi_hop_contexts(small_corpus):
@@ -391,11 +465,10 @@ def test_testset_sources_of_multi_hop_contexts(small_corpus):
 
 
 def test_russian_instruction_added_once():
-    from ragas.llms import LlamaIndexLLMWrapper
     from ragas.testset.synthesizers import SingleHopSpecificQuerySynthesizer
 
     script = load_script("generate_testset")
-    synthesizer = SingleHopSpecificQuerySynthesizer(llm=LlamaIndexLLMWrapper(make_generator_llm()))
+    synthesizer = SingleHopSpecificQuerySynthesizer(llm=make_generator_judge())
     script.russian_synthesizer(script.russian_synthesizer(synthesizer))
     instruction = synthesizer.get_prompts()["query_answer_generation_prompt"].instruction
     assert instruction.count(script.RUSSIAN.strip()) == 1

@@ -141,24 +141,6 @@ def build_embeddings(cfg: Settings, *, client: Any = None) -> OpenAIEmbeddings:
     return OpenAIEmbeddings(client=client, model=model)
 
 
-def build_judge_llama_index(cfg: Settings) -> Any:
-    """Тот же судья как LLM LlamaIndex — для TestsetGenerator (scripts/generate_testset.py): генератор
-    golden dataset в RAGAS 0.4 работает через обёртку LlamaIndexLLMWrapper, а не через llm_factory.
-    OpenAILike, как у модели ответа (app/services/rag.py, build_llm): Ollama и OpenRouter."""
-    from llama_index.llms.openai_like import OpenAILike
-
-    base_url, key = judge_endpoint(cfg)
-    proxy = proxy_for(base_url, cfg.llm.proxy_url)
-    options = http_client_options(proxy, cfg.llm.use_system_certs and not is_local_url(base_url))
-    extra = {"extra_body": {"provider": {"require_parameters": True}}} if is_openrouter(base_url) else {}
-    return OpenAILike(model=cfg.ragas.judge_model, api_base=base_url or "https://api.openai.com/v1", api_key=key,
-                      is_chat_model=True, context_window=cfg.context_window, max_tokens=cfg.ragas.judge_max_tokens,
-                      temperature=0.0, timeout=cfg.ragas.judge_timeout, max_retries=3,
-                      default_headers=provider_headers(base_url, JUDGE_TITLE), additional_kwargs=extra,
-                      http_client=httpx.Client(**options) if options else None,
-                      async_http_client=httpx.AsyncClient(**options) if options else None)
-
-
 def judge_info(cfg: Settings) -> dict[str, Any]:
     """Кто и чем оценивал — в JSON прогона (без ключей и логина прокси)."""
     base_url, _ = judge_endpoint(cfg)

@@ -152,26 +152,26 @@ def generator_reply(prompt: str) -> str:
     raise AssertionError(f"неизвестная схема {title!r}")
 
 
-def make_generator_llm() -> Any:
-    """LLM LlamaIndex для TestsetGenerator без сети: ответы — generator_reply."""
-    from llama_index.core.llms import CompletionResponse, CustomLLM, LLMMetadata
-    from llama_index.core.llms.callbacks import llm_completion_callback
-    from pydantic import Field
+class FakeGeneratorJudge(InstructorBaseRagasLLM):
+    """Модель генератора golden dataset через llm_factory-интерфейс (agenerate с response_model), как у
+    судьи метрик: ответы — generator_reply. plain_text=True — модель отвечает обычным текстом, как
+    qwen3:4b-instruct без JSON-режима: каждый вызов падает."""
 
-    class FakeGeneratorLLM(CustomLLM):
-        prompts: list[str] = Field(default_factory=list)
+    is_async = True
 
-        @property
-        def metadata(self) -> LLMMetadata:
-            return LLMMetadata(context_window=8192, num_output=512, model_name="fake-generator")
+    def __init__(self, *, plain_text: bool = False) -> None:
+        self.prompts: list[str] = []
+        self.plain_text = plain_text
 
-        @llm_completion_callback()
-        def complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponse:
-            self.prompts.append(prompt)
-            return CompletionResponse(text=generator_reply(prompt))
+    def generate(self, prompt: str, response_model: Any) -> Any:  # pragma: no cover — только async
+        raise NotImplementedError
 
-        @llm_completion_callback()
-        def stream_complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> Any:
-            raise NotImplementedError
+    async def agenerate(self, prompt: str, response_model: Any) -> Any:
+        self.prompts.append(prompt)
+        if self.plain_text:
+            raise ValueError("Invalid json output: Краткое содержание обычным текстом.")
+        return response_model.model_validate_json(generator_reply(prompt))
 
-    return FakeGeneratorLLM()
+
+def make_generator_judge(*, plain_text: bool = False) -> FakeGeneratorJudge:
+    return FakeGeneratorJudge(plain_text=plain_text)
