@@ -128,7 +128,11 @@ def test_has_citation_discrete_metric(response, value):
     assert asyncio.run(metric.ascore(response=response)).value == value
     (schema, prompt), = judge.calls
     assert schema == "CitationVerdict" and prompt.startswith("Содержит ли ответ ссылку на источник")
-    assert prompt.endswith(response) and "'согласно …'" in prompt
+    assert prompt.endswith(f"<ответ>\n{response}\n</ответ>") and "'согласно …'" in prompt
+    assert "\nОтвет:" not in prompt          # первая версия: «Ответ:» перед текстом путала судью на 4B
+    # вторая: без перечня судья считал ссылкой только [N] — теперь три вида списком
+    assert all(kind in prompt for kind in ("1. маркер", "2. имя файла", "3. фраза со словом «согласно»"))
+    assert list(m.CitationVerdict.model_fields) == ["found", "has_citation"]     # цитата — до вердикта
 
 
 def test_eval_row_asks_rag_and_scores():
@@ -154,7 +158,9 @@ def test_judge_defaults_to_qwen_in_service_ollama(tmp_path):
     assert m._http_client(cfg, cfg.llm.base_url) is None            # Ollama — без прокси и сертификатов ОС
     assert m.build_embeddings(cfg).model == "bge-m3"
     assert m.judge_info(cfg) == {"judge_model": "qwen3:4b-instruct", "judge_host": "127.0.0.1",
-                                 "judge_max_tokens": 2048, "judge_embeddings": "bge-m3"}
+                                 "judge_max_tokens": 2048, "judge_embeddings": "bge-m3",
+                                 "citation_prompt": m.citation_prompt_id()}
+    assert len(m.citation_prompt_id()) == 12
 
 
 def test_openrouter_judge_requires_json_parameters_and_hides_key(tmp_path):
@@ -257,7 +263,8 @@ def test_run_eval_writes_csv_and_json(eval_env, capsys):
 
     summary = json.loads(csv_path.with_suffix(".json").read_text(encoding="utf-8"))
     assert summary["label"] == "unit" and summary["rows"] == 3
-    assert summary["config"]["collection"] == "kb_docs" and summary["config"]["chunk_size"] == 512
+    assert summary["config"]["collection"] == "kb_docs_recursive_512_64" and summary["config"]["chunk_size"] == 512
+    assert summary["judge"]["citation_prompt"] == m.citation_prompt_id()
     assert summary["judge"]["judge_model"] == "qwen3:4b-instruct" and summary["golden"]["items"] == 3
     assert summary["metrics"]["has_citation"] == {"mean": 0.5, "n": 2, "nan": 1}
     assert summary["metrics"]["faithfulness"] == {"mean": 1.0, "n": 1, "nan": 2}
@@ -303,7 +310,10 @@ def test_configure_names_collection_by_chunking(eval_env):
     script = eval_env.script
     base = eval_env.cfg
     same, collection = script.configure(base, script.parse_args(["--top-k", "3", "--candidates", "10"]))
-    assert collection == "kb_docs" and same.rag.similarity_top_k == 3
+    # нарезка сервиса — всё равно своя коллекция: в kb_docs лежат загрузки пользователей (data/uploads)
+    assert collection == "kb_docs_recursive_512_64" and same.rag.similarity_top_k == 3
+    _, collection = script.configure(base, script.parse_args(["--collection", "kb_try"]))
+    assert collection == "kb_try"
     _, collection = script.configure(base, script.parse_args(["--chunking", "fixed", "--chunk-overlap", "32"]))
     assert collection == "kb_docs_fixed_512_32"
     rerank, _ = script.configure(base, script.parse_args(["--rerank", "on"]))
@@ -529,8 +539,28 @@ def test_verify_eval_imports_and_live_call(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "ragas==0.4." in out and "[ragas] OK" in out and "[app.eval.metrics] OK" in out
     assert "[phoenix] OK" in out and "[судья из .env] OK" in out
-    assert "[live faithfulness] OK: 1.0" in out and "[live has_citation] OK: yes" in out
+    assert "[live faithfulness] OK: 1.0" in out and "[live has_citation] OK: 8/8 совпали" in out
+    assert "no  (ждали no ) совпало     «Не нашёл ответа в базе знаний." in out
     assert "[live эмбеддинги] OK: размерность 64" in out and out.rstrip().endswith("Всё на месте.")
+
+
+def test_verify_eval_catches_judge_that_misses_citations(monkeypatch, capsys):
+    """Судья, который не видит ссылок (как первая версия промпта на «Источники: [2][5]»), — код 1."""
+    pytest.importorskip("phoenix.evals", reason="группа eval целиком")
+    script = load_script("verify_eval")
+
+    class BlindJudge(FakeJudge):
+        async def agenerate(self, prompt, response_model):
+            if response_model.__name__ == "CitationVerdict":
+                return response_model(has_citation="no")
+            return await super().agenerate(prompt, response_model)
+
+    monkeypatch.setattr(m, "build_judge", lambda cfg, **kwargs: BlindJudge())
+    monkeypatch.setattr(m, "build_embeddings", lambda cfg, **kwargs: FakeEmbeddings())
+    assert script.main(["--live"]) == 1
+    out = capsys.readouterr().out
+    assert "[live has_citation] ОШИБКА: совпали 3/8" in out and "[live faithfulness] OK: 1.0" in out
+    assert "no  (ждали yes) НЕ СОВПАЛО  «Разблокировать аккаунт можно по ссылке из письма, которое п…»" in out
 
 
 def test_verify_eval_reports_broken_judge(monkeypatch, capsys):

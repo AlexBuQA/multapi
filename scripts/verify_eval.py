@@ -1,21 +1,25 @@
 """
 Проверка установки оценки и трейсинга (блок 5.6): версии пакетов, импорты RAGAS 0.4, модуля метрик,
-LlamaIndexInstrumentor и phoenix.evals; с --live — один вызов судьи и эмбеддингов вживую.
+LlamaIndexInstrumentor и phoenix.evals; с --live — судья и эмбеддинги вживую.
 
     pip install -r requirements.txt -r requirements-eval.txt -r requirements-tracing.txt
     python scripts/verify_eval.py            # только импорты и сборка судьи из .env — без запросов
-    python scripts/verify_eval.py --live     # плюс faithfulness и has_citation на одном примере
+    python scripts/verify_eval.py --live     # плюс faithfulness на примере и has_citation на восьми ответах
 
 Группы зависимостей (pyproject.toml): eval — ragas, langchain-community, anthropic, pandas, arize-phoenix,
 rapidfuzz, graphql-core<3.3; tracing — openinference-instrumentation-llama-index и OpenTelemetry. В production-образ идёт
 только tracing (Dockerfile, UV_EXTRAS), eval — на машине, где запускают scripts/run_eval.py.
 
 --live проверяет то, что импорт проверить не может: судья RAGAS__JUDGE_MODEL отвечает JSON по схеме
-(llm_factory, режим instructor), эмбеддинги для AnswerRelevancy доступны. На CPU (qwen3:4b-instruct)
-первый вызов — до минуты: Ollama загружает модель. Кеш судьи не используется — запрос уходит всегда.
+(llm_factory, режим instructor), эмбеддинги для AnswerRelevancy доступны, has_citation верно судит
+CITATION_CASES — восемь ответов, где ссылка есть или её нет заведомо: все три вида ссылки из задания,
+ответ из прогона smoke, который первая версия промпта сочла ответом без ссылки, и «ссылка из письма» —
+не ссылка на источник. Хоть одно расхождение — код 1: на 45 вопросах такой судья исказил бы
+has_citation. На CPU (qwen3:4b-instruct) первый вызов — до минуты: Ollama
+загружает модель; вся проверка — 1–3 минуты. Кеш судьи не используется — запрос уходит всегда.
 
-Код выхода: 0 — всё на месте (и --live прошёл), 1 — нет пакета группы eval, импорт упал или судья не
-ответил.
+Код выхода: 0 — всё на месте (и --live прошёл), 1 — нет пакета группы eval, импорт упал, судья не
+ответил или ошибся на CITATION_CASES.
 """
 from __future__ import annotations
 
@@ -41,6 +45,19 @@ PACKAGES = {
 QUESTION = "Сколько дней на возврат?"
 ANSWER = "Возврат возможен в течение 14 дней с момента покупки [1]."
 CONTEXTS = ["Возврат товара возможен в течение 14 дней с момента покупки."]
+# Ответы для has_citation и верный вердикт: все виды ссылки из задания (маркер, имя файла, «согласно») и
+# ответы без ссылки — в том числе со словом «ссылка» в смысле «ссылка из письма», которого в корпусе много.
+CITATION_CASES = (
+    (ANSWER, "yes"),
+    ("Разблокировать аккаунт можно по ссылке из письма, которое приходит после блокировки.\n\nИсточники: [2][5]",
+     "yes"),
+    ("Согласно разделу 2.4 справки, новый адрес подтверждается письмом со ссылкой.", "yes"),
+    ("Новый адрес подтверждается письмом — см. файл account/change-email.html.", "yes"),
+    ("Смена тарифа вступает в силу со следующего расчётного периода (billing/change-plan.md).", "yes"),
+    ("Разблокировать аккаунт можно по ссылке из письма после смены пароля.", "no"),
+    ("Не нашёл ответа в базе знаний. Уточните вопрос или обратитесь в поддержку.", "no"),
+    ("Код подтверждения действует 5 минут, новый можно запросить через 2 минуты.", "no"),
+)
 
 
 def versions() -> list[str]:
@@ -135,8 +152,39 @@ def phoenix_imports() -> str:
     return "phoenix.client.Client, phoenix.evals.HallucinationEvaluator"
 
 
+def _short(text: str, limit: int = 60) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+async def citation_cases(metric) -> bool:
+    """has_citation на CITATION_CASES: вердикт судьи против известного ответа."""
+    started = time.perf_counter()
+    matched = 0
+    for response, expected in CITATION_CASES:
+        try:
+            result = await metric.ascore(response=response)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[live has_citation] ОШИБКА: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}")
+            return False
+        if result.value is None:              # @discrete_metric ловит сбой судьи сам: value=None, текст в reason
+            print(f"[live has_citation] ОШИБКА: {' '.join(str(result.reason or '').split())[:300]}")
+            return False
+        verdict = "совпало" if result.value == expected else "НЕ СОВПАЛО"
+        matched += result.value == expected
+        print(f"  {result.value:<3} (ждали {expected:<3}) {verdict:<11} «{_short(response)}»")
+    seconds = time.perf_counter() - started
+    total = len(CITATION_CASES)
+    if matched == total:
+        print(f"[live has_citation] OK: {matched}/{total} совпали ({seconds:.1f} с)")
+        return True
+    print(f"[live has_citation] ОШИБКА: совпали {matched}/{total} — судья путает ответы со ссылкой и без, "
+          f"has_citation прогона будет искажён ({seconds:.1f} с)")
+    return False
+
+
 async def live() -> bool:
-    """Faithfulness и has_citation на одном примере, плюс эмбеддинг — вживую, без кеша судьи."""
+    """Faithfulness на примере, has_citation на CITATION_CASES и эмбеддинг — вживую, без кеша судьи."""
     from app.core.config import get_settings
     from app.eval.metrics import build_embeddings, build_judge, build_metrics
     from app.services.rag_common import strip_citations
@@ -145,24 +193,20 @@ async def live() -> bool:
     embeddings = build_embeddings(cfg)
     metrics = build_metrics(build_judge(cfg, cache=None), embeddings)
     ok = True
-    for title, call in (                       # faithfulness — без [1], как в run_eval (score_row)
-        ("faithfulness", lambda: metrics.faithfulness.ascore(user_input=QUESTION, response=strip_citations(ANSWER),
-                                                             retrieved_contexts=CONTEXTS)),
-        ("has_citation", lambda: metrics.has_citation.ascore(response=ANSWER)),
-    ):
-        started = time.perf_counter()
-        try:
-            result = await call()
-        except Exception as exc:  # noqa: BLE001
-            print(f"[live {title}] ОШИБКА: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}")
+    started = time.perf_counter()               # faithfulness — без [1], как в run_eval (score_row)
+    try:
+        result = await metrics.faithfulness.ascore(user_input=QUESTION, response=strip_citations(ANSWER),
+                                                   retrieved_contexts=CONTEXTS)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[live faithfulness] ОШИБКА: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}")
+        ok = False
+    else:
+        if result.value is None:
+            print(f"[live faithfulness] ОШИБКА: {' '.join(str(result.reason or '').split())[:300]}")
             ok = False
-            continue
-        if result.value is None:              # @discrete_metric ловит сбой судьи сам: value=None, текст в reason
-            print(f"[live {title}] ОШИБКА: {' '.join(str(result.reason or '').split())[:300]}")
-            ok = False
-            continue
-        print(f"[live {title}] OK: {result.value} ({time.perf_counter() - started:.1f} с; ожидается "
-              f"{'1.0' if title == 'faithfulness' else 'yes'})")
+        else:
+            print(f"[live faithfulness] OK: {result.value} ({time.perf_counter() - started:.1f} с; ожидается 1.0)")
+    ok &= await citation_cases(metrics.has_citation)
     try:
         vector = await embeddings.aembed_text(QUESTION)
         print(f"[live эмбеддинги] OK: размерность {len(vector)}")
@@ -174,7 +218,8 @@ async def live() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Проверка eval- и tracing-зависимостей (блок 5.6)")
-    parser.add_argument("--live", action="store_true", help="один вызов судьи и эмбеддингов вживую")
+    parser.add_argument("--live", action="store_true",
+                        help="судья (faithfulness, has_citation на восьми ответах) и эмбеддинги вживую")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):     # вывод в файл на Windows (cp1251): «₽» и др. — не падать
         sys.stdout.reconfigure(errors="replace")

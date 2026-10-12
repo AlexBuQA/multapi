@@ -100,6 +100,8 @@ def comparable(base: dict[str, Any], run: dict[str, Any]) -> list[str]:
         problems.append("другой судья")
     if base.get("golden", {}).get("sha256") != run.get("golden", {}).get("sha256"):
         problems.append("другой golden")
+    if base.get("judge", {}).get("citation_prompt") != run.get("judge", {}).get("citation_prompt"):
+        problems.append("другой промпт has_citation")
     return problems
 
 

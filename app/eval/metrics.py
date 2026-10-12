@@ -27,6 +27,7 @@ context_recall NaN. Судья ответил не по схеме или упа
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -41,7 +42,7 @@ os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 import httpx  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 from ragas.cache import DiskCacheBackend  # noqa: E402
 from ragas.embeddings import OpenAIEmbeddings  # noqa: E402
 from ragas.llms import llm_factory  # noqa: E402
@@ -147,17 +148,42 @@ def judge_info(cfg: Settings) -> dict[str, Any]:
     host = urlsplit(base_url or "https://api.openai.com/v1").hostname
     return {"judge_model": cfg.ragas.judge_model, "judge_host": host,
             "judge_max_tokens": cfg.ragas.judge_max_tokens,
-            "judge_embeddings": cfg.ragas.embeddings_model or cfg.embeddings.model}
+            "judge_embeddings": cfg.ragas.embeddings_model or cfg.embeddings.model,
+            "citation_prompt": citation_prompt_id()}
+
+
+def citation_prompt_id() -> str:
+    """Отпечаток промпта has_citation: другой промпт — другие оценки, сравнивать нельзя."""
+    return hashlib.sha256(CITATION_PROMPT.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------- метрики
 class CitationVerdict(BaseModel):
+    # Сначала цитата, потом вердикт: 4B-судья, выписав найденное, реже отвечает «no» при ссылке в тексте.
+    found: str = Field("", description="ссылка на источник из ответа дословно; пустая строка — ссылки нет")
     has_citation: Literal["yes", "no"]
 
 
+# Первая строка — вопрос из задания дословно; дальше — уточнения для судьи на 4B, подобранные на
+# scripts/verify_eval.py --live (CITATION_CASES):
+# 1) «…Ответь yes или no.\n\nОтвет:\n{ответ}» — на прогоне smoke «…Источники: [2][5]» оценён как «no»;
+# 2) примеры маркеров, «номер не проверяй», ответ в тегах — маркеры верно, но «согласно разделу 2.4» и
+#    «см. файл account/change-email.html» — «no» (4 из 6): без перечня судья считал ссылкой только [N].
+# Отсюда — три вида ссылки списком, оговорка про «ссылку из письма» (её в корпусе много) и поле found.
+# Отпечаток промпта — в JSON прогона (judge_info): прогоны с разными промптами eval_report.py помечает
+# как несравнимые.
 CITATION_PROMPT = (
     "Содержит ли ответ ссылку на источник: маркер вида '[1]'/'[doc_id]', имя файла, или фразу "
-    "'согласно …'? Ответь yes или no.\n\nОтвет:\n{response}"
+    "'согласно …'?\n\n"
+    "Ссылка на источник — любое из трёх:\n"
+    "1. маркер в квадратных скобках: [1], [2][5], [1], [3], [doc_id] — в том числе в строке «Источники: …»;\n"
+    "2. имя файла: account/change-email.html, faq.md, tariffs.pdf;\n"
+    "3. фраза со словом «согласно»: «согласно разделу 2.4», «согласно справке».\n"
+    "Хватит одного из трёх. Верен ли источник, не проверяй. Слово «ссылка» в смысле «ссылка из письма» "
+    "или «перейдите по ссылке» — не ссылка на источник.\n\n"
+    "Сначала выпиши в found найденную ссылку дословно (пустая строка, если её нет), затем has_citation: "
+    "yes, если ссылка есть, иначе no.\n\n"
+    "Ответ ассистента — между тегами:\n<ответ>\n{response}\n</ответ>"
 )
 
 

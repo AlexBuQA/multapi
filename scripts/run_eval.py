@@ -20,13 +20,17 @@ ragas.metrics.collections и has_citation (@discrete_metric). Плюс заде�
 2. оценки — asyncio.gather по всем вопросам, одновременно не больше RAGAS__CONCURRENCY строк (Ollama на
    CPU всё равно ставит запросы в очередь).
 Каждый готовый ответ и каждая готовая строка оценок сразу дописываются в {…}.partial.jsonl: прогон на
-CPU — час и больше, и после сбоя или Ctrl+C его продолжает --resume. После успешного прогона файл
-удаляется.
+CPU — несколько часов (Windows, qwen3:4b-instruct на CPU: около 7,5 мин судьи на вопрос), и после сбоя или
+Ctrl+C его продолжает --resume. После успешного прогона файл удаляется.
 
 Параметры эксперимента — флагами, по одному (--chunk-size, --top-k, --rerank …); всё остальное — из
-.env, как у сервиса. Другая нарезка — другая коллекция ({RAG__COLLECTION}_{нарезка}_{размер}_{перекрытие},
-индексируется здесь же): коллекция сервиса kb_docs не трогается. Конфигурация, судья и хеш golden
-записываются в JSON — сравнивать можно только прогоны с одним судьёй и одним golden.
+.env, как у сервиса. Корпус индексируется здесь же в коллекцию оценки
+{RAG__COLLECTION}_{нарезка}_{размер}_{перекрытие} (kb_docs_recursive_512_64, kb_docs_recursive_128_64):
+у каждой нарезки своя, прогоны с одной нарезкой (baseline и rerank) делят одну. Коллекцию сервиса
+kb_docs оценка не читает и не пишет: в ней ещё и загрузки пользователей (POST /documents/upload,
+data/uploads — например, тарифы 2027 года из блока 5.5), которых нет в golden dataset, а на тарифных
+вопросах они спорили бы с корпусом. Конфигурация, судья (с отпечатком промпта has_citation) и хеш golden
+записываются в JSON — сравнивать можно только прогоны с одним судьёй, одним промптом и одним golden.
 
 Нужны Qdrant, Ollama с моделью ответа, эмбеддингов и судьёй, группа eval (requirements-eval.txt).
 Код выхода: 0 — готово, 2 — ошибка.
@@ -71,8 +75,9 @@ def load_golden(path: Path) -> list[dict[str, Any]]:
 
 
 def configure(cfg: Any, args: argparse.Namespace) -> tuple[Any, str]:
-    """Настройки с параметрами эксперимента и коллекция для них. Валидаторы RagSettings проверяют
-    сочетание (overlap < chunk_size, кандидатов не меньше top-K)."""
+    """Настройки с параметрами эксперимента и коллекция оценки для них — по нарезке, и для нарезки
+    сервиса тоже (не kb_docs: там загрузки пользователей). Валидаторы RagSettings проверяют сочетание
+    (overlap < chunk_size, кандидатов не меньше top-K)."""
     from app.core.config import RagSettings, RerankSettings
 
     rag_update = {key: value for key, value in {
@@ -82,10 +87,7 @@ def configure(cfg: Any, args: argparse.Namespace) -> tuple[Any, str]:
     rag = RagSettings(**{**cfg.rag.model_dump(), **rag_update})
     rerank = RerankSettings(**{**cfg.rerank.model_dump(), **({"enabled": args.rerank == "on"} if args.rerank else {})})
     updated = cfg.model_copy(update={"rag": rag, "rerank": rerank})
-    same_chunks = (rag.chunking, rag.chunk_size, rag.chunk_overlap) == (cfg.rag.chunking, cfg.rag.chunk_size,
-                                                                        cfg.rag.chunk_overlap)
-    collection = args.collection or (cfg.rag.collection if same_chunks else
-                                     f"{cfg.rag.collection}_{rag.chunking}_{rag.chunk_size}_{rag.chunk_overlap}")
+    collection = args.collection or f"{cfg.rag.collection}_{rag.chunking}_{rag.chunk_size}_{rag.chunk_overlap}"
     return updated, collection
 
 
@@ -272,7 +274,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     group.add_argument("--rerank", choices=["on", "off"], help="re-ranker блока 5.4 (RERANK__*)")
     group.add_argument("--threshold", type=float, help="порог score-guard (RAG__SCORE_THRESHOLD)")
     group.add_argument("--llm-model", help="модель ответа (RAG__LLM_MODEL)")
-    group.add_argument("--collection", help="коллекция Qdrant (по умолчанию — по нарезке)")
+    group.add_argument("--collection", help="коллекция Qdrant (по умолчанию — kb_docs_<нарезка>_<размер>_<перекрытие>)")
     args = parser.parse_args(argv)
     if not LABEL.match(args.label):
         parser.error("--label: латиница, цифры, _ . - (это часть имени файла)")
@@ -334,7 +336,7 @@ async def run(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     rag = RAGService(cfg, collection=collection)
     try:
-        report = await asyncio.to_thread(rag.ingestion().run)       # другая нарезка — проиндексировать
+        report = await asyncio.to_thread(rag.ingestion().run)       # корпус — в коллекцию оценки
         print(f"Коллекция {collection}: {report.summary()}", file=sys.stderr)
         await asyncio.to_thread(rag.build, create=False)
         await answer_all(rag, rows, journal)

@@ -365,13 +365,14 @@ def test_trace_queries_checks_tree_in_phoenix(monkeypatch):
 
 # ---------------------------------------------------------------- scripts/eval_report.py
 def write_run(results: Path, stamp: str, label: str, means: dict[str, float | None], *, judge: str = "qwen3:4b-instruct",
-              golden: str = "abc", **config: Any) -> None:
+              golden: str = "abc", citation_prompt: str = "c1", **config: Any) -> None:
     base_config = {"collection": "kb_docs", "chunking": "recursive", "chunk_size": 512, "chunk_overlap": 64,
                    "candidates_top_k": 10, "similarity_top_k": 5, "score_threshold": 0.5, "llm_model": "llama3.2",
                    "temperature": 0.1, "embeddings_model": "bge-m3",
                    "rerank": {"enabled": False, "provider": None, "model": None}}
     data = {"label": label, "timestamp": stamp, "config": {**base_config, **config},
-            "judge": {"judge_model": judge, "judge_host": "127.0.0.1", "judge_embeddings": "bge-m3"},
+            "judge": {"judge_model": judge, "judge_host": "127.0.0.1", "judge_embeddings": "bge-m3",
+                      "citation_prompt": citation_prompt},
             "golden": {"path": "golden_dataset.json", "items": 30, "sha256": golden},
             "metrics": {m: {"mean": means.get(m), "n": 30, "nan": 0} for m in
                         ("faithfulness", "answer_relevancy", "context_precision", "context_recall", "has_citation")},
@@ -403,6 +404,17 @@ def test_eval_report_ab_table(tmp_path, capsys):
     assert script.main(["--results", str(results), "--labels", "nope"]) == 2
     assert script.main(["--results", str(tmp_path / "empty")]) == 2
 
+
+
+def test_eval_report_flags_other_citation_prompt(tmp_path, capsys):
+    """has_citation с другим промптом — другая шкала: сдвиг есть, но строка помечена."""
+    script = load_script("eval_report")
+    results = tmp_path / "results"
+    write_run(results, "2026-10-12_2040", "smoke", {"has_citation": 0.5}, citation_prompt="old")
+    write_run(results, "2026-10-13_0400", "baseline", {"has_citation": 0.96})
+    assert script.main(["--results", str(results), "--labels", "baseline", "smoke"]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("| smoke")]
+    assert lines and "⚠️ другой промпт has_citation" in lines[0]
 
 def test_eval_report_worst_and_diagnosis(tmp_path, capsys):
     script = load_script("eval_report")

@@ -4,7 +4,8 @@
 FakeJudge — InstructorBaseRagasLLM: по имени схемы ответа возвращает правдоподобную структуру и
 запоминает запросы. Правила простые и предсказуемые: утверждение «поддержано» контекстом, если его
 первое слово есть в контексте; фрагмент «полезен», если в нём есть число из эталона; ответ со
-ссылкой — если в нём есть «[N]» или «Источники». FakeEmbeddings — векторы из триграмм символов.
+ссылкой — если в нём есть «[N]», «Источники», «согласно» или имя файла. FakeEmbeddings — векторы
+из триграмм символов.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ from ragas.embeddings.base import BaseRagasEmbedding
 from ragas.llms.base import InstructorBaseRagasLLM
 
 DIM = 64
+# «Ссылка на источник» по-простому: [N]/[doc_id], «Источники», «согласно …», имя файла.
+CITED = re.compile(r"\[[\w.-]+\]|Источники|[Сс]огласно|\b[\w-]+\.(?:md|html|pdf|docx)\b")
 
 
 def _field(prompt: str, name: str) -> str:
@@ -61,8 +64,9 @@ class FakeJudge(InstructorBaseRagasLLM):
             return response_model(classifications=[{"statement": "Срок возврата — 14 дней.", "reason": "в контексте",
                                                     "attributed": int("14" in prompt.rsplit('"context":', 1)[-1])}])
         if name == "CitationVerdict":
-            answer = prompt.rsplit("Ответ:", 1)[-1]
-            return response_model(has_citation="yes" if re.search(r"\[\d+\]|Источники", answer) else "no")
+            answer = prompt.rsplit("<ответ>", 1)[-1].split("</ответ>")[0]
+            found = CITED.search(answer)
+            return response_model(found=found.group(0) if found else "", has_citation="yes" if found else "no")
         raise AssertionError(f"неизвестная схема {name}")
 
 
