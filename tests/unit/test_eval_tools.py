@@ -442,3 +442,18 @@ def test_eval_report_thresholds(tmp_path, capsys):
     assert script.main(["--check", str(results / "2026-10-13_1500_final.json")]) == 0
     assert script.main(["--check", str(results / "2026-10-13_1600_weak.json")]) == 1
     assert "FAIL faithfulness = 0.650 (нужно > 0.7)" in capsys.readouterr().out
+
+
+def test_committed_golden_matches_raw_and_review():
+    """Golden в репозитории собран из актуальных сырого CSV и вычитки: правка golden_review.yaml без
+    python scripts/build_golden.py (или новая генерация без вычитки) — тест падает."""
+    raw = ROOT / "tests" / "eval" / "golden_dataset_raw.csv"
+    review = ROOT / "tests" / "eval" / "golden_review.yaml"
+    golden = ROOT / "tests" / "eval" / "golden_dataset.json"
+    if not (raw.is_file() and review.is_file() and golden.is_file()):
+        pytest.skip("golden dataset ещё не собран (scripts/generate_testset.py, build_golden.py)")
+    script = load_script("build_golden")
+    items, problems = script.build(script.read_raw(raw), script.read_review(review))
+    assert problems == [], "вычитка неполная — python scripts/build_golden.py --check"
+    assert len(items) >= 30
+    assert json.loads(golden.read_text(encoding="utf-8")) == items, "golden устарел — python scripts/build_golden.py"
