@@ -5,6 +5,7 @@ Golden dataset для оценки RAG (блок 5.6): RAGAS TestsetGenerator н
     python scripts/generate_testset.py --size 50 --seed 7       # граф уже построен (var/testset_kg.json) — только вопросы
     python scripts/generate_testset.py --rebuild-kg             # построить граф заново
     python scripts/generate_testset.py --abstract               # плюс обобщающие multi-hop вопросы (+~200 вызовов)
+    python scripts/generate_testset.py --append --size 16 --single-hop-only   # добавить пары по ещё не взятым документам
 
 Как устроено:
 1. Документы — те же, что индексирует сервис (app/services/ingestion.py: read_file по list_files, с
@@ -26,7 +27,11 @@ Golden dataset для оценки RAG (блок 5.6): RAGAS TestsetGenerator н
    «текст на русском — ответ на русском»: образцы RAGAS английские, и маленькая модель иначе переводит.
    Граф сохраняется в var/testset_kg.json; граф без сущностей (сбой модели) не используется повторно.
 4. Вопросы — доли 0.7 / 0.3 (с --abstract — 0.6 / 0.2 / 0.2), синтезатор без подходящих узлов графа
-   пропускается. Персоны заданы, а не генерируются: четыре типичных пользователя «Личного кабинета». К
+   пропускается. Single-hop RAGAS берёт первые n узлов графа по порядку, поэтому узлы перед генерацией идут
+   по кругу по категориям корпуса (внутри категории — в случайном порядке с --seed), связи — вперемешку:
+   первая генерация на Windows шла по порядку файлов, и 28 вопросов по одному документу пришлись только на
+   account, api и billing. --append дописывает пары в существующий CSV (id продолжаются) по документам,
+   которых в нём ещё нет. Персоны заданы, а не генерируются: четыре типичных пользователя «Личного кабинета». К
    промпту генерации добавлено требование писать вопрос и ответ по-русски.
 5. Сырой результат — tests/eval/golden_dataset_raw.csv: id, user_input, reference,
    reference_contexts (JSON-список), reference_sources (файлы корпуса, из которых контексты),
@@ -40,11 +45,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import json
 import os
+import random
 import sys
 import time
 import warnings
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -211,7 +219,40 @@ def russian_synthesizer(synthesizer: Any) -> Any:
     return synthesizer
 
 
-def query_distribution(llm: Any, graph: Any, *, abstract: bool = False) -> list[tuple[Any, float]]:
+def category_of(node: Any) -> str:
+    source = (node.properties.get("document_metadata") or {}).get("source") or ""
+    return source.split("/", 1)[0]
+
+
+def source_of(node: Any) -> str:
+    return (node.properties.get("document_metadata") or {}).get("source") or ""
+
+
+def balanced(graph: Any, seed: int, exclude_sources: set[str] | frozenset[str] = frozenset()) -> Any:
+    """Тот же граф, но узлы — по кругу по категориям (account, api, billing, …), внутри категории — в
+    случайном порядке; связи — вперемешку; без документов exclude_sources и их связей."""
+    from ragas.testset.graph import KnowledgeGraph
+
+    rng = random.Random(seed)
+    groups: dict[str, list[Any]] = defaultdict(list)
+    for node in graph.nodes:
+        if source_of(node) not in exclude_sources:
+            groups[category_of(node)].append(node)
+    for nodes in groups.values():
+        rng.shuffle(nodes)
+    order: list[Any] = []
+    while any(groups.values()):
+        for name in sorted(groups):
+            if groups[name]:
+                order.append(groups[name].pop(0))
+    kept = {node.id for node in order}
+    relationships = [r for r in graph.relationships if r.source.id in kept and r.target.id in kept]
+    rng.shuffle(relationships)
+    return KnowledgeGraph(nodes=order, relationships=relationships)
+
+
+def query_distribution(llm: Any, graph: Any, *, abstract: bool = False,
+                       single_only: bool = False) -> list[tuple[Any, float]]:
     """Синтезаторы с долями WEIGHTS (с abstract — WEIGHTS_ABSTRACT); без подходящих узлов графа синтезатор
     пропускается, доли остальных нормируются."""
     from ragas.testset.synthesizers import (
@@ -221,8 +262,9 @@ def query_distribution(llm: Any, graph: Any, *, abstract: bool = False) -> list[
     )
 
     weights = WEIGHTS_ABSTRACT if abstract else WEIGHTS
-    classes = [SingleHopSpecificQuerySynthesizer, MultiHopSpecificQuerySynthesizer]
-    if abstract:
+    classes = [SingleHopSpecificQuerySynthesizer] if single_only else [SingleHopSpecificQuerySynthesizer,
+                                                                        MultiHopSpecificQuerySynthesizer]
+    if abstract and not single_only:
         classes.append(MultiHopAbstractQuerySynthesizer)
     available = []
     for cls in classes:
@@ -259,12 +301,12 @@ def sources_of(contexts: list[str], docs: list[Any]) -> list[str]:
     return found
 
 
-def to_rows(frame: Any, docs: list[Any]) -> Any:
+def to_rows(frame: Any, docs: list[Any], start: int = 1) -> Any:
     """DataFrame RAGAS → строки сырого golden: id, вопрос, эталон, контексты и их файлы, синтезатор."""
     import pandas as pd
 
     rows = []
-    for number, record in enumerate(frame.to_dict("records"), start=1):
+    for number, record in enumerate(frame.to_dict("records"), start=start):
         contexts = record.get("reference_contexts") or []
         if isinstance(contexts, str):
             contexts = [contexts]
@@ -277,6 +319,17 @@ def to_rows(frame: Any, docs: list[Any]) -> Any:
     return pd.DataFrame(rows)
 
 
+def read_existing(path: Path) -> tuple[list[dict[str, str]], set[str], int]:
+    """Строки сырого CSV, файлы корпуса, по которым уже есть пары, и следующий номер id."""
+    if not path.is_file():
+        return [], set(), 1
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    used = {source for row in rows for source in json.loads(row.get("reference_sources") or "[]")}
+    numbers = [int(row["id"].rsplit("_", 1)[-1]) for row in rows if row.get("id", "").rsplit("_", 1)[-1].isdigit()]
+    return rows, used, max(numbers, default=0) + 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Golden dataset через RAGAS TestsetGenerator (блок 5.6)")
     parser.add_argument("--size", type=int, default=40, help="сколько пар сгенерировать (после вычитки нужно ≥ 30)")
@@ -286,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=42, help="seed выбора узлов и персон")
     parser.add_argument("--abstract", action="store_true",
                         help="ещё multi-hop abstract: краткие содержания и темы в графе (+2 вызова модели на документ)")
+    parser.add_argument("--append", action="store_true",
+                        help="дописать пары в --out (id продолжаются) по документам, которых в нём ещё нет")
+    parser.add_argument("--single-hop-only", action="store_true", help="только вопросы по одному документу")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
@@ -343,21 +399,33 @@ def main(argv: list[str] | None = None) -> int:
             args.kg.parent.mkdir(parents=True, exist_ok=True)
             graph.save(str(args.kg))
             print(f"Граф сохранён — {args.kg}", file=sys.stderr)
-        generator = TestsetGenerator(llm=llm, embedding_model=embeddings, knowledge_graph=graph,
+        existing, used, start = read_existing(args.out) if args.append else ([], set(), 1)
+        ordered = balanced(graph, args.seed, used)
+        if args.append:
+            print(f"Дописываю в {args.out.name}: в нём {len(existing)} пар по {len(used)} файлам — их документы "
+                  f"пропускаются, осталось {len(ordered.nodes)} документов", file=sys.stderr)
+        generator = TestsetGenerator(llm=llm, embedding_model=embeddings, knowledge_graph=ordered,
                                      persona_list=[Persona(name=n, role_description=d) for n, d in PERSONAS],
                                      llm_context=LLM_CONTEXT)
-        testset = generator.generate(testset_size=args.size,
-                                     query_distribution=query_distribution(llm, graph, abstract=args.abstract),
+        distribution = query_distribution(llm, ordered, abstract=args.abstract, single_only=args.single_hop_only)
+        testset = generator.generate(testset_size=args.size, query_distribution=distribution,
                                      num_personas=len(PERSONAS), run_config=run_config)
-        rows = to_rows(testset.to_pandas(), docs)
+        rows = to_rows(testset.to_pandas(), docs, start=start)
     except (EmbeddingError, ValidationError, ValueError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
+    import pandas as pd
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    rows.to_csv(args.out, index=False, encoding="utf-8")
+    combined = pd.concat([pd.DataFrame(existing, columns=list(rows.columns)), rows]) if existing else rows
+    combined.to_csv(args.out, index=False, encoding="utf-8")
     by_kind = rows["synthesizer_name"].value_counts().to_dict() if len(rows) else {}
-    print(f"\n{len(rows)} пар → {args.out} ({', '.join(f'{k}: {v}' for k, v in by_kind.items())}); "
-          f"{(time.perf_counter() - started) / 60:.1f} мин. Дальше — ручная вычитка: tests/eval/golden_review.yaml "
+    by_category = Counter(source.split("/", 1)[0] for value in rows.get("reference_sources", [])
+                          for source in json.loads(value))
+    print(f"\n{len(rows)} пар → {args.out}" + (f" (всего {len(combined)})" if existing else "")
+          + f": {', '.join(f'{k}: {v}' for k, v in by_kind.items())}; категории: "
+          + ", ".join(f"{k} {v}" for k, v in sorted(by_category.items()))
+          + f"; {(time.perf_counter() - started) / 60:.1f} мин. Дальше — ручная вычитка: tests/eval/golden_review.yaml "
           "и python scripts/build_golden.py", file=sys.stderr)
     return 0
 

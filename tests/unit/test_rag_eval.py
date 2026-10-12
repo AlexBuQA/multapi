@@ -436,6 +436,51 @@ def test_generate_testset_abstract_adds_summaries_and_themes(tmp_path, small_cor
     assert titles == {"StringIO", "ThemesAndConcepts", "NEROutput"}
 
 
+def test_balanced_graph_round_robin_by_category_and_exclusion():
+    """Single-hop RAGAS берёт первые n узлов: на Windows 28 вопросов пришлись на account, api и billing —
+    первые файлы корпуса. balanced() ставит узлы по кругу по категориям и убирает уже взятые документы."""
+    from ragas.testset.graph import KnowledgeGraph, Node, NodeType, Relationship
+
+    script = load_script("generate_testset")
+    cats = ["account"] * 3 + ["api"] * 2 + ["team"]
+    nodes = [Node(type=NodeType.DOCUMENT, properties={"page_content": f"текст {i}",
+                                                      "document_metadata": {"source": f"{cat}/doc{i}.md"}})
+             for i, cat in enumerate(cats)]
+    graph = KnowledgeGraph(nodes=nodes, relationships=[
+        Relationship(source=nodes[0], target=nodes[3], type="entities_overlap", properties={}),
+        Relationship(source=nodes[1], target=nodes[5], type="entities_overlap", properties={})])
+    ordered = script.balanced(graph, seed=1)
+    assert [script.category_of(n) for n in ordered.nodes] == ["account", "api", "team", "account", "api", "account"]
+    assert {n.id for n in ordered.nodes} == {n.id for n in nodes} and len(ordered.relationships) == 2
+    assert [n.id for n in script.balanced(graph, seed=1).nodes] == [n.id for n in ordered.nodes]   # seed
+    without = script.balanced(graph, seed=1, exclude_sources={"account/doc0.md"})
+    assert len(without.nodes) == 5 and [r.target.id for r in without.relationships] == [nodes[5].id]
+
+
+def test_generate_testset_append_continues_ids_on_new_documents(tmp_path, small_corpus, monkeypatch, capsys):
+    script = generator_env(tmp_path, small_corpus, monkeypatch, make_generator_judge())
+    out = tmp_path / "raw.csv"
+    first = [{"id": f"raw_{n:03d}", "user_input": f"Вопрос {n}?", "reference": "Ответ.",
+              "reference_contexts": json.dumps(["Контекст."], ensure_ascii=False),
+              "reference_sources": json.dumps([source]), "synthesizer_name": "single_hop_specific_query_synthesizer"}
+             for n, source in ((1, "api/api-keys.md"), (2, "api/webhooks.md"))]
+    with out.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(first[0]))
+        writer.writeheader()
+        writer.writerows(first)
+
+    assert script.main(["--append", "--size", "3", "--single-hop-only", "--out", str(out),
+                        "--kg", str(tmp_path / "kg.json")]) == 0
+    with out.open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[:2] == first and [r["id"] for r in rows[2:]] == [f"raw_{n:03d}" for n in range(3, len(rows) + 1)]
+    new_sources = {s for r in rows[2:] for s in json.loads(r["reference_sources"])}
+    assert new_sources and not new_sources & {"api/api-keys.md", "api/webhooks.md"}
+    assert {r["synthesizer_name"] for r in rows[2:]} == {"single_hop_specific_query_synthesizer"}
+    err = capsys.readouterr().err
+    assert "в нём 2 пар по 2 файлам" in err and "осталось 4 документов" in err and f"(всего {len(rows)})" in err
+
+
 def test_testset_documents_and_transforms(small_corpus):
     script = load_script("generate_testset")
     docs = script.corpus_documents(small_corpus)
