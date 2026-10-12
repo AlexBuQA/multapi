@@ -23,12 +23,18 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# Блок 5.6: необязательные группы pyproject.toml, которые ставятся в образ. tracing —
+# LlamaIndexInstrumentor: спаны RAG (поиск, эмбеддинги, LLM) в Phoenix. Группа eval (RAGAS,
+# pandas, arize-phoenix) — офлайн-оценка, в образ не входит. Без трейсинга LlamaIndex:
+#   docker build --build-arg UV_EXTRAS= .
+ARG UV_EXTRAS="--extra tracing"
+
 # Зависимости — до кода: слой пересобирается, только если поменялись pyproject.toml
 # или uv.lock. Правка кода приложения этот шаг не трогает.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project ${UV_EXTRAS}
 
 # Код приложения — последним слоем. В образ попадает пакет app/ и руководство
 # пользователя: по нему /chat отвечает как ассистент техподдержки (блок 3.7).

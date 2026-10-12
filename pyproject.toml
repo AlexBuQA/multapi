@@ -53,6 +53,38 @@ dependencies = [
     "pymupdf==1.28.2",
 ]
 
+[project.optional-dependencies]
+# Блок 5.6: трейсинг LlamaIndex в Phoenix (app/observability/tracing.py) — retriever-, embedding- и
+# LLM-спаны RAG. Ставится по требованию: uv sync --extra tracing или pip install -r
+# requirements-tracing.txt. Без группы сервис работает: в Phoenix остаются спаны /chat (блок 3.6).
+# Образ compose собирается с этой группой (аргумент сборки UV_EXTRAS в Dockerfile).
+# Задание называет openinference-instrumentation-llama-index>=3,<4, но последняя 3.x (3.3.3) импортирует
+# llama_index.core.base.agent, которого в llama-index-core 0.14 нет: сервис падал при старте
+# (ModuleNotFoundError). Ветка 4.x поддерживает llama-index-core>=0.14.19.
+tracing = [
+    "openinference-instrumentation-llama-index>=4.5,<5",
+    "opentelemetry-sdk>=1.30,<2.0",
+    "opentelemetry-exporter-otlp>=1.30,<2.0",
+]
+# Блок 5.6: офлайн-оценка RAG (scripts/run_eval.py, generate_testset.py) — в проде не нужна,
+# в образ не входит. uv sync --extra eval или pip install -r requirements-eval.txt.
+# langchain-community<0.4: RAGAS 0.4 тянет его в ядре, а свежие 0.4.x ломают импорт
+# langchain_community.chat_models.vertexai — без пина import ragas падает.
+eval = [
+    "ragas>=0.4,<0.5",
+    "langchain-community<0.4",
+    "anthropic>=0.40",
+    "pandas>=2",
+    "arize-phoenix>=5",
+    # TestsetGenerator: связи графа знаний по общим сущностям (OverlapScoreBuilder) — без него
+    # generate_testset.py падает на ImportError, в зависимостях ragas пакета нет
+    "rapidfuzz>=3,<4",
+    # Локальный сервер Phoenix (phoenix serve) из arize-phoenix 20.3 с graphql-core 3.3 (сентябрь 2026) не
+    # открывает трейс с аннотацией: «Int cannot represent non-integer value: <int64 instance>» — счётчики
+    # аннотаций приходят из pandas как numpy.int64, а graphql-core 3.3 их больше не приводит к int.
+    "graphql-core>=3.2,<3.3",
+]
+
 [tool.uv]
 # Сервис — не устанавливаемый пакет: uv ставит только зависимости, код копируется в образ.
 package = false

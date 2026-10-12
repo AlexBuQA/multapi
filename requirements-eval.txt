@@ -1,0 +1,17 @@
+# Блок 5.6: офлайн-оценка RAG — RAGAS 0.4 (scripts/run_eval.py, generate_testset.py, app/eval/metrics.py)
+# и пост-фактум оценка галлюцинаций Phoenix (scripts/phoenix_hallucinations.py). В проде не нужны, в
+# Docker-образ не входят (группа eval в pyproject.toml). Ставятся в то же окружение, что проект:
+#
+#   pip install -r requirements.txt -r requirements-eval.txt -r requirements-tracing.txt
+#   python scripts/verify_eval.py          # проверка одной командой: версии и импорты (--live — и судья)
+#
+# Версии — проверенные, как в uv.lock: у RAGAS и Phoenix API меняется между выпусками.
+# langchain-community<0.4: RAGAS 0.4 тянет его в ядре, а в свежих 0.4.x ломается импорт
+# langchain_community.chat_models.vertexai — без пина import ragas падает.
+ragas==0.4.3
+langchain-community==0.3.31
+anthropic==1.13.0
+pandas==2.3.3
+arize-phoenix==20.3.0
+rapidfuzz==3.14.6               # граф знаний TestsetGenerator: связи по общим сущностям
+graphql-core==3.2.13            # локальный phoenix serve: с 3.3 трейс с аннотацией не открывается (pyproject.toml)

@@ -331,6 +331,69 @@ class TestTracingSetup(unittest.TestCase):
                 self.assertIsNone(setup_tracing())
         self.assertEqual(len(events(logs, "tracing_disabled")), 1)
 
+    def _setup_with(self, instrumentor, **kwargs):
+        provider = SimpleNamespace(name="provider")
+        with mock.patch("app.observability.tracing.register", return_value=provider), \
+                mock.patch("app.observability.tracing.OpenAIInstrumentor") as openai_cls, \
+                mock.patch("app.observability.tracing.llama_index_instrumentor", return_value=instrumentor), \
+                captured_logs("INFO") as logs:
+            openai_cls.return_value.is_instrumented_by_opentelemetry = False
+            result = setup_tracing("multapi-test", "http://phoenix:6006", **kwargs)
+        return provider, result, logs
+
+    def test_llama_index_instrumented_on_same_provider(self):
+        """Блок 5.6: LlamaIndexInstrumentor — на тот же TracerProvider, что OpenAI SDK, один раз."""
+        llama = mock.Mock(is_instrumented_by_opentelemetry=False)
+        provider, result, logs = self._setup_with(llama)
+        self.assertIs(result, provider)
+        llama.instrument.assert_called_once_with(tracer_provider=provider)
+        self.assertTrue(events(logs, "tracing_enabled")[0]["llama_index"])
+
+        again = mock.Mock(is_instrumented_by_opentelemetry=True)     # второй lifespan в том же процессе
+        self._setup_with(again)
+        again.instrument.assert_not_called()
+
+    def test_llama_index_flag_off_and_package_missing(self):
+        llama = mock.Mock(is_instrumented_by_opentelemetry=False)
+        with mock.patch("app.observability.tracing.llama_index_instrumentor", return_value=llama) as factory:
+            _, _, logs = self._setup_with(None, llama_index=False)
+        factory.assert_not_called()
+        self.assertFalse(events(logs, "tracing_enabled")[0]["llama_index"])
+        self.assertEqual(events(logs, "tracing_llama_index_unavailable"), [])
+
+        _, result, logs = self._setup_with(None)                     # пакета нет — трейсинг всё равно есть
+        self.assertIsNotNone(result)
+        self.assertEqual(len(events(logs, "tracing_llama_index_unavailable")), 1)
+
+    def test_llama_index_instrumentor_from_package(self):
+        from app.observability.tracing import llama_index_instrumentor
+
+        try:
+            from openinference.instrumentation.llama_index import LlamaIndexInstrumentor
+        except ImportError:
+            self.assertIsNone(llama_index_instrumentor())
+        else:
+            self.assertIsInstance(llama_index_instrumentor(), LlamaIndexInstrumentor)
+
+    def test_lifespan_passes_llama_index_flag(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from fastapi.testclient import TestClient
+        calls = []
+
+        def fake_setup(*args, **kwargs):
+            calls.append(kwargs)
+
+        with mock.patch.dict(os.environ, {"PHOENIX_LLAMA_INDEX": "false"}):
+            get_settings.cache_clear()
+            try:
+                with mock.patch("app.main.setup_tracing", fake_setup), TestClient(app):
+                    pass
+            finally:
+                get_settings.cache_clear()
+        self.assertEqual(calls, [{"llama_index": False}])
+
     def test_lifespan_sets_up_tracing_before_openai_client(self):
         import warnings
         with warnings.catch_warnings():

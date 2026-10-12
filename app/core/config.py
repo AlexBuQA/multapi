@@ -396,6 +396,45 @@ class RerankSettings(BaseModel):
         return self
 
 
+class RagasSettings(BaseModel):
+    """Офлайн-оценка RAG (блок 5.6): app/eval/metrics.py, scripts/run_eval.py и generate_testset.py.
+    Переменные — с префиксом RAGAS__. В проде не используется.
+
+    Судья — не модель ответа сервиса: production-LLM (LLM__DEFAULT_MODEL, llama3.2) отвечает
+    пользователю, judge-LLM ставит оценки. Судья — OpenAI-совместимый провайдер (llm_factory RAGAS,
+    provider openai, JSON-ответ по схеме). По умолчанию — qwen3:4b-instruct в той же Ollama, что модель
+    ответа (LLM__BASE_URL): им оценивали прогоны блока 3.7, лимитов нет, но на CPU это часы на прогон.
+    Судья блока 3.7 на OpenRouter (nvidia/nemotron-3-super-120b-a12b:free) быстрее и сильнее, но прогон
+    RAGAS — сотни запросов, а у бесплатных моделей 50 в день на ключ: RAGAS__JUDGE_BASE_URL=
+    https://openrouter.ai/api/v1, ключ — RAGAS__JUDGE_API_KEY, прокси — LLM__PROXY_URL,
+    RAGAS__JUDGE_MAX_TOKENS=4000 (nemotron рассуждает скрыто). Смена судьи обнуляет сравнение с
+    прошлыми прогонами: baseline пересчитывается тем же судьёй.
+    """
+
+    judge_model: str = "qwen3:4b-instruct"
+    judge_base_url: str | None = None            # пусто — LLM__BASE_URL
+    judge_api_key: SecretStr | None = None       # пусто — LLM__OPENAI_API_KEY; ключ OpenRouter — только в .env
+    judge_max_tokens: int = Field(default=2048, ge=256, le=32000)
+    judge_timeout: float = Field(default=600.0, gt=0, le=3600)     # с на запрос: Ollama на CPU, очередь
+    # Эмбеддинги судьи для AnswerRelevancy (близость вопроса и вопросов, восстановленных по ответу).
+    # Пусто — модель и адрес эмбеддингов сервиса (EMBEDDINGS__MODEL, bge-m3 в Ollama).
+    embeddings_model: str | None = None
+    embeddings_base_url: str | None = None
+    # Сколько строк golden dataset судья оценивает одновременно: Ollama на CPU всё равно ставит
+    # запросы в очередь, а таймауты растут с длиной очереди.
+    concurrency: int = Field(default=2, ge=1, le=32)
+    golden_path: Path = ROOT / "tests" / "eval" / "golden_dataset.json"
+    results_dir: Path = ROOT / "tests" / "eval" / "results"
+    # Кеш ответов судьи (DiskCacheBackend RAGAS): повтор прогона после сбоя не платит за готовое.
+    cache_enabled: bool = True
+    cache_dir: Path = ROOT / "var" / "ragas_cache"
+
+    @field_validator("golden_path", "results_dir", "cache_dir")
+    @classmethod
+    def _from_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else ROOT / value
+
+
 # Postgres из compose.yaml, опубликованный на 127.0.0.1:5433 (а не localhost: на Windows
 # localhost сначала пробует IPv6 ::1, и каждое новое соединение ждёт отказа по нему).
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://multapi:multapi@127.0.0.1:5433/multapi"
@@ -454,6 +493,9 @@ class Settings(BaseSettings):
     # http://phoenix:6006, для локального uvicorn с Phoenix из compose: http://127.0.0.1:6006.
     phoenix_collector_endpoint: str | None = None
     phoenix_project_name: str = "diploma-fastapi"
+    # Блок 5.6: спаны LlamaIndex (retriever со scores фрагментов, эмбеддинги, LLM) в том же трейсе.
+    # Нужен пакет openinference-instrumentation-llama-index (requirements-tracing.txt, в образе есть).
+    phoenix_llama_index: bool = True
     # Опционально: имена и адреса в prompt_preview маскирует Presidio (поверх regex).
     # Нужны пакеты presidio-* и модель ru_core_news_md — см. app/observability/pii_presidio.py.
     pii_presidio: bool = False
@@ -539,6 +581,8 @@ class Settings(BaseSettings):
     rag: RagSettings = Field(default_factory=RagSettings)
     # Блок 5.4: re-ranker кандидатов поиска (RERANK__*).
     rerank: RerankSettings = Field(default_factory=RerankSettings)
+    # Блок 5.6: оценка RAG — судья RAGAS, golden dataset, результаты (RAGAS__*).
+    ragas: RagasSettings = Field(default_factory=RagasSettings)
 
     @field_validator("log_level")
     @classmethod

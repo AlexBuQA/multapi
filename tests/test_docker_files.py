@@ -68,6 +68,13 @@ class TestDockerfile(unittest.TestCase):
         # Зависимости ставятся до копирования кода — иначе кеш слоёв не работает.
         self.assertLess(self.text.index("uv sync --frozen"), self.text.index("COPY app/"))
 
+    def test_image_has_tracing_but_not_eval(self):
+        """Блок 5.6: LlamaIndexInstrumentor нужен сервису в контейнере (группа tracing), а RAGAS, pandas и
+        arize-phoenix — только офлайн-оценке на машине разработчика (группа eval) и в образ не идут."""
+        self.assertIn('ARG UV_EXTRAS="--extra tracing"', self.text)
+        self.assertRegex(self.text, r"uv sync --frozen --no-dev --no-install-project \$\{UV_EXTRAS\}")
+        self.assertNotIn("--extra eval", self.text)
+
     def test_runtime_is_non_root(self):
         runtime = self.text.split("AS runtime", 1)[1]
         self.assertIn("RUN useradd --create-home --uid 1000 appuser", runtime)
@@ -396,7 +403,12 @@ class TestSecrets(unittest.TestCase):
                      # блок 5.5
                      "RAG__SCORE_THRESHOLD", "RAG__LAB_DIR", "RAG__LAB_COLLECTION", "RAG__DOCSTORE_DIR",
                      "RAG__INGEST_ON_START", "RAG__UPLOAD_DIR", "RAG__UPLOAD_MAX_MB", "RAG__CHAT", "RAG__CONDENSE",
-                     "BOT_EDIT_INTERVAL"):
+                     "BOT_EDIT_INTERVAL",
+                     # блок 5.6
+                     "PHOENIX_LLAMA_INDEX", "RAGAS__JUDGE_MODEL", "RAGAS__JUDGE_BASE_URL", "RAGAS__JUDGE_API_KEY",
+                     "RAGAS__JUDGE_MAX_TOKENS", "RAGAS__JUDGE_TIMEOUT", "RAGAS__EMBEDDINGS_MODEL",
+                     "RAGAS__EMBEDDINGS_BASE_URL", "RAGAS__CONCURRENCY", "RAGAS__GOLDEN_PATH", "RAGAS__RESULTS_DIR",
+                     "RAGAS__CACHE_ENABLED", "RAGAS__CACHE_DIR"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):
@@ -407,7 +419,7 @@ class TestSecrets(unittest.TestCase):
         for line in example.splitlines():
             if re.match(r"\s*(EVAL_JUDGE_API_KEY|LLM__OPENAI_API_KEY|BOT_TOKEN|BOT_PROXY_URL|INTERNAL_TOKEN|"
                         r"AUDIO_API_KEY|ADMIN_TOKEN|MODERATION__OPENAI_API_KEY|EMBEDDINGS__API_KEY|QDRANT_API_KEY|"
-                        r"RERANK__API_KEY)\s*=", line):
+                        r"RERANK__API_KEY|RAGAS__JUDGE_API_KEY)\s*=", line):
                 self.assertRegex(line, r'=\s*(""\s*)?(#|$)', line)        # значение пустое
 
     def test_empty_values_survive_docker_compose(self):

@@ -39,11 +39,13 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
+from llama_index.core.instrumentation import get_dispatcher
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.schema import Document, NodeWithScore, QueryBundle
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -80,6 +82,9 @@ if TYPE_CHECKING:
     from app.core.config import Settings
 
 log = get_logger()
+# Спаны LlamaIndex (блок 5.6): с LlamaIndexInstrumentor поиск и ответ видны в Phoenix одним деревом
+# под RAGService.answer. Без инструментации декоратор ничего не пишет.
+dispatcher = get_dispatcher(__name__)
 
 # Что считать «кодом конвейера» при сравнении с bare-metal (scripts/rag_compare.py, docs/rag.md):
 # индексация и запрос в этом модуле. С блока 5.5 индексация — в ingestion.py (IngestionService), здесь —
@@ -283,6 +288,7 @@ class RAGService:
                         configured=self.chunking_label, fix="python scripts/ingest.py data/")
 
     # -------------------------------------------------------- поиск и ответ
+    @dispatcher.span
     def retrieve(self, question: str) -> Retrieval:
         """Кандидаты из Qdrant (RAG__CANDIDATES_TOP_K) → score-guard → re-ranker → первые
         RAG__SIMILARITY_TOP_K. Не прошли порог — nodes пустой, re-ranker не вызывается."""
@@ -306,10 +312,28 @@ class RAGService:
             nodes = candidates[:top_n]
         return Retrieval(question, nodes, top_score, len(candidates), threshold)
 
+    @dispatcher.span
     def answer(self, question: str) -> dict[str, Any]:
         """Ответ с цитатами. Score-guard — без вызова модели; модель отказалась по промпту — тоже
         confident=false и без источников."""
+        return self._respond(self.retrieve(question))
+
+    @dispatcher.span
+    def evaluate_inputs(self, question: str) -> dict[str, Any]:
+        """Для оценки RAGAS (блок 5.6, scripts/run_eval.py): тот же путь, что /rag/query, за один поиск,
+        но вместе с ответом — полный текст фрагментов, которые видела модель (retrieved_contexts), а не
+        усечённые snippet. Score-guard отказал — фрагментов нет: модель их не получала."""
+        started = time.perf_counter()
         found = self.retrieve(question)
+        result = self._respond(found)
+        contexts = [node.node.get_content() for node in found.nodes] if found.confident else []
+        return {"answer": result["answer"], "retrieved_contexts": contexts, "sources": result["sources"],
+                "top_score": result["top_score"], "confident": result["confident"],
+                "retrieved_files": [node.metadata.get("source") or node.metadata.get("file_name")
+                                    for node in found.nodes] if found.confident else [],
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+
+    def _respond(self, found: Retrieval) -> dict[str, Any]:
         if not found.confident:
             found.log_guard(where="rag_query")
             return refusal(found.top_score)
