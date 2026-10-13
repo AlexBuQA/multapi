@@ -1,0 +1,82 @@
+{
+  "label": "baseline",
+  "timestamp": "2026-10-12_2147",
+  "config": {
+    "collection": "kb_docs_recursive_512_64",
+    "chunking": "recursive",
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "candidates_top_k": 10,
+    "similarity_top_k": 5,
+    "score_threshold": 0.5,
+    "rerank": {
+      "enabled": false,
+      "provider": null,
+      "model": null
+    },
+    "llm_model": "llama3.2",
+    "temperature": 0.1,
+    "embeddings_model": "bge-m3",
+    "embedding_dim": 1024
+  },
+  "judge": {
+    "judge_model": "qwen3:4b-instruct",
+    "judge_host": "localhost",
+    "judge_max_tokens": 2048,
+    "judge_embeddings": "bge-m3",
+    "citation_prompt": "7a92f43abaec"
+  },
+  "golden": {
+    "path": "golden_dataset.json",
+    "items": 45,
+    "sha256": "c9d036d5eb0cf867"
+  },
+  "rows": 45,
+  "metrics": {
+    "faithfulness": {
+      "mean": 0.9023,
+      "n": 43,
+      "nan": 2
+    },
+    "answer_relevancy": {
+      "mean": 0.7915,
+      "n": 45,
+      "nan": 0
+    },
+    "context_precision": {
+      "mean": 0.9091,
+      "n": 45,
+      "nan": 0
+    },
+    "context_recall": {
+      "mean": 1.0,
+      "n": 44,
+      "nan": 1
+    },
+    "has_citation": {
+      "mean": 0.9111,
+      "n": 45,
+      "nan": 0
+    }
+  },
+  "latency_ms": {
+    "mean": 27469,
+    "p50": 27005,
+    "p95": 33701
+  },
+  "refusals": {
+    "score_guard": 0,
+    "model": 0
+  },
+  "rag_errors": 0,
+  "rows_with_errors": 3,
+  "seconds": {
+    "answers": 1239,
+    "judge": 25945
+  },
+  "versions": {
+    "ragas": "0.4.3",
+    "llama-index-core": "0.14.25",
+    "openai": "2.54.0"
+  }
+}
