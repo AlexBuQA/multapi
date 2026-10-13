@@ -317,6 +317,9 @@ class RagSettings(BaseModel):
     llm_model: str | None = None                       # пусто — LLM__DEFAULT_MODEL
     max_tokens: int = Field(default=512, ge=16, le=4096)    # предел длины ответа
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)   # низкая: ответ по контексту, без фантазий
+    # Блок 5.6: модель не поставила ни одной ссылки [N] — /rag/query дописывает «Источники: [N]» по фрагменту
+    # с наибольшим совпадением слов (rag_common.add_sources_line). Замер — docs/rag_evaluation.md, раздел 6.
+    sources_fallback: bool = True
     # Блок 5.4: стратегия нарезки (app/services/chunking.py) и кандидаты для re-ranker. Итог замеров
     # на golden dataset (docs/chunking_experiment.md, «Итог»): recursive, chunk_size 512, overlap 64,
     # 10 кандидатов, re-ranker выключен. Блок 5.5: метка нарезки — в hash документа, после её смены

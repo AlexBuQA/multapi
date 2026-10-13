@@ -141,6 +141,48 @@ def is_no_answer(answer: str) -> bool:
     return norm(NO_ANSWER.split(",")[0]) in norm(answer)
 
 
+# ---------------------------------------------------------------- строка источников, если модель её забыла
+# Блок 5.6: llama3.2 пропускает строку «Источники: [N]» в 4 ответах из 45 (baseline, has_citation 0.911 при
+# пороге 0.95), хотя напоминание о ней стоит прямо перед ответом. Тогда её дописывает сервис: номер —
+# фрагмент, где больше всего слов ответа. Это не проверка точности ссылки — только «ссылка есть»;
+# ответ-отказ и ответ, слова которого во фрагментах почти не встречаются, не трогаются.
+MIN_OVERLAP = 0.3
+_LETTERS = re.compile(r"[^\W\d_]{4,}")
+_DIGITS = re.compile(r"\d+")
+_EMPTY_SOURCES = re.compile(r"\s*Источники:\s*\.?\s*$")
+
+
+def _terms(text: str) -> set[str]:
+    """Слова от 4 букв, обрезанные до 5 (грубая основа: «тарифа», «тарифу» → «тариф»), и числа."""
+    low = text.lower().replace("ё", "е")
+    return {word[:5] for word in _LETTERS.findall(low)} | set(_DIGITS.findall(low))
+
+
+def attribute(answer: str, texts: Sequence[str]) -> int | None:
+    """Номер фрагмента (с 1) с наибольшей долей слов ответа; доля меньше MIN_OVERLAP — None: ответ
+    не из фрагментов, и ссылка была бы выдумкой. При равенстве — фрагмент выше."""
+    terms = _terms(strip_citations(answer))
+    if not terms:
+        return None
+    best, number = 0.0, None
+    for index, text in enumerate(texts, start=1):
+        share = len(terms & _terms(text)) / len(terms)
+        if share > best:
+            best, number = share, index
+    return number if best >= MIN_OVERLAP else None
+
+
+def add_sources_line(answer: str, texts: Sequence[str]) -> tuple[str, int | None]:
+    """Ответ без единой ссылки [N] → тот же ответ и строка «Источники: [N]» по attribute(); вторым
+    значением — дописанный номер. Ссылки уже есть, отказ или источник не определить — ответ как есть."""
+    if not texts or not answer.strip() or is_no_answer(answer) or cited_numbers(answer, len(texts)):
+        return answer, None
+    number = attribute(answer, texts)
+    if number is None:
+        return answer, None
+    return f"{_EMPTY_SOURCES.sub('', answer.rstrip())}\n\nИсточники: [{number}]", number
+
+
 def final_answer(answer: str, top_score: float, sources: list[dict[str, Any]]) -> dict[str, Any]:
     """Ответ модели → словарь контракта. Модель сама отказалась по промпту — confident=false и
     без источников, как у score-guard; иначе источники с пометкой cited."""

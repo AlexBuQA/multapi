@@ -406,6 +406,19 @@ def test_eval_report_ab_table(tmp_path, capsys):
 
 
 
+def test_eval_report_sources_fallback_missing_in_old_runs_means_off(tmp_path, capsys):
+    """В JSON прогонов до блока 5.6 ключа sources_fallback нет — тогда строку источников не дописывали."""
+    script = load_script("eval_report")
+    results = tmp_path / "results"
+    write_run(results, "2026-10-12_2147", "baseline", {"has_citation": 0.911})
+    write_run(results, "2026-10-14_0100", "final", {"has_citation": 1.0}, sources_fallback=True)
+    write_run(results, "2026-10-14_0900", "same", {"has_citation": 0.9}, sources_fallback=False)
+    assert script.main(["--results", str(results), "--labels", "baseline", "final", "same"]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("| ")]
+    assert lines[2].startswith("| final | sources_fallback False→True |")
+    assert lines[3].startswith("| same | — |")
+
+
 def test_eval_report_flags_other_citation_prompt(tmp_path, capsys):
     """has_citation с другим промптом — другая шкала: сдвиг есть, но строка помечена."""
     script = load_script("eval_report")
@@ -444,6 +457,53 @@ def test_eval_report_worst_and_diagnosis(tmp_path, capsys):
     assert "диагноз (2×2): retriever" in out.split("**2. q2**")[0]
     assert "диагноз (2×2): generation" in out.split("**2. q2**")[1].split("**3. q3**")[0]
     assert "(эталон — `billing/refunds_v2.docx`)" in out and "«Про тарифы.…»" in out
+
+
+def test_eval_report_judge_free_checks(tmp_path, capsys):
+    """hit@5, MRR@5, маркеры [N] и куда они указывают — по CSV рядом с JSON прогона, без судьи."""
+    script = load_script("eval_report")
+    results = tmp_path / "results"
+    write_run(results, "2026-10-13_0900", "baseline", {"has_citation": 0.75})
+    write_run(results, "2026-10-13_1100", "rerank", {"has_citation": 1.0})       # без CSV — прочерки
+    files = ["a.md", "ref.md", "b.md"]
+    rows = [  # (ответ, вердикт судьи, файлы-источники эталона)
+        ("Ответ [2].", "1.0", ["ref.md"]),          # ссылка на эталон, эталон на 2-м месте
+        ("Ответ.\nИсточники: [1], [3]", "1.0", ["ref.md"]),   # ссылки мимо эталона
+        ("Ответ без ссылок.", "1.0", ["ref.md"]),    # судья сказал yes, маркеров нет — расхождение
+        ("Ответ [1].", "", ["zzz.md"]),              # эталона среди фрагментов нет; судья упал — NaN
+    ]
+    with (results / "2026-10-13_0900_baseline.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["id", "response", "has_citation", "retrieved_files", "reference_sources"])
+        writer.writeheader()
+        for number, (response, cited, expected) in enumerate(rows, start=1):
+            writer.writerow({"id": f"q{number}", "response": response, "has_citation": cited,
+                             "retrieved_files": json.dumps(files), "reference_sources": json.dumps(expected)})
+    assert script.main(["--results", str(results), "--labels", "baseline", "rerank"]) == 0
+    out = capsys.readouterr().out
+    assert "| baseline | 3/4 (0.750) | 0.375 | 3.0 | 3/4 | 2/3 | 1/3 (0.333) |" in out    # MRR: (1/2 + 1/2 + 1/2) / 4
+    assert "| rerank | — | — | — | — | — | — |" in out
+
+    assert script.main(["--worst", str(results / "2026-10-13_0900_baseline.csv"), "-n", "4"]) == 0
+
+
+def test_eval_report_worst_shows_where_citations_point(tmp_path, capsys):
+    script = load_script("eval_report")
+    path = tmp_path / "run.csv"
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["id", "user_input", "response", "faithfulness", "context_recall",
+                                                "retrieved_files", "reference_sources", "retrieved_contexts"])
+        writer.writeheader()
+        writer.writerow({"id": "q1", "user_input": "Вопрос?", "response": "Ответ.\nИсточники: [2][7]",
+                         "faithfulness": "0.0", "context_recall": "1.0",
+                         "retrieved_files": json.dumps(["ref.md", "faq.md"]), "reference_sources": json.dumps(["ref.md"]),
+                         "retrieved_contexts": json.dumps(["Фрагмент."], ensure_ascii=False)})
+    assert script.main(["--worst", str(path)]) == 0
+    assert "- ссылки ответа: [2] `faq.md`, [7] —; фрагмент эталона — [1]" in capsys.readouterr().out
+    # фрагмента эталона в пятёрке нет, а context_recall высокий (щедрый судья) — всё равно retriever
+    rows = script.read_rows(path)
+    rows[0]["retrieved_files"] = json.dumps(["login.md", "faq.md"])
+    assert script.diagnosis(rows[0]).startswith("retriever: фрагмента файла-источника эталона нет среди пяти "
+                                                "(context_recall=1.00")
 
 
 def test_eval_report_thresholds(tmp_path, capsys):

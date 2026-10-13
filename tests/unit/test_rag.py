@@ -168,7 +168,9 @@ def test_llamaindex_builds_and_answers_with_numbered_sources():
     assert_contract(answer)
     assert answer["answer"].startswith("Лимит зависит от тарифа")
     assert answer["sources"][0]["file_name"] == "04_api.md"
-    assert not any(item["cited"] for item in answer["sources"])      # заглушка модели номеров не ставит
+    # заглушка модели номеров не ставит — строку «Источники» дописал сервис (блок 5.6, sources_fallback)
+    assert answer["answer"].endswith("\n\nИсточники: [1]")
+    assert [item["cited"] for item in answer["sources"]] == [True, False, False, False, False]
     prompt = service.llm.prompts[-1]
     assert system_prompt("Личный кабинет") in prompt         # русский промпт, а не английский по умолчанию
     assert "[1] (04_api.md)" in prompt and QUESTION in prompt   # нумерованный контекст для цитат
@@ -226,6 +228,41 @@ def test_service_prompt_is_the_measured_sources_variant():
     service = chat_messages("Личный кабинет", "Каков срок?", context)
     assert [(m.role, m.content) for m in service] == [(m.role, m.content) for m in measured]
     assert SOURCES_RULE in service[0].content and service[1].content.endswith(f"Ответ ({ANSWER_FORMAT}):")
+
+
+# ---------------------------------------------------------------- строка источников, если модель её забыла
+TEXTS = ["Смена номера телефона. Новый номер укажите в «Настройках профиля» и подтвердите кодом из СМС.",
+         "Не приходит SMS: проверьте номер в профиле и подождите 2 минуты, код можно запросить повторно.",
+         "Лимит запросов к API зависит от тарифа: «Старт» — 60, «Команда» — 300 в минуту."]
+
+
+@pytest.mark.parametrize(("reply", "expected", "added"), [
+    # ответ llama3.2 без строки «Источники» (baseline блока 5.6, raw_005) — номер по совпадению слов
+    ("Если SMS не приходит, проверьте номер в профиле и подождите 2 минуты.",
+     "Если SMS не приходит, проверьте номер в профиле и подождите 2 минуты.\n\nИсточники: [2]", 2),
+    ("Лимит зависит от тарифа: «Команда» — 300 запросов в минуту.\nИсточники:",          # пустая строка источников
+     "Лимит зависит от тарифа: «Команда» — 300 запросов в минуту.\n\nИсточники: [3]", 3),
+    ("Лимит — 300 запросов [3].", "Лимит — 300 запросов [3].", None),                     # ссылка уже есть
+    ("По базе не нашёл, могу эскалировать.", "По базе не нашёл, могу эскалировать.", None),   # отказ
+    ("Фикус поливают зимой раз в неделю.", "Фикус поливают зимой раз в неделю.", None),   # ответ не из фрагментов
+])
+def test_add_sources_line(reply, expected, added):
+    from app.services.rag_common import add_sources_line
+
+    assert add_sources_line(reply, TEXTS) == (expected, added)
+    assert add_sources_line(reply, []) == (reply, None)
+
+
+def test_llamaindex_sources_fallback_can_be_switched_off():
+    from log_capture import captured_logs, events
+
+    on = llama_rag(QdrantClient(":memory:")).build()
+    with captured_logs("INFO") as records:
+        answer = threaded(on.answer, QUESTION)
+    assert answer["answer"].endswith("Источники: [1]") and events(records, "rag_sources_added")[0]["source"] == 1
+    off = llama_rag(QdrantClient(":memory:"), sources_fallback=False).build()
+    answer = threaded(off.answer, QUESTION)
+    assert "Источники" not in answer["answer"] and not any(item["cited"] for item in answer["sources"])
 
 
 def test_llamaindex_reconnects_without_reindexing():

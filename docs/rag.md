@@ -213,6 +213,7 @@ python scripts/ingest.py data/uploads/x.pdf # один файл
 | `RAG__SCORE_THRESHOLD` | 0.5 | score-guard; прежнее имя `RAG__MIN_SCORE` тоже принимается |
 | `RAG__CHAT` / `RAG__CONDENSE` | `true` / `true` | чаты по базе знаний / переписывать follow-up для поиска |
 | `RAG__LLM_MODEL`, `RAG__MAX_TOKENS`, `RAG__TEMPERATURE` | `LLM__DEFAULT_MODEL`, 512, 0.1 | модель ответа `/rag/query` и температура ответов по базе (и в чате) |
+| `RAG__SOURCES_FALLBACK` | `true` | модель не поставила ни одной ссылки [N] — `/rag/query` дописывает «Источники: [N]» по фрагменту с наибольшим совпадением слов (блок 5.6, `docs/rag_evaluation.md`) |
 | `RERANK__*` | выключен | re-ranker блока 5.4 |
 | `BOT_STREAMING` / `BOT_EDIT_INTERVAL` (у бота) | `edit` / 0.7 | правки сообщения и debounce по чату |
 

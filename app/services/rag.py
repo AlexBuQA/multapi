@@ -62,6 +62,7 @@ from app.services.rag_common import (
     RAGLLMError,
     RAGNotIndexed,
     RAGUnavailable,
+    add_sources_line,
     final_answer,
     llm_error,
     numbered_context,
@@ -344,7 +345,12 @@ class RAGService:
             if explained is exc:
                 raise
             raise explained from exc
-        result = final_answer(response.message.content or "", found.top_score, found.sources())
+        text = response.message.content or ""
+        if self.settings.sources_fallback:          # модель не написала «Источники: [N]» — дописать (блок 5.6)
+            text, added = add_sources_line(text, [node.node.get_content() for node in found.nodes])
+            if added:
+                log.info("rag_sources_added", source=added, where="rag_query")
+        result = final_answer(text, found.top_score, found.sources())
         if not result["confident"]:
             log.info("rag_refused", reason="model", top_score=round(found.top_score, 3), where="rag_query")
         return result

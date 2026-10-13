@@ -265,6 +265,7 @@ def test_run_eval_writes_csv_and_json(eval_env, capsys):
     assert summary["label"] == "unit" and summary["rows"] == 3
     assert summary["config"]["collection"] == "kb_docs_recursive_512_64" and summary["config"]["chunk_size"] == 512
     assert summary["judge"]["citation_prompt"] == m.citation_prompt_id()
+    assert summary["config"]["sources_fallback"] is True
     assert summary["judge"]["judge_model"] == "qwen3:4b-instruct" and summary["golden"]["items"] == 3
     assert summary["metrics"]["has_citation"] == {"mean": 0.5, "n": 2, "nan": 1}
     assert summary["metrics"]["faithfulness"] == {"mean": 1.0, "n": 1, "nan": 2}
@@ -287,6 +288,7 @@ def test_run_eval_answers_only_then_resume_with_journal_config(eval_env):
     assert script.main(["--resume", str(partial)]) == 0
     resumed = FakeEvalRag.instances[1]
     assert resumed.questions == [] and resumed.collection == "kb_docs_recursive_128_64"
+    assert resumed.cfg.rag.sources_fallback is True                   # из журнала, как при запуске
     assert resumed.cfg.rag.chunk_size == 128 and len(eval_env.judges) == 1
     (csv_path,) = eval_env.results.glob("*_chunk_128.csv")
     assert csv_path.name.removesuffix(".csv") == partial.name.removesuffix(".partial.jsonl")
@@ -306,6 +308,21 @@ def test_run_eval_resume_skips_scored_rows(eval_env):
     assert not any(QUESTION in prompt for _, prompt in eval_env.judges[0].calls)
 
 
+def test_resume_of_journal_without_sources_fallback_keeps_it_off(eval_env):
+    """Журнал прогона, начатого до RAG__SOURCES_FALLBACK (baseline, A, B блока 5.6), — без строки
+    источников: недостающие ответы досчитываются так же, как первые."""
+    script = eval_env.script
+    assert script.main(["--label", "old", "--answers-only"]) == 0
+    (partial,) = eval_env.results.glob("*_old.partial.jsonl")
+    lines = partial.read_text(encoding="utf-8").splitlines()
+    meta = json.loads(lines[0])
+    del meta["config"]["sources_fallback"]
+    partial.write_text("\n".join([json.dumps(meta, ensure_ascii=False), *lines[1:2]]) + "\n", encoding="utf-8")
+    assert script.main(["--resume", str(partial)]) == 0
+    resumed = FakeEvalRag.instances[-1]
+    assert resumed.cfg.rag.sources_fallback is False and len(resumed.questions) == 2    # g01 — из журнала
+
+
 def test_configure_names_collection_by_chunking(eval_env):
     script = eval_env.script
     base = eval_env.cfg
@@ -318,6 +335,9 @@ def test_configure_names_collection_by_chunking(eval_env):
     assert collection == "kb_docs_fixed_512_32"
     rerank, _ = script.configure(base, script.parse_args(["--rerank", "on"]))
     assert rerank.rerank.enabled is True and base.rerank.enabled is False
+    plain, collection = script.configure(base, script.parse_args(["--sources-fallback", "off"]))
+    assert plain.rag.sources_fallback is False and base.rag.sources_fallback is True
+    assert collection == "kb_docs_recursive_512_64"          # нарезка та же — коллекция та же
     with pytest.raises(ValueError):
         script.configure(base, script.parse_args(["--chunk-size", "64", "--chunk-overlap", "64"]))
 

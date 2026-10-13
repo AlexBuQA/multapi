@@ -83,7 +83,8 @@ def configure(cfg: Any, args: argparse.Namespace) -> tuple[Any, str]:
     rag_update = {key: value for key, value in {
         "chunking": args.chunking, "chunk_size": args.chunk_size, "chunk_overlap": args.chunk_overlap,
         "similarity_top_k": args.top_k, "candidates_top_k": args.candidates, "score_threshold": args.threshold,
-        "llm_model": args.llm_model}.items() if value is not None}
+        "llm_model": args.llm_model,
+        "sources_fallback": {"on": True, "off": False}.get(args.sources_fallback)}.items() if value is not None}
     rag = RagSettings(**{**cfg.rag.model_dump(), **rag_update})
     rerank = RerankSettings(**{**cfg.rerank.model_dump(), **({"enabled": args.rerank == "on"} if args.rerank else {})})
     updated = cfg.model_copy(update={"rag": rag, "rerank": rerank})
@@ -99,6 +100,7 @@ def describe(cfg: Any, collection: str) -> dict[str, Any]:
             "rerank": {"enabled": cfg.rerank.enabled, "provider": cfg.rerank.provider if cfg.rerank.enabled else None,
                        "model": cfg.rerank.model if cfg.rerank.enabled else None},
             "llm_model": rag.llm_model or cfg.llm.default_model, "temperature": rag.temperature,
+            "sources_fallback": rag.sources_fallback,
             "embeddings_model": cfg.embeddings.model, "embedding_dim": cfg.embedding_dim}
 
 
@@ -274,6 +276,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     group.add_argument("--rerank", choices=["on", "off"], help="re-ranker блока 5.4 (RERANK__*)")
     group.add_argument("--threshold", type=float, help="порог score-guard (RAG__SCORE_THRESHOLD)")
     group.add_argument("--llm-model", help="модель ответа (RAG__LLM_MODEL)")
+    group.add_argument("--sources-fallback", choices=["on", "off"],
+                       help="дописывать «Источники: [N]», если модель её не написала (RAG__SOURCES_FALLBACK)")
     group.add_argument("--collection", help="коллекция Qdrant (по умолчанию — kb_docs_<нарезка>_<размер>_<перекрытие>)")
     args = parser.parse_args(argv)
     if not LABEL.match(args.label):
@@ -314,11 +318,14 @@ async def run(args: argparse.Namespace) -> int:
         print(f"Продолжаю {meta['label']} от {meta['timestamp']}: ответов {len(journal.answers)}, "
               f"оценок {len(journal.scores)} из {len(rows)}; конфигурация — из журнала", file=sys.stderr)
         replay = argparse.Namespace(**{k: None for k in ("chunking", "chunk_size", "chunk_overlap", "top_k",
-                                                         "candidates", "threshold", "llm_model", "rerank")})
+                                                         "candidates", "threshold", "llm_model", "rerank",
+                                                         "sources_fallback")})
         c = meta["config"]
         replay.chunking, replay.chunk_size, replay.chunk_overlap = c["chunking"], c["chunk_size"], c["chunk_overlap"]
         replay.top_k, replay.candidates, replay.threshold = c["similarity_top_k"], c["candidates_top_k"], c["score_threshold"]
         replay.llm_model, replay.rerank, replay.collection = c["llm_model"], "on" if c["rerank"]["enabled"] else "off", c["collection"]
+        # журнал до RAG__SOURCES_FALLBACK (блок 5.6) — строку источников тогда не дописывали
+        replay.sources_fallback = "on" if c.get("sources_fallback", False) else "off"
         cfg, collection = configure(base, replay)
         stamp, label = meta["timestamp"], meta["label"]
         out_dir = args.out_dir or args.resume.parent           # результат — рядом с журналом

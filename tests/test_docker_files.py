@@ -405,7 +405,7 @@ class TestSecrets(unittest.TestCase):
                      "RAG__INGEST_ON_START", "RAG__UPLOAD_DIR", "RAG__UPLOAD_MAX_MB", "RAG__CHAT", "RAG__CONDENSE",
                      "BOT_EDIT_INTERVAL",
                      # блок 5.6
-                     "PHOENIX_LLAMA_INDEX", "RAGAS__JUDGE_MODEL", "RAGAS__JUDGE_BASE_URL", "RAGAS__JUDGE_API_KEY",
+                     "PHOENIX_LLAMA_INDEX", "RAG__SOURCES_FALLBACK", "RAGAS__JUDGE_MODEL", "RAGAS__JUDGE_BASE_URL", "RAGAS__JUDGE_API_KEY",
                      "RAGAS__JUDGE_MAX_TOKENS", "RAGAS__JUDGE_TIMEOUT", "RAGAS__EMBEDDINGS_MODEL",
                      "RAGAS__EMBEDDINGS_BASE_URL", "RAGAS__CONCURRENCY", "RAGAS__GOLDEN_PATH", "RAGAS__RESULTS_DIR",
                      "RAGAS__CACHE_ENABLED", "RAGAS__CACHE_DIR"):
