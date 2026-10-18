@@ -3263,6 +3263,33 @@ python scripts/compare_agents.py                       # 5 задач × 2 аг�
   - основная доплата — +580 токенов системного промпта и описаний на каждый вызов модели;
   - канонический таймаут 10 с на CPU невыполним: вызов модели — 50–75 с.
 
+### Доработка: проверка финального ответа
+
+Делается вне задания, по наблюдению 1 отчёта. В задаче 4 ReAct написал «Сообщение отправлено в 999», хотя `send_telegram_message` не вызывал. Критик эту ошибку пропустил: он смотрит только на observation, а у финального ответа его нет. Подробности — [`docs/agent-react-report.md`](docs/agent-react-report.md), раздел «Доработка».
+
+- **`check_final_answer`** в `agent_react.py` сверяет финальный ответ с trace, без модели и без токенов. Ответ уходит на доработку в двух случаях:
+  - задача просит отправить клиенту в чат N, а успешной отправки в этот чат нет;
+  - ответ говорит «отправлено», а отправки не было.
+- **Честный отказ проходит:** «не отправлено, потому что…». Агента не толкают отправить непроверенное.
+- **Доработка — как после `REVISE` критика:** системная приписка и премиум-модель на следующий шаг. Счётчик ревизий общий, не больше 2 за запуск. Если ревизии кончились, ответ отдаётся с полем `final_check_failed`.
+- **Выключается** `AGENT__FINAL_CHECK=false`.
+- **`compare_agents.py`** пишет в лог `final_checks` и `final_check_failed`.
+- **Тесты:** +16 в `tests/unit/test_agent_react.py`.
+  - Правило на 10 случаях, включая ответ задачи 4 с Windows, честный отказ, отправку в чужой чат и отправку с ошибкой схемы.
+  - Доработка с отправкой на следующем шаге, общий бюджет ревизий, выключатель, настройка, счётчик в `compare_agents.py`.
+  - Тесты нашли ошибку: в подсказку критику попадал отклонённый финальный ответ без observation, и код падал с `TypeError`. Исправлено.
+
+**Песочница.** Подставная модель повторяет ошибку задачи 4. Проверка вернула ответ на доработку, следующим шагом ушла отправка в чат 999. Получилось 5 итераций, 1 ревизия, корректно — «да». Задачу 3 проверка не задела. `pytest` — 1494 passed и 5 skipped.
+
+**Windows.** Повтор задач 3 и 4 на ReAct — по логам `docs/agent-react-traces/final-check/`:
+
+```powershell
+python -m pytest -q                                    # 1499 passed
+python scripts/compare_agents.py --only compose_kb_send,compose_time_kb_send --agent react --out docs\agent-react-traces\final-check
+```
+
+Результаты заполняются после прогона.
+
 ### Соответствие критериям блока 6.2
 
 | Критерий | Реализация |
@@ -3326,7 +3353,7 @@ LLM__MAX_RETRIES=2
 
 Для наивного агента (блок 6.1, только CLI): `AGENT__MODEL` (пусто — `gpt-5.4-mini`, канон задания; у OpenRouter — `openai/gpt-5.4-mini`, с Ollama — `qwen3:4b-instruct`) и `AGENT__MAX_STEPS` (пусто — 6). Провайдер, ключ и прокси — те же `LLM__*`, поиск — коллекция `RAG__COLLECTION`.
 
-Для ReAct-агента (блок 6.2, только CLI): `AGENT__MAX_ITERATIONS` (пусто — 10, допустимо 8–20), `AGENT__TIMEOUT_PER_ITERATION_SEC` (пусто — 10 с на итерацию с критиком; Ollama на CPU — 240), `AGENT__MAX_REVISIONS` (пусто — 2), `AGENT__PREMIUM_MODEL` и `AGENT__CRITIC_MODEL` (пусто — `AGENT__MODEL`; канон — `gpt-5.4` и `gpt-5.4-mini`).
+Для ReAct-агента (блок 6.2, только CLI): `AGENT__MAX_ITERATIONS` (пусто — 10, допустимо 8–20), `AGENT__TIMEOUT_PER_ITERATION_SEC` (пусто — 10 с на итерацию с критиком; Ollama на CPU — 240), `AGENT__MAX_REVISIONS` (пусто — 2), `AGENT__PREMIUM_MODEL` и `AGENT__CRITIC_MODEL` (пусто — `AGENT__MODEL`; канон — `gpt-5.4` и `gpt-5.4-mini`); `AGENT__FINAL_CHECK` (пусто — `true`: проверка финального ответа по trace, доработка после блока 6.2).
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 

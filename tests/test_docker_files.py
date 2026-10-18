@@ -413,7 +413,9 @@ class TestSecrets(unittest.TestCase):
                      "AGENT__MODEL", "AGENT__MAX_STEPS",
                      # блок 6.2
                      "AGENT__MAX_ITERATIONS", "AGENT__TIMEOUT_PER_ITERATION_SEC", "AGENT__MAX_REVISIONS",
-                     "AGENT__PREMIUM_MODEL", "AGENT__CRITIC_MODEL"):
+                     "AGENT__PREMIUM_MODEL", "AGENT__CRITIC_MODEL",
+                     # доработка после 6.2
+                     "AGENT__FINAL_CHECK"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):

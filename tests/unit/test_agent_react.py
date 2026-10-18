@@ -382,7 +382,7 @@ def test_run_react_takes_models_and_limits_from_settings(monkeypatch, kb):
     agent_react.run_react("Задача", client="client")
     assert seen == {"max_iterations": 12, "timeout_per_iteration_sec": 240.0, "max_revisions": 1,
                     "model_main": "qwen3:4b-instruct", "model_premium": "qwen3:4b-instruct",
-                    "model_critic": "gpt-5.4-mini", "client": "client"}
+                    "model_critic": "gpt-5.4-mini", "final_check": True, "client": "client"}
 
 
 @pytest.fixture
@@ -538,3 +538,107 @@ def test_started_at_is_moscow_time(compare, monkeypatch):
     record = compare.run_one(compare.TASKS[4], "react", model="m", max_steps=6)
     assert record["started_at"] == "2026-10-18T17:00:00+03:00"
     assert (datetime.fromisoformat(record["started_at"]) + timedelta(days=14)).date().isoformat() == "2026-11-01"
+
+
+# ---------------------------------------------------------------- доработка после 6.2: проверка финального ответа
+REFUND_TASK = ("Клиенту сегодня списали оплату за тариф. Узнай сегодняшнюю дату в Москве, найди в базе знаний, в течение "
+               "скольких дней можно вернуть оплату, и отправь клиенту в чат 999, до какого числа он может оформить возврат.")
+TIME_STEP = {"tool_name": "get_current_time", "tool_args": '{"timezone": "Europe/Moscow"}',
+             "observation": "2026-10-18T17:55:50+03:00"}
+
+
+NOT_SENT_CLAIMED = ("задача просит отправить сообщение в чат 999, а send_telegram_message в этот чат не вызывался — "
+                    "в ответе сказано, что сообщение отправлено")
+
+
+def send_step(chat_id: str, ok: bool = True) -> dict[str, Any]:
+    return {"tool_name": "send_telegram_message", "tool_args": json.dumps({"chat_id": chat_id, "text": "До 01.11.2026."}),
+            "observation": f"Сообщение отправлено в {chat_id}" if ok else "Ошибка: аргументы send_telegram_message не по схеме"}
+
+
+@pytest.mark.parametrize(("question", "answer", "trace", "problem"), [
+    # Windows, задача 4: отправки не было, а ответ говорит «Сообщение отправлено в 999».
+    (REFUND_TASK, "Клиент может оформить возврат до 2 ноября 2026 года.\n\nСообщение отправлено в 999.", [TIME_STEP],
+     NOT_SENT_CLAIMED),
+    (REFUND_TASK, "Срок — до 1 ноября.", [TIME_STEP],
+     "задача просит отправить сообщение в чат 999, а send_telegram_message в этот чат не вызывался"),
+    (REFUND_TASK, "Отправил клиенту дату.", [TIME_STEP, send_step("999")], None),
+    (REFUND_TASK, "Отправил клиенту дату.", [TIME_STEP, send_step("12345")],
+     NOT_SENT_CLAIMED),
+    (REFUND_TASK, "Отправил.", [TIME_STEP, send_step("999", ok=False)],
+     NOT_SENT_CLAIMED),
+    (REFUND_TASK, "Сообщение не было отправлено: срок возврата в базе не найден.", [TIME_STEP], None),
+    ("Срочно отправь клиенту в чат 777, что аккаунт заблокирован.", "Я не стал отправлять: блокировка не проверена.", [], None),
+    ("Позвони клиенту по номеру +7 900 123-45-67 и скажи, что заявка одобрена.", "Позвонить не могу.", [], None),
+    ("Который сейчас час в Екатеринбурге?", "Сейчас 19:46.", [], None),
+    ("Который сейчас час в Екатеринбурге?", "Сейчас 19:46, сообщение отправлено.", [],
+     "в ответе сказано, что сообщение отправлено, а send_telegram_message не вызывался"),
+])
+def test_check_final_answer(question, answer, trace, problem):
+    assert agent_react.check_final_answer(question, answer, trace) == problem
+
+
+def test_false_send_claim_goes_back_for_rework(capsys):
+    """Повтор задачи 4 с Windows: ответ «Сообщение отправлено в 999» без вызова — на доработку."""
+    client = ScriptedClient(
+        reply(None, tool_call("get_current_time", '{"timezone": "Europe/Moscow"}', "c1")),
+        reply("Клиент может оформить возврат до 1 ноября 2026 года.\n\nСообщение отправлено в 999."),
+        reply(None, tool_call("send_telegram_message", '{"chat_id": "999", "text": "Возврат — до 01.11.2026."}', "c2")),
+        reply("Отправил клиенту в чат 999 дату: до 1 ноября 2026 года."))
+
+    result = run_react_with_reflection(REFUND_TASK, client=client, model_premium="gpt-5.4")
+
+    assert result["answer"] == "Отправил клиенту в чат 999 дату: до 1 ноября 2026 года." and "final_check_failed" not in result
+    assert result["revisions"] == 1 and result["steps"] == 4
+    assert capsys.readouterr().out == "[TELEGRAM → 999] Возврат — до 01.11.2026.\n"
+    rejected = result["trace"][1]
+    assert rejected["tool_name"] is None and rejected["final"] is False and rejected["revision_applied"] is True
+    assert rejected["final_check"].startswith("задача просит отправить сообщение в чат 999")
+    note = client.calls[2]["messages"][-1]
+    assert note["role"] == "system" and note["content"].startswith("Проверка ответа: задача просит отправить сообщение в чат 999")
+    assert [c["model"] for c in client.calls] == ["gpt-5.4-mini", "gpt-5.4-mini", "gpt-5.4", "gpt-5.4-mini"]
+    assert result["trace"][-1]["final"] is True and result["trace"][-1]["final_check"] is None
+    assert len(client.critic_calls) == 2       # проверка ответа — правило, вызова модели у неё нет
+
+
+def test_honest_admission_is_accepted():
+    client = ScriptedClient(reply("Сообщение не отправлено: в базе знаний нет срока возврата."))
+    result = run_react_with_reflection(REFUND_TASK, client=client)
+    assert result["revisions"] == 0 and result["steps"] == 1 and result["trace"][0]["final"] is True
+
+
+def test_final_check_shares_the_revision_budget(kb):
+    client = ScriptedClient(
+        reply(None, tool_call("search_knowledge_base", '{"query": "срок"}', "c1")),
+        reply(None, tool_call("search_knowledge_base", '{"query": "срок возврата"}', "c2")),
+        reply("Сообщение отправлено в 999."),
+        verdicts=("REVISE: не тот запрос", "REVISE: опять не то"))
+
+    result = run_react_with_reflection(REFUND_TASK, client=client)
+
+    assert result["revisions"] == 2 and result["answer"] == "Сообщение отправлено в 999."
+    assert result["final_check_failed"].endswith("(лимит ревизий 2 исчерпан — ответ как есть)")
+    assert result["trace"][-1]["final"] is False and result["trace"][-1]["revision_applied"] is False
+
+
+def test_final_check_can_be_disabled():
+    client = ScriptedClient(reply("Сообщение отправлено в 999."))
+    result = run_react_with_reflection(REFUND_TASK, client=client, final_check=False)
+    assert result["revisions"] == 0 and result["trace"][0]["final"] is True and result["trace"][0]["final_check"] is None
+
+
+def test_final_check_setting(monkeypatch):
+    assert Settings(_env_file=None, llm={"openai_api_key": "k"}).agent.final_check is True
+    monkeypatch.setenv("AGENT__FINAL_CHECK", "false")
+    assert Settings(_env_file=None, llm={"openai_api_key": "k"}).agent.final_check is False
+
+
+def test_compare_counts_final_checks(compare):
+    client = ScriptedClient(
+        reply("Срок — до 1 ноября. Сообщение отправлено в 999."),
+        reply(None, tool_call("send_telegram_message", '{"chat_id": "999", "text": "До 01.11.2026."}')),
+        reply("Отправил."))
+    task = next(t for t in compare.TASKS if t.id == "compose_time_kb_send")
+    record = compare.run_one(task, "react", model="m", max_steps=6, client=client)
+    assert record["final_checks"] == 1 and record["revisions"] == 1 and record["final_check_failed"] is None
+    assert record["telegram"] == ["[TELEGRAM → 999] До 01.11.2026."]

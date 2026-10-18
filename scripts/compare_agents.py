@@ -174,6 +174,9 @@ def run_one(task: Task, agent: str, *, model: str, max_steps: int, client: Any =
     }
     if agent == "react" and "usage" in result:
         record["usage"] = result["usage"]
+    if agent == "react":                     # доработка после 6.2: проверка финального ответа по trace
+        record["final_checks"] = sum(1 for e in result["trace"] if e.get("final_check") and e.get("revision_applied"))
+        record["final_check_failed"] = result.get("final_check_failed")
     correct, why = CHECKS[task.id](record) if not (record["error"] and not record["answer"]) else (False, record["error"])
     if record["error"] in ("max_iterations", "timeout"):
         correct, why = False, f"остановка: {record['answer']}"
@@ -216,13 +219,14 @@ def run_all(tasks: list[Task], agents: tuple[str, ...], *, model: str, max_steps
             for message in record["telegram"]:
                 print("   " + message.replace("\n", "\n   "))
             mark = "да" if record["check"]["correct"] else "нет"
-            print(f"   → итераций {record['steps']}, ревизий {record['revisions']}, инструменты {record['tools'] or '—'}, "
+            checks = f" (проверка ответа: {record['final_checks']})" if record.get("final_checks") else ""
+            print(f"   → итераций {record['steps']}, ревизий {record['revisions']}{checks}, инструменты {record['tools'] or '—'}, "
                   f"токенов {record['tokens']['total_tokens']}, {record['wall_ms'] / 1000:.1f} с; корректно: {mark} "
                   f"({record['check']['why']}) → {path.name}")
             print("   " + (record["answer"] or f"Остановка: {record['error']}").replace("\n", "\n   ")[:600], flush=True)
             rows.append(record)
-    summary = [{k: r[k] for k in ("task_id", "agent", "steps", "revisions", "tokens", "llm_calls", "tools",
-                                  "check", "error", "wall_ms")} for r in rows]
+    summary = [{k: r.get(k) for k in ("task_id", "agent", "steps", "revisions", "final_checks", "tokens", "llm_calls",
+                                      "tools", "check", "error", "wall_ms")} for r in rows]
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("\n" + table(rows))
     return rows
