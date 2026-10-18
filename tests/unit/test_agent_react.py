@@ -595,7 +595,10 @@ def test_false_send_claim_goes_back_for_rework(capsys):
     assert rejected["tool_name"] is None and rejected["final"] is False and rejected["revision_applied"] is True
     assert rejected["final_check"].startswith("задача просит отправить сообщение в чат 999")
     note = client.calls[2]["messages"][-1]
-    assert note["role"] == "system" and note["content"].startswith("Проверка ответа: задача просит отправить сообщение в чат 999")
+    # Ролью user: последним в запросе должен быть не ответ модели, иначе Ollama продолжает его, а не исправляет.
+    assert note["role"] == "user" and note["content"].startswith(
+        "Проверка ответа (автоматическая): задача просит отправить сообщение в чат 999")
+    assert roles(client.calls[2]["messages"])[-2:] == ["assistant", "user"]
     assert [c["model"] for c in client.calls] == ["gpt-5.4-mini", "gpt-5.4-mini", "gpt-5.4", "gpt-5.4-mini"]
     assert result["trace"][-1]["final"] is True and result["trace"][-1]["final_check"] is None
     assert len(client.critic_calls) == 2       # проверка ответа — правило, вызова модели у неё нет
