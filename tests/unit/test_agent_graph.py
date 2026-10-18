@@ -279,10 +279,15 @@ def test_build_model_uses_service_settings():
 # ---------------------------------------------------------------- инструменты
 @pytest.mark.parametrize("name", ["search_knowledge_base", "get_current_time", "send_telegram_message"])
 def test_tool_description_is_the_62_description(name):
-    """Docstring @tool — description для модели; текст тот же, что у ReAct-агента блока 6.2."""
+    """Docstring @tool — description для модели; текст тот же, что у ReAct-агента блока 6.2, байт в байт.
+    Сравнение без нормализации пробелов: прежняя проверка склеивала пробелы и пропустила переносы строк
+    docstring — в запросе к модели они шли как «\\n» (раздел 7.2 отчёта)."""
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
     graph_tool = {t.name: t for t in TOOLS}[name]
     react = {t["function"]["name"]: t["function"]["description"] for t in react_tools.TOOLS}[name]
-    assert " ".join(graph_tool.description.split()) == " ".join(react.split())
+    sent = convert_to_openai_tool(graph_tool, strict=True)["function"]      # так bind_tools отдаёт его модели
+    assert graph_tool.description == sent["description"] == react and "\n" not in react
 
 
 def test_tool_schemas_are_strict():
@@ -388,12 +393,23 @@ def test_bench_series_journal_resume_and_report(bench, tmp_path, monkeypatch, kb
                            "observation": "[api/faq-api.md] 300"}, {"tool_name": None}]}
 
     monkeypatch.setattr(bench, "run_react", fake_react)
+    events: list[str] = []
+    run_once = bench.run_once
+
+    def spy(task: Any, impl: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        events.append(impl)
+        return run_once(task, impl, *args, **kwargs)
+
+    monkeypatch.setattr(bench, "run_once", spy)
     tasks = [t for t in bench.TASKS if t.id == "simple_kb"]
     graphs = fake_graphs(script)
 
-    records = bench.run_series(tasks, bench.IMPLS, 2, model="m", temperature=0, out_dir=tmp_path, graphs=graphs)
+    records = bench.run_series(tasks, bench.IMPLS, 2, model="m", temperature=0, out_dir=tmp_path, graphs=graphs,
+                               before_run=lambda: events.append("reset"))
 
     assert len(records) == 6 and len(react_calls) == 2
+    assert events == ["reset", "b62_loop", "reset", "custom", "reset", "prebuilt"] * 2   # сброс — перед каждым
+    assert all(r["cache_reset"] for r in records)
     assert {(r["impl"], r["repeat"]) for r in records} == {(i, n) for i in bench.IMPLS for n in (1, 2)}
     custom = next(r for r in records if r["impl"] == "custom")
     assert (custom["steps"], custom["prompt_tokens"], custom["completion_tokens"]) == (2, 220, 15)
@@ -415,6 +431,29 @@ def test_bench_series_journal_resume_and_report(bench, tmp_path, monkeypatch, kb
     assert "| `simple_kb` | b62_loop | " in text and "3 из 3 |" in text and "| custom | " in text
     summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
     assert {r["impl"]: r["runs"] for r in summary["rows"]} == {"b62_loop": 3, "custom": 2, "prebuilt": 2}
+    # Третий прогон шёл без сброса — сводка по журналу не заявляет сброс для всей серии.
+    assert summary["meta"]["cache_reset"] is False and "сброс кеша" not in text
+    with_reset = [r for r in records if r["cache_reset"]]
+    assert "перед каждым прогоном — сброс кеша промпта" in bench.finish(with_reset, meta, tmp_path, report)
+
+
+def test_bench_reset_failure_does_not_stop_the_series(bench, tmp_path, monkeypatch, kb):
+    def broken_reset() -> None:
+        raise ConnectionError("Ollama не запущена")
+
+    tasks = [t for t in bench.TASKS if t.id == "simple_kb"]
+    script = [tool_call("search_knowledge_base", {"query": "лимит API Команда"}), answer("300 запросов в минуту.")]
+    records = bench.run_series(tasks, ("custom",), 2, model="m", temperature=0, out_dir=tmp_path,
+                               graphs=fake_graphs(script), before_run=broken_reset)
+    assert len(records) == 2 and all(r["check"]["correct"] for r in records)
+
+
+def test_bench_reset_cache_is_a_short_request_without_system_prompt(bench):
+    """Сброс кеша промпта: в слоте Ollama остаётся запрос, который с промптом агента не делит префикс."""
+    model = FakeChat(script=[answer("готово")])
+    bench.reset_cache(model)
+    [messages] = model._calls
+    assert [type(m).__name__ for m in messages] == ["HumanMessage"] and messages[0].content == bench.RESET_PROMPT
 
 
 def test_bench_records_limits_and_errors(bench, monkeypatch, tmp_path):
@@ -436,8 +475,17 @@ def test_bench_records_limits_and_errors(bench, monkeypatch, tmp_path):
 
 
 def test_bench_stop_check(bench, tmp_path):
-    result = bench.stop_check(LoopingChat(script=[]), tmp_path)
-    assert result["custom"]["force_finish"] and result["prebuilt"]["force_finish"]
-    assert result["custom"]["steps"] == result["prebuilt"]["steps"] == MAX_ITERATIONS
-    assert result["custom"]["searches"] == MAX_ITERATIONS        # шестой вызов — в истории, но не выполнен
-    assert json.loads((tmp_path / "stop_check.json").read_text(encoding="utf-8"))["task"] == bench.STOP_TASK
+    resets: list[int] = []
+    result = bench.stop_check(LoopingChat(script=[]), tmp_path, before_run=lambda: resets.append(1))
+    assert len(resets) == 4                                       # 2 сценария × 2 графа
+    for scenario in ("broken", "useless"):
+        custom, prebuilt = result[scenario]["custom"], result[scenario]["prebuilt"]
+        assert custom["force_finish"] and prebuilt["force_finish"]
+        assert custom["steps"] == prebuilt["steps"] == MAX_ITERATIONS
+        # Кастомный граф шестой вызов не выполняет (закрыт ToolMessage «Не выполнено»), prebuilt — выполняет.
+        assert (custom["searches_requested"], custom["searches_executed"]) == (MAX_ITERATIONS, MAX_ITERATIONS - 1)
+        assert (prebuilt["searches_requested"], prebuilt["searches_executed"]) == (MAX_ITERATIONS, MAX_ITERATIONS)
+    saved = json.loads((tmp_path / "stop_check.json").read_text(encoding="utf-8"))
+    assert saved["broken"]["task"] == bench.STOP_TASK and saved["useless"]["task"] == bench.USELESS_TASK
+    assert saved["max_iterations"] == MAX_ITERATIONS
+    assert bench.useless_search("срок возврата").startswith("В базе знаний ничего не найдено")

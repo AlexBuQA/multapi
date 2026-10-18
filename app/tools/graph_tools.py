@@ -2,8 +2,9 @@
 Инструменты агента на LangGraph (блок 6.3): те же три функции, что у агентов блоков 6.1–6.2
 (app/tools/naive_tools.py), оформленные через @tool из langchain_core.tools. Docstring — это и есть
 description для модели: текст тот же, что у ReAct-агента блока 6.2 (app/tools/react_tools.py, четыре
-вопроса), тест сверяет их, чтобы описания не разошлись. Один и тот же список TOOLS идёт и в кастомный
-StateGraph, и в prebuilt-агента.
+вопроса), байт в байт — тест сверяет их, чтобы описания не разошлись. Переносы строк docstring
+(перенос по ширине кода) _one_line склеивает в пробелы: иначе модель получила бы описание с «\n», не
+таким, как в 6.2. Один и тот же список TOOLS идёт и в кастомный StateGraph, и в prebuilt-агента.
 
 Схема аргументов — pydantic-модель со строгими правилами: extra="forbid" (в JSON Schema —
 additionalProperties: false), шаблоны строк как у блока 6.2. Неверные аргументы — ValidationError
@@ -42,6 +43,13 @@ class SendArgs(_Strict):
                       "до 4096 символов")
 
 
+def _one_line(t: BaseTool) -> BaseTool:
+    """Description одной строкой, как у 6.2. @tool берёт docstring как есть, с переносами строк кода, и в
+    запросе к модели они уходят как «\\n»: модель видела бы не тот текст, что у агента 6.2."""
+    t.description = " ".join(t.description.split())
+    return t
+
+
 def _safe(name: str, fn: Any, **kwargs: Any) -> str:
     try:
         return str(fn(**kwargs))
@@ -49,6 +57,7 @@ def _safe(name: str, fn: Any, **kwargs: Any) -> str:
         return f"Ошибка инструмента {name}: {type(exc).__name__}: {exc}"
 
 
+@_one_line
 @tool(args_schema=SearchArgs)
 def search_knowledge_base(query: str) -> str:
     """Что делает: ищет в базе знаний техподдержки «Личного кабинета» (аккаунт и вход, тарифы и оплата,
@@ -61,6 +70,7 @@ def search_knowledge_base(query: str) -> str:
     return _safe("search_knowledge_base", naive_tools.search_knowledge_base, query=query)
 
 
+@_one_line
 @tool(args_schema=TimeArgs)
 def get_current_time(timezone: str) -> str:
     """Что делает: возвращает текущие дату и время в часовом поясе IANA. Когда вызывать: когда в ответе
@@ -71,6 +81,7 @@ def get_current_time(timezone: str) -> str:
     return _safe("get_current_time", naive_tools.get_current_time, timezone=timezone)
 
 
+@_one_line
 @tool(args_schema=SendArgs)
 def send_telegram_message(chat_id: str, text: str) -> str:
     """Что делает: отправляет клиенту текстовое сообщение в Telegram-чат по chat_id. Действие необратимо:

@@ -217,9 +217,9 @@ multapi/
 │   ├── agent_naive.md       # блок 6.1: наивный агент — цикл, инструменты, trace, разбор пяти задач
 │   ├── agent-naive-traces/  # блок 6.1: JSON-логи пяти прогонов агента
 │   ├── agent-react-report.md # блок 6.2: ReAct против наивного — устройство, задачи, таблица, наблюдения
-│   ├── agent-graph-report.md # блок 6.3: state, router, схема, бенчмарк, custom vs prebuilt, баг, персистентность
-│   ├── agent-graph-custom.mmd, agent-graph-prebuilt.mmd # блок 6.3: схемы графов
-│   ├── agent-graph-bench/   # блок 6.3: журнал и сводка бенчмарка
+│   ├── agent-graph-report.md # блок 6.3: state, router, схема, бенчмарк, custom vs prebuilt, баги, персистентность
+│   ├── agent-graph-custom.mmd, agent-graph-prebuilt.mmd, agent-graph.png # блок 6.3: схемы графов
+│   ├── agent-graph-bench/   # блок 6.3: журнал, сводка и stop-check бенчмарка; run1-no-cache-reset/ — первый прогон
 │   ├── agent-react-traces/  # блок 6.2: JSON-логи сравнения и summary.json
 │   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
@@ -3356,21 +3356,23 @@ flowchart LR
   - Имя — `AGENT__MODEL`, температура — `AGENT__TEMPERATURE` (0).
   - `custom_graph` и `prebuilt_graph` — атрибуты модуля, собираются при первом обращении. CLI: `python -m app.services.agent_graph "<задача>" [--prebuilt] [--trace]`.
 - **`app/tools/graph_tools.py`** — три инструмента блока 6.2 через `@tool`.
-  - Docstring — это description для модели; текст как у 6.2, и тест сверяет описания.
+  - Docstring — это description для модели, текст как у 6.2 байт в байт: переносы строк docstring склеивает `_one_line`, тест сверяет описания без нормализации.
   - Строгие pydantic-схемы аргументов. Сбой функции возвращается строкой — иначе `ToolNode` prebuilt-агента уронил бы граф.
 - **`scripts/visualize_graph.py`** → `docs/agent-graph-custom.mmd` и `docs/agent-graph-prebuilt.mmd`; `--png` — ещё `docs/agent-graph.png` через mermaid.ink.
 - **`scripts/bench_agents.py`** — 5 задач × 3 реализации (`b62_loop`, `custom`, `prebuilt`) × 3 повтора.
   - На прогон: latency (`perf_counter`), `prompt_tokens`, `completion_tokens`, шаги, вызовы модели, проверка ответа.
+  - Перед каждым прогоном, вне замера, сбрасывается кеш промпта Ollama (`reset_cache`): без этого реализация получала префикс из кеша предыдущей, и latency первого прогона исказилась (отчёт, раздел 5).
   - Журнал `docs/agent-graph-bench/runs.jsonl` с `--resume`; таблицы скрипт вписывает в отчёт сам.
-  - Графы вызываются с `thread_id` в config; `--stop-check` — кран на живой модели со сломанным поиском.
+  - Графы вызываются с `thread_id` в config.
+  - `--stop-check` — кран на живой модели, два сценария: поиск падает (`broken`) и поиск пуст, а задача требует восьми попыток (`useless`).
   - У `agent_react.run_react` появился необязательный `temperature`, чтобы все три шли при одной температуре.
-- **Тесты:** +28 в `tests/unit/test_agent_graph.py`, без сети, на подставной чат-модели.
+- **Тесты:** +30 в `tests/unit/test_agent_graph.py`, без сети, на подставной чат-модели.
   - Контракт state, router (чистота и `Literal`).
   - Кастомный граф: инструмент → ответ, системный промпт вне state, `strict=True`; ошибки инструментов.
   - Stop-кран на сломанном поиске у обоих графов, с валидной историей после лимита.
   - Один ответ у обоих графов на одну задачу, `thread_id`.
   - Описания и схемы инструментов, `.mmd` и схема в отчёте совпадают с кодом, версии 1.x.
-  - Бенчмарк: журнал, `--resume`, таблицы, лимиты, ошибки, stop-check.
+  - Бенчмарк: сброс кеша перед каждым прогоном, журнал, `--resume`, таблицы, лимиты, ошибки, stop-check в двух сценариях.
 
 ### Проверка на Windows
 
@@ -3379,24 +3381,25 @@ Qdrant с `kb_docs`, Ollama с `bge-m3` и `qwen3:4b-instruct`. В `.env` уже
 ```powershell
 pip install -r requirements.txt                        # langgraph и langchain уже стоят с группой eval
 python -c "import importlib.metadata as m; print(m.version('langgraph'))"   # 1.2.14
-python -m pytest -q                                    # 1527 passed
+python -m pytest -q                                    # 1529 passed
 python scripts/visualize_graph.py --png                # .mmd всегда, PNG — если mermaid.ink доступен
 python -m app.services.agent_graph "Который сейчас час в Екатеринбурге?" --trace
 python -m app.services.agent_graph "Который сейчас час в Екатеринбурге?" --prebuilt --trace
-python scripts/bench_agents.py --stop-check            # stop-кран на живой модели, ~5 минут
-python scripts/bench_agents.py                         # 5 × 3 × 3 = 45 прогонов, на CPU 1,5–2 часа; прервался — --resume
+python scripts/bench_agents.py --stop-check            # stop-кран на живой модели, два сценария, ~5 минут
+python scripts/bench_agents.py                         # 5 × 3 × 3 = 45 прогонов, на CPU около часа; прервался — --resume
 ```
 
 ### Результаты
 
 **Песочница (Linux).** Модель — подставной OpenAI-совместимый сервер, который отвечает `tool_calls` по сценарию. Поиск — настоящий `RAGService` в Qdrant с подставными эмбеддингами. Проверялась механика.
 - **CLI.** Оба графа через настоящий `ChatOpenAI`: задача 3 — поиск → отправка → ответ, 3 вызова модели; провокация — отказ без вызовов.
-- **Запрос к модели:** системный промпт, `temperature: 0`, инструменты с `strict: true` и `additionalProperties: false` (см. «Баг» в отчёте).
-- **`bench_agents.py --repeats 2`:** 30 прогонов, журнал, сводка, таблицы вписаны в отчёт по меткам.
+- **Запрос к модели:** системный промпт, `temperature: 0`, инструменты с `strict: true` и `additionalProperties: false` (раздел 7.1 отчёта).
+- **`bench_agents.py --repeats 2`:** 30 прогонов, журнал, сводка, таблицы вписаны в отчёт по меткам. Со сбросом кеша — `--repeats 1`: перед каждым прогоном в журнале запросов сервера короткий запрос без инструментов.
+- **`--stop-check`:** подставная модель ищет без конца. Оба графа останавливаются на 6-м вызове модели: custom выполнил 5 поисков из 6 запрошенных, prebuilt — 6 из 6.
 - **PNG:** mermaid.ink недоступен — сохранены только `.mmd`.
-- **Тесты:** `pytest` — 1522 passed и 5 skipped.
+- **Тесты:** `pytest` — 1524 passed и 5 skipped.
 
-**Windows.** Заполняется по логам бенчмарка.
+**Windows.** Первый прогон (18.10): `pytest` — 1527 passed, PNG схемы сохранён через mermaid.ink (`docs/agent-graph.png`), оба графа через CLI, 45 прогонов бенчмарка. Его latency искажена кешем промпта Ollama — разбор в отчёте (раздел 5), файлы — в `docs/agent-graph-bench/run1-no-cache-reset/`. Итоговые числа — по повторному прогону со сбросом кеша.
 
 ### Соответствие критериям блока 6.3
 
@@ -3405,11 +3408,11 @@ python scripts/bench_agents.py                         # 5 × 3 × 3 = 45 про
 | `AgentState` с `messages: Annotated[..., add_messages]`, `iteration_count: int`, `tool_results: Annotated[..., operator.add]`; SDK-клиентов и ключей в state нет | `app/services/agent_graph.py`; `test_agent_state_contract` |
 | Два рабочих графа: `custom_graph` (StateGraph, три узла, conditional edge) и `prebuilt_graph` (`create_agent`); оба отвечают на одну задачу | `build_custom_graph`, `build_prebuilt_graph`, атрибуты модуля; `test_prebuilt_graph_same_task_same_answer`, CLI с `--prebuilt` |
 | Router — отдельная функция, читает state, не пишет, без сети, `Literal[...]` | `route_after_model`; `test_route_after_model`, `test_router_is_typed_with_literal` |
-| Stop-кран: `iteration_count >= 6` → `force_finish`; проверено на сломанном инструменте | `test_stop_tap_on_a_broken_tool`, `test_prebuilt_stops_after_six_model_calls`, `bench_agents.py --stop-check` |
+| Stop-кран: `iteration_count >= 6` → `force_finish`; проверено на сломанном инструменте | `test_stop_tap_on_a_broken_tool`, `test_prebuilt_stops_after_six_model_calls`; на живой модели — `bench_agents.py --stop-check`: поиск падает или пуст |
 | `visualize_graph.py` сохраняет `agent-graph-custom.mmd` и `agent-graph-prebuilt.mmd`, совпадают с кодом | `docs/agent-graph-*.mmd`; `test_mermaid_files_match_the_code` |
-| `bench_agents.py`: 5 задач × 3 реализации × ≥ 3 повтора, таблица в отчёте с числами | `--repeats 3` по умолчанию, таблицы между метками `bench:start`/`bench:end`; `test_bench_series_journal_resume_and_report`. Числа — после прогона на Windows |
-| В отчёте Mermaid-схема (раздел 4) и вывод custom vs prebuilt (раздел 6) на своих числах | `docs/agent-graph-report.md`; вывод — после прогона |
-| Описан реальный баг отладки (раздел 7) | `additionalProperties: false` не доходил до модели без `strict=True` — найдено по журналу запросов подставного сервера |
+| `bench_agents.py`: 5 задач × 3 реализации × ≥ 3 повтора, таблица в отчёте с числами | `--repeats 3` по умолчанию, таблицы между метками `bench:start`/`bench:end`; `test_bench_series_journal_resume_and_report`. Числа — после повторного прогона на Windows |
+| В отчёте Mermaid-схема (раздел 4) и вывод custom vs prebuilt (раздел 6) на своих числах | `docs/agent-graph-report.md`; вывод — после повторного прогона |
+| Описан реальный баг отладки (раздел 7) | 7.1 — `additionalProperties: false` не доходил до модели без `strict=True`, найден по журналу запросов подставного сервера; 7.2 — переносы строк docstring в описаниях инструментов, найдены по prompt_tokens первого прогона |
 
 ## Конфигурация (.env)
 

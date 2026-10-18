@@ -5,7 +5,8 @@
     python scripts/bench_agents.py --repeats 1        # быстрая проверка
     python scripts/bench_agents.py --resume           # продолжить прерванный прогон по журналу runs.jsonl
     python scripts/bench_agents.py --report-only      # пересобрать таблицы из журнала
-    python scripts/bench_agents.py --stop-check       # stop-кран на живой модели: поиск намеренно сломан
+    python scripts/bench_agents.py --stop-check       # stop-кран на живой модели: поиск сломан или бесполезен
+    python scripts/bench_agents.py --no-cache-reset   # без сброса кеша промпта (так шёл первый прогон)
 
 Реализации:
 - b62_loop — ReAct блока 6.2 (app/services/agent_react.py): цикл for, критик, проверка финального ответа;
@@ -18,6 +19,12 @@ usage_metadata ответов, у b62_loop — usage, вместе с крити
 (у b62_loop — итерации цикла), вызовы инструментов и проверка ответа тем же правилом, что в
 scripts/compare_agents.py. Графы вызываются с config={"configurable": {"thread_id": f"bench-{task_id}"}}:
 без checkpointer это no-op, но вызов уже совместим с AsyncSqliteSaver.
+
+Перед каждым прогоном — сброс кеша промпта (reset_cache, вне замера). Ollama держит KV-кеш последнего
+запроса и считает заново только хвост промпта после общего префикса. Без сброса реализация, которая идёт
+сразу за другой с тем же системным промптом и инструментами, не платит за префилл ~1 100 токенов (на CPU
+~30 с): в первом прогоне так «ускорился» prebuilt, шедший за custom. Со сбросом каждый прогон начинается
+одинаково холодным.
 
 Журнал — docs/agent-graph-bench/runs.jsonl (строка на прогон, дописывается сразу), сводка — summary.json,
 таблицы — в docs/agent-graph-report.md между метками <!-- bench:start --> и <!-- bench:end -->.
@@ -32,6 +39,7 @@ import json
 import statistics
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -117,9 +125,12 @@ def load_journal(path: Path) -> list[dict[str, Any]]:
 
 
 def run_series(tasks: list[Task], impls: tuple[str, ...], repeats: int, *, model: str, temperature: float,
-               out_dir: Path = OUT_DIR, resume: bool = False, graphs: dict[str, Any] | None = None) -> list[dict]:
-    """Повтор → задача → реализация: реализации чередуются, и прогрев или загрузка машины не достаются
-    одной из них. Каждый прогон дописывается в журнал сразу."""
+               out_dir: Path = OUT_DIR, resume: bool = False, graphs: dict[str, Any] | None = None,
+               before_run: Callable[[], None] | None = None) -> list[dict]:
+    """Повтор → задача → реализация: повторы одной пары разнесены во времени, и дрейф машины не ложится на
+    одну задачу. Порядок реализаций при этом один и тот же, поэтому перед каждым прогоном — before_run
+    (сброс кеша промпта, вне замера): иначе реализация получает кеш от предыдущей. Каждый прогон
+    дописывается в журнал сразу."""
     out_dir.mkdir(parents=True, exist_ok=True)
     journal = out_dir / "runs.jsonl"
     if not resume and journal.exists():
@@ -133,7 +144,11 @@ def run_series(tasks: list[Task], impls: tuple[str, ...], repeats: int, *, model
                 number += 1
                 if (task.id, impl, repeat) in done:
                     continue
+                if before_run:
+                    with contextlib.suppress(Exception):    # сбой провайдера покажет сам прогон, с записью в журнал
+                        before_run()
                 record = run_once(task, impl, repeat, model=model, temperature=temperature, graphs=graphs)
+                record["cache_reset"] = before_run is not None
                 with journal.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 mark = "да" if record["check"]["correct"] else "нет"
@@ -172,8 +187,9 @@ def _n(value: float) -> str:
 
 
 def tables(rows: list[dict[str, Any]], meta: dict[str, Any]) -> str:
-    intro = (f"Модель `{meta['model']}`, температура {meta['temperature']:g}, повторов на задачу — {meta['repeats']}. "
-             "Значения — средние по повторам; latency — среднее (мин–макс).")
+    intro = (f"Модель `{meta['model']}`, температура {meta['temperature']:g}, повторов на задачу — {meta['repeats']}"
+             + ("; перед каждым прогоном — сброс кеша промпта" if meta.get("cache_reset") else "")
+             + ". Значения — средние по повторам; latency — среднее (мин–макс).")
     lines = [intro, "",
              "| Задача | Реализация | latency_ms | prompt_tokens | completion_tokens | total_steps | вызовов модели | корректно |",
              "|---|---|---|---|---|---|---|---|"]
@@ -213,6 +229,11 @@ def write_report(text: str, report: Path = REPORT) -> bool:
 def finish(records: list[dict[str, Any]], meta: dict[str, Any], out_dir: Path = OUT_DIR,
            report: Path = REPORT) -> str:
     rows = aggregate(records)
+    if records:                              # по журналу: --report-only не знает, с чем шла серия
+        uniform = {k: {r[k] for r in records} for k in ("model", "temperature")}
+        meta = {**meta, **{k: v.pop() for k, v in uniform.items() if len(v) == 1},
+                "repeats": max(r["repeat"] for r in records),
+                "cache_reset": all(r.get("cache_reset") for r in records)}
     (out_dir / "summary.json").write_text(json.dumps({"meta": meta, "rows": rows}, ensure_ascii=False, indent=2) + "\n",
                                           encoding="utf-8")
     text = tables(rows, meta)
@@ -224,6 +245,9 @@ def finish(records: list[dict[str, Any]], meta: dict[str, Any], out_dir: Path = 
 # ---------------------------------------------------------------- stop-кран на живой модели
 STOP_TASK = ("Найди в базе знаний точный срок возврата оплаты. Если поиск не сработал, попробуй ещё раз другими "
              "словами — без найденного срока не отвечай.")
+USELESS_TASK = ("Найди в базе знаний точный срок возврата оплаты. Ищи по одной формулировке за вызов; если ничего "
+                "не найдено — переформулируй и ищи снова, всего не меньше восьми попыток. Не отвечай, пока срок "
+                "не найден.")
 
 
 def broken_search(query: str) -> str:
@@ -231,31 +255,61 @@ def broken_search(query: str) -> str:
     return "Ошибка инструмента search_knowledge_base: TimeoutError: база знаний не ответила, повторите запрос"
 
 
-def stop_check(model: Any, out_dir: Path = OUT_DIR) -> dict[str, Any]:
+def useless_search(query: str) -> str:
+    """Поиск отвечает, но всегда пусто — заведомо бесполезный результат, а задача требует искать дальше."""
+    return f"В базе знаний ничего не найдено по запросу «{query}». Попробуйте другую формулировку."
+
+
+STOP_SCENARIOS = {"broken": (STOP_TASK, broken_search), "useless": (USELESS_TASK, useless_search)}
+
+
+def stop_check(model: Any, out_dir: Path = OUT_DIR, *, before_run: Callable[[], None] | None = None) -> dict[str, Any]:
+    """Оба графа с подменённым поиском, два сценария:
+    - broken — поиск падает; модель может сдаться сама, тогда кран не нужен;
+    - useless — поиск пуст, а задача требует не меньше восьми попыток: модели нужно больше 6 вызовов, и
+      остановить граф должен кран.
+    Поисков считается два числа: запрошено моделью и выполнено (кастомный граф шестой вызов не выполняет)."""
     from langchain_core.tools import StructuredTool
 
     from app.tools.graph_tools import TOOLS, SearchArgs
 
     original = TOOLS[0]
-    broken = StructuredTool.from_function(func=broken_search, name=original.name, description=original.description,
-                                          args_schema=SearchArgs)
-    tools = [broken, *TOOLS[1:]]
-    result = {}
-    for impl, graph, limit in (("custom", agent_graph.build_custom_graph(model, tools), None),
-                               ("prebuilt", agent_graph.build_prebuilt_graph(model, tools),
-                                agent_graph.PREBUILT_RECURSION_LIMIT)):
-        started = time.perf_counter()
-        run = asyncio.run(agent_graph.run_graph(graph, STOP_TASK, thread_id=f"stop-{impl}", recursion_limit=limit))
-        result[impl] = {"latency_ms": round((time.perf_counter() - started) * 1000, 1), "steps": run["steps"],
-                        "searches": sum(c["name"] == "search_knowledge_base" for c in run["tool_calls"]),
-                        "force_finish": run["force_finish"], "answer": run["answer"],
-                        "total_tokens": run["total_tokens"]}
-        print(f"{impl}: вызовов модели {run['steps']}, поисков {result[impl]['searches']}, force_finish "
-              f"{run['force_finish']}: {str(run['answer'])[:200]}", flush=True)
+    result: dict[str, Any] = {"max_iterations": agent_graph.MAX_ITERATIONS}
+    for scenario, (task, search) in STOP_SCENARIOS.items():
+        replaced = StructuredTool.from_function(func=search, name=original.name, description=original.description,
+                                                args_schema=SearchArgs)
+        tools = [replaced, *TOOLS[1:]]
+        result[scenario] = {"task": task}
+        for impl, graph, limit in (("custom", agent_graph.build_custom_graph(model, tools), None),
+                                   ("prebuilt", agent_graph.build_prebuilt_graph(model, tools),
+                                    agent_graph.PREBUILT_RECURSION_LIMIT)):
+            if before_run:
+                before_run()
+            started = time.perf_counter()
+            run = asyncio.run(agent_graph.run_graph(graph, task, thread_id=f"stop-{scenario}-{impl}",
+                                                    recursion_limit=limit))
+            searches = [c for c in run["tool_calls"] if c["name"] == original.name]
+            executed = sum(c["result"] != agent_graph.NOT_EXECUTED for c in searches)
+            result[scenario][impl] = {
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1), "steps": run["steps"],
+                "searches_requested": len(searches), "searches_executed": executed,
+                "force_finish": run["force_finish"], "answer": run["answer"], "total_tokens": run["total_tokens"]}
+            print(f"{scenario} · {impl}: вызовов модели {run['steps']}, поисков выполнено {executed} из "
+                  f"{len(searches)}, force_finish {run['force_finish']}: {str(run['answer'])[:200]}", flush=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "stop_check.json").write_text(json.dumps({"task": STOP_TASK, **result}, ensure_ascii=False, indent=2)
-                                             + "\n", encoding="utf-8")
+    (out_dir / "stop_check.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return result
+
+
+RESET_PROMPT = "Ответь одним словом: готово"
+
+
+def reset_cache(model: Any) -> None:
+    """Короткий посторонний запрос без system. При OLLAMA_NUM_PARALLEL=1 (по умолчанию) у модели один слот
+    KV-кеша, теперь в нём этот запрос, и следующий запрос агента совпадает с кешем только первым токеном
+    шаблона: префилл системного промпта и инструментов идёт заново у каждой реализации. При нескольких
+    слотах сброс не гарантирован."""
+    model.invoke(RESET_PROMPT)
 
 
 def warmup(graphs: dict[str, Any]) -> None:
@@ -264,7 +318,7 @@ def warmup(graphs: dict[str, Any]) -> None:
 
     with contextlib.redirect_stdout(io.StringIO()):
         search_knowledge_base("лимит запросов к API")
-        graphs["model"].invoke("Ответь одним словом: готово")
+        reset_cache(graphs["model"])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -274,7 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--impl", help=f"реализации через запятую: {', '.join(IMPLS)}")
     parser.add_argument("--resume", action="store_true", help="продолжить по журналу, не повторяя готовые прогоны")
     parser.add_argument("--report-only", action="store_true", help="только пересобрать таблицы из журнала")
-    parser.add_argument("--stop-check", action="store_true", help="stop-кран: сломанный поиск на обоих графах")
+    parser.add_argument("--stop-check", action="store_true", help="stop-кран: сломанный и пустой поиск на обоих графах")
+    parser.add_argument("--no-cache-reset", action="store_true",
+                        help="не сбрасывать кеш промпта перед прогоном (порядок реализаций влияет на latency)")
     parser.add_argument("--out", type=Path, default=OUT_DIR, help="папка журнала и сводки")
     parser.add_argument("--report", type=Path, default=REPORT, help="отчёт с метками для таблиц")
     args = parser.parse_args(argv)
@@ -306,15 +362,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Остановка: база знаний недоступна — {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     graphs = agent_graph.graphs()
+    reset = None if args.no_cache_reset else (lambda: reset_cache(graphs["model"]))
     if args.stop_check:
-        stop_check(graphs["model"], args.out)
+        stop_check(graphs["model"], args.out, before_run=reset)
         return 0
     print(f"Модель {model_name}, температура {cfg.agent.temperature:g}; реализации: {', '.join(impls)}; повторов: "
           f"{args.repeats}. Прогрев…", flush=True)
     warmup(graphs)
     records = run_series([t for t in TASKS if not wanted or t.id in wanted], impls, args.repeats,
                          model=model_name, temperature=cfg.agent.temperature, out_dir=args.out,
-                         resume=args.resume, graphs=graphs)
+                         resume=args.resume, graphs=graphs, before_run=reset)
     finish(records, meta, args.out, args.report)
     return 0
 
