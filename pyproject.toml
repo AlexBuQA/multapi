@@ -51,6 +51,8 @@ dependencies = [
     "docx2txt==0.9",                             # DocxReader из readers-file без него не работает
     # блок 5.5: PDF в ingestion (app/services/ingestion.py) — PyMuPDFReader, страница — документ
     "pymupdf==1.28.2",
+    # блок 6.1: get_current_time агента — zoneinfo; на Windows своей базы часовых поясов нет
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

@@ -2732,6 +2732,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "truststore" },
+    { name = "tzdata" },
     { name = "uvicorn" },
 ]
 
@@ -2792,6 +2793,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=9.0,<10.0" },
     { name = "tiktoken", specifier = ">=0.7,<1.0" },
     { name = "truststore", specifier = ">=0.10,<1.0" },
+    { name = "tzdata", specifier = ">=2024.1" },
     { name = "uvicorn", specifier = ">=0.30,<1.0" },
 ]
 provides-extras = ["tracing", "eval"]

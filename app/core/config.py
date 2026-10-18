@@ -481,6 +481,19 @@ DEFAULT_CHAT_SYSTEM_PROMPT = (
 )
 
 
+class AgentSettings(BaseModel):
+    """Наивный агент (блок 6.1): app/services/agent_naive.py. Переменные — с префиксом AGENT__.
+
+    Провайдер — тот же, что у сервиса (LLM__BASE_URL, ключ, прокси), модель — своя: агенту нужен
+    вызов инструментов (tool_calls), и не каждая модель его держит. По умолчанию — канон задания
+    gpt-5.4-mini (OpenAI; у OpenRouter — openai/gpt-5.4-mini); локально — qwen3:4b-instruct в Ollama:
+    llama3.2 (3B) часто пишет вызов инструмента текстом в ответе.
+    """
+
+    model: str | None = None                     # пусто — gpt-5.4-mini (agent_naive.DEFAULT_MODEL)
+    max_steps: int = Field(default=6, ge=1, le=20)   # guardrail: шагов цикла агента не больше
+
+
 class Settings(BaseSettings):
     model_config = ENV_CONFIG
 
@@ -586,6 +599,8 @@ class Settings(BaseSettings):
     rerank: RerankSettings = Field(default_factory=RerankSettings)
     # Блок 5.6: оценка RAG — судья RAGAS, golden dataset, результаты (RAGAS__*).
     ragas: RagasSettings = Field(default_factory=RagasSettings)
+    # Блок 6.1: наивный агент — модель с вызовом инструментов, лимит шагов (AGENT__*).
+    agent: AgentSettings = Field(default_factory=AgentSettings)
 
     @field_validator("log_level")
     @classmethod

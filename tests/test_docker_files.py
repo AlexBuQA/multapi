@@ -408,7 +408,9 @@ class TestSecrets(unittest.TestCase):
                      "PHOENIX_LLAMA_INDEX", "RAG__SOURCES_FALLBACK", "RAGAS__JUDGE_MODEL", "RAGAS__JUDGE_BASE_URL", "RAGAS__JUDGE_API_KEY",
                      "RAGAS__JUDGE_MAX_TOKENS", "RAGAS__JUDGE_TIMEOUT", "RAGAS__EMBEDDINGS_MODEL",
                      "RAGAS__EMBEDDINGS_BASE_URL", "RAGAS__CONCURRENCY", "RAGAS__GOLDEN_PATH", "RAGAS__RESULTS_DIR",
-                     "RAGAS__CACHE_ENABLED", "RAGAS__CACHE_DIR"):
+                     "RAGAS__CACHE_ENABLED", "RAGAS__CACHE_DIR",
+                     # блок 6.1
+                     "AGENT__MODEL", "AGENT__MAX_STEPS"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):

@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -26,6 +26,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 5.4 — Chunking и оптимизация качества:** golden dataset из 28 вопросов, три стратегии нарезки (fixed, recursive, semantic) в коллекциях `docs_fixed` / `docs_recursive` / `docs_semantic`, метрики Hit Rate@5, MRR@10, Recall@10 по документам и строже — по фрагменту с ответом, re-ranker `bge-reranker-v2-m3`, подбор `chunk_size`, `overlap` и `top-K` — см. раздел [«Блок 5.4»](#блок-54--chunking-и-оптимизация-качества) и [`docs/chunking_experiment.md`](docs/chunking_experiment.md).
 - **Блок 5.5 — Корпоративный RAG-ассистент:** корпус из 66 документов «Личного кабинета» в PDF, DOCX, HTML и Markdown (`data/<категория>/`), инкрементальная индексация `scripts/ingest.py` (IngestionPipeline + docstore, UPSERTS, `.failed`), метаданные из путей и самих документов, ответы с цитатами [1], [2] и флагом `confident`, score-guard «По базе не нашёл, могу эскалировать.», диалог с переписыванием follow-up, событие `sources` в SSE, загрузка документов `POST /documents/upload`, бот с debounce правок и источниками, весь стек — `docker compose up -d` — см. раздел [«Блок 5.5»](#блок-55--корпоративный-rag-ассистент) и [`docs/rag.md`](docs/rag.md).
 - **Блок 5.6 — Оценка качества и мониторинг RAG:** golden dataset через RAGAS `TestsetGenerator` с ручной вычиткой, `scripts/run_eval.py` — faithfulness, answer_relevancy, context_precision, context_recall (RAGAS 0.4, `ragas.metrics.collections`) и своя `has_citation` (`@discrete_metric`) с судьёй `qwen3:4b-instruct`, два A/B-эксперимента (нарезка, re-ranker), failure analysis по матрице retrieval vs generation; дерево спанов RAG в Phoenix (`LlamaIndexInstrumentor`) и `HallucinationEvaluator` на трейсах — см. раздел [«Блок 5.6»](#блок-56--оценка-качества-и-мониторинг-rag) и [`docs/rag_evaluation.md`](docs/rag_evaluation.md).
+- **Блок 6.1 — Что такое агент: цикл и компоненты:** наивный агент без фреймворка — `run_agent(task, max_steps=6)` в `app/services/agent_naive.py`: `for`-цикл вокруг Chat Completions, `tool_calls` → диспетчер по allowlist `DISPATCH` → `role: "tool"` обратно в `messages`, trace шагов (инструмент, аргументы, результат, токены, время) и CLI `--trace`. Три инструмента — поиск по базе знаний через RAG блока 5.5, текущее время и заглушка Telegram; пять задач предметной области с логами в `docs/agent-naive-traces/` — см. раздел [«Блок 6.1»](#блок-61--что-такое-агент-цикл-и-компоненты) и [`docs/agent_naive.md`](docs/agent_naive.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -3087,6 +3088,78 @@ python scripts/phoenix_hallucinations.py               # доля hallucinated, 
 | Финальная конфигурация зафиксирована в `config.py` / `.env` и совпадает с финальным CSV | конфигурация каждого прогона — в его JSON (`config`); финальная — значения по умолчанию `RagSettings` и пустые строки `.env.example` (recursive 512/64, 10 кандидатов, top-5, порог 0.5, re-ranker выключен, `RAG__SOURCES_FALLBACK=true`) — те же, что в `config` финального JSON |
 | Опционально: `HallucinationEvaluator` на трейсах, скриншот | `phoenix_hallucinations.py`; `test_hallucination_evaluator_labels_and_summary`. На Windows — 12 из 20 hallucinated (с разбором, почему доля завышена), метки в Phoenix — `docs/screenshots/phoenix_hallucination.png` |
 
+## Блок 6.1 — Что такое агент: цикл и компоненты
+
+Начало агентного слоя: агент без фреймворка, чтобы цикл «модель → инструмент → модель» был виден
+целиком. Цикл — один `for` вокруг Chat Completions. Модель либо отвечает, либо просит вызвать
+инструменты. Их результаты возвращаются ей как `role: "tool"`, предохранитель — `max_steps`.
+Разбор устройства, trace и пяти задач — [`docs/agent_naive.md`](docs/agent_naive.md).
+
+```mermaid
+flowchart LR
+    T["задача"] --> L["chat.completions.create<br/>tools=TOOLS"]
+    L -->|"tool_calls"| D{"DISPATCH"}
+    D --> F["search_knowledge_base · get_current_time ·<br/>send_telegram_message (заглушка)"]
+    D -->|"нет такого"| E["«Ошибка: …» модели"]
+    F --> L
+    E --> L
+    L -->|"текст"| A["answer, steps, trace"]
+    L -.->|"max_steps"| S["error"]
+```
+
+### Что сделано
+
+- **`app/services/agent_naive.py`** — `run_agent(task, max_steps=6) -> dict`: `for step in range(max_steps)`, один вызов `client.chat.completions.create(model=…, messages=…, tools=TOOLS)` на шаг. `response.choices[0].message` добавляется в `messages`, каждый `tool_call` идёт через диспетчер, результат возвращается как `{"role": "tool", "tool_call_id": …, "content": …}`. Возвращается `{"answer", "steps", "trace"}`, при исчерпании лимита — `answer: None` и `error`. Без LangGraph и агентных библиотек: цикл — openai SDK и stdlib, клиент — тот же `build_openai`, что у bare-metal RAG (прокси, сертификаты ОС, заголовки OpenRouter). Модуль — 97 строк вместе с CLI, `run_agent` — 23 строки. Инструменты вынесены в `app/tools/naive_tools.py`, как в референсе курса.
+- **Диспетчер `call_tool`** вызывает только имена из `DISPATCH`. Неизвестное имя, аргументы не JSON, не те поля, исключение в инструменте — всё это строка `Ошибка: …` для модели, а не `KeyError`; цикл продолжается.
+- **`app/tools/naive_tools.py`** — три инструмента, их JSON Schema (`TOOLS`) и allowlist (`DISPATCH`). В описании каждого — что инструмент делает и когда его вызывать.
+  - `search_knowledge_base(query)` — `RAGService.retrieve` блока 5.5 по коллекции `kb_docs` (score-guard, re-ranker по настройке) и первый фрагмент строкой `[billing/auto-renewal.docx, близость 0.71] …`. Если порог не прошёл ни один кандидат — «ничего не найдено» с близостью и порогом.
+  - `get_current_time(timezone="Europe/Moscow")` — `ZoneInfo`, ISO 8601.
+  - `send_telegram_message(chat_id, text)` — только `print("[TELEGRAM → …] …")`, Telegram API не вызывается.
+- **Trace** — запись на каждый вызов инструмента и на финальный ответ: `step`, `tool_name`, `tool_args` (исходный JSON модели), `tool_result` (200 символов), `llm_input_tokens` и `llm_output_tokens` из `response.usage`, `duration_ms` (`perf_counter`). `--trace` печатает trace в stdout; каждый вызов дополнительно пишется в лог (`logging.info`, JSON-лог сервиса в stderr).
+- **CLI:** `python -m app.services.agent_naive "<задача>" [--trace] [--max-steps N] [--model M]` печатает ответ или «Остановка: …». Коды выхода: 0 — ответ, 1 — `max_steps`, 2 — нет ключа, модель не запущена или ошибка провайдера.
+- **`scripts/run_naive_agent.py`** — одна задача (то же, что CLI) или `--suite`: пять задач «Личного кабинета» → `docs/agent-naive-traces/NN_<id>.json`.
+  - Задачи: успех, «нет данных», несуществующий инструмент, составная из шести подшагов, пишущее действие с провокацией.
+  - В логе: задача, модель, ответ или причина остановки, trace, отправленное в заглушку и сводка `diagnose` по trace — исход, инструменты, выдуманные имена, повторы вызовов, вызов текстом, токены, время.
+  - Перед первой задачей проверяет базу знаний. Домашняя папка в сообщениях об ошибках заменяется на `~`.
+- **Настройки:** `AgentSettings` (`AGENT__MODEL` — по умолчанию `gpt-5.4-mini`, `AGENT__MAX_STEPS` — 6) в `app/core/config.py` и `.env.example`. Зависимость `tzdata` — явно (`pyproject.toml`, `requirements.txt`, `uv.lock`): на Windows у `zoneinfo` нет своей базы часовых поясов, а раньше пакет приходил только транзитивно, через pandas.
+- **Тесты:** +42 в `tests/unit/test_agent_naive.py`, без сети.
+  - Цикл на подставном клиенте: happy path (поиск → отправка → ответ, содержимое `messages`, модель `gpt-5.4-mini`), выдуманный инструмент, кривой JSON, не те поля, исключение, параллельные вызовы, `max_steps`, обрезка результата, ответ без `usage`.
+  - Инструменты: поиск — настоящий `RAGService` над учебным корпусом в Qdrant `:memory:`; время в поясах; заглушка без сети; согласованность `TOOLS` и `DISPATCH` с сигнатурами; описания минимум из двух предложений.
+  - Требования к коду (нет `eval`/`exec`/`getattr`/`globals` — по AST, размер `run_agent`), CLI, `--suite` с логами, сбой провайдера посреди серии.
+
+### Проверка на Windows
+
+Qdrant с коллекцией `kb_docs` (блок 5.5), Ollama с `bge-m3` и `qwen3:4b-instruct`. В `.env` — `AGENT__MODEL=qwen3:4b-instruct`. Без этой строки агент попросит у Ollama `gpt-5.4-mini` и остановится с `NotFoundError`.
+
+```powershell
+pip install -r requirements.txt                        # tzdata — уже стоит (через pandas), теперь в списке явно
+python -m pytest -q                                    # 1427 passed (Qdrant не запущен — 1426 и 1 skipped)
+docker compose up -d qdrant
+python -m app.services.agent_naive "Найди в базе знаний, как отключить автопродление тарифа, и отправь эту инструкцию клиенту в чат 12345." --trace
+python scripts/run_naive_agent.py --suite              # пять задач → docs/agent-naive-traces/01_success.json … 05_write_provocation.json
+```
+
+### Результаты
+
+**Песочница (Linux).** Ollama недоступна: модель — подставной OpenAI-совместимый сервер, который отвечает `tool_calls` по сценарию; эмбеддинги тоже подставные. Поиск — настоящий `RAGService` над корпусом `data/` (102 фрагмента) в Qdrant. Проверялась механика, поведение модели этим не проверить.
+- **CLI:** задача 1 прошла за 3 шага (поиск → отправка → ответ) через настоящий клиент OpenAI SDK. В запросе третьего шага — `user`, `assistant` с `tool_calls`, `tool` с тем же `tool_call_id`, и снова `assistant` и `tool`. Заглушка напечатала `[TELEGRAM → 12345] …`, `--trace` — три записи.
+- **`--suite`:** все пять логов записаны. Выдуманный `get_user_balance` вернулся модели ошибкой, и цикл продолжился. Поиск по кругу и шесть подшагов остановились на `max_steps`. `diagnose` посчитал повторы, выдуманные имена и отправленные сообщения.
+- **Тесты:** `pytest` — 1422 passed и 5 skipped.
+
+**Windows (Ollama на CPU, `qwen3:4b-instruct`).** Заполняется по логам `docs/agent-naive-traces/` после прогона `--suite`.
+
+### Соответствие критериям блока 6.1
+
+| Критерий | Реализация |
+|---|---|
+| `app/services/agent_naive.py` с `run_agent(task, max_steps=6)`, ≤ ~80 строк, логика цикла ~25 | `run_agent` — 23 строки; модуль — 97 вместе с CLI и обработкой ошибок, инструменты и их описания — в `app/tools/naive_tools.py`. `test_agent_module_stays_small`, `test_default_max_steps_is_six` |
+| `DISPATCH` — явный словарь; нет `eval`, `exec`, `getattr(module, …)`, `globals()[…]` | `DISPATCH` в `naive_tools.py`; `test_no_eval_exec_getattr_globals` (AST трёх файлов), `test_dispatch_is_a_plain_dict_of_functions` |
+| Три tools с описанием в JSON Schema минимум по 2 предложения; Telegram API не вызывается | `TOOLS`; `test_every_description_has_at_least_two_sentences`, `test_tools_and_dispatch_describe_the_same_functions`, `test_send_telegram_message_never_touches_the_network` |
+| Неизвестный `call.name` → строка-ошибка модели, цикл продолжается | `call_tool`; `test_unknown_tool_is_an_error_for_the_model_not_a_crash`, `test_call_tool_turns_every_failure_into_a_string` |
+| `run_agent` возвращает `answer`, `steps`, `trace` и `error` в аварийных случаях | `test_happy_path_search_send_answer`, `test_max_steps_stops_the_endless_search` |
+| CLI печатает ответ или причину остановки и trace | `python -m app.services.agent_naive "<задача>" --trace`; `test_cli_prints_answer`, `test_cli_prints_stop_reason_and_trace`, `test_cli_module_runs` |
+| 5 задач предметной области; логи неудачных прогонов в `docs/agent-naive-traces/` | `scripts/run_naive_agent.py --suite`, `TASKS`; `test_five_tasks_cover_the_required_modes`, `test_suite_writes_a_log_per_task`. Логи и разбор — после прогона на Windows |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -3135,6 +3208,8 @@ LLM__MAX_RETRIES=2
 Для RAG (блоки 5.3–5.5): `RAG__DATA_DIR` и `RAG__COLLECTION` (корпус ассистента `data`, `kb_docs`), `RAG__LAB_DIR` / `RAG__LAB_COLLECTION` (учебный корпус), `RAG__DOCSTORE_DIR`, `RAG__INGEST_ON_START`, `RAG__UPLOAD_DIR` / `RAG__UPLOAD_MAX_MB`, `RAG__SCORE_THRESHOLD`, `RAG__SIMILARITY_TOP_K` / `RAG__CANDIDATES_TOP_K`, `RAG__CHAT`, `RAG__CONDENSE`, `RAG__SOURCES_FALLBACK` (блок 5.6), нарезка и re-ranker блока 5.4; у бота — `BOT_EDIT_INTERVAL`. Полный список — [`docs/rag.md`](docs/rag.md#настройки).
 
 Для оценки RAG (блок 5.6, только офлайн-скрипты): `RAGAS__JUDGE_MODEL` (пусто — `qwen3:4b-instruct`), `RAGAS__JUDGE_BASE_URL` / `RAGAS__JUDGE_API_KEY` (пусто — `LLM__*`; ключ OpenRouter — только в `.env`), `RAGAS__JUDGE_MAX_TOKENS`, `RAGAS__JUDGE_TIMEOUT`, `RAGAS__EMBEDDINGS_MODEL` (пусто — модель поиска), `RAGAS__CONCURRENCY`, `RAGAS__GOLDEN_PATH`, `RAGAS__RESULTS_DIR`, `RAGAS__CACHE_*`; для сервиса — `PHOENIX_LLAMA_INDEX` (пусто — `true`: спаны LlamaIndex в Phoenix).
+
+Для наивного агента (блок 6.1, только CLI): `AGENT__MODEL` (пусто — `gpt-5.4-mini`, канон задания; у OpenRouter — `openai/gpt-5.4-mini`, с Ollama — `qwen3:4b-instruct`) и `AGENT__MAX_STEPS` (пусто — 6). Провайдер, ключ и прокси — те же `LLM__*`, поиск — коллекция `RAG__COLLECTION`.
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 
