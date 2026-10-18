@@ -168,7 +168,9 @@ def test_llamaindex_builds_and_answers_with_numbered_sources():
     assert_contract(answer)
     assert answer["answer"].startswith("Лимит зависит от тарифа")
     assert answer["sources"][0]["file_name"] == "04_api.md"
-    assert not any(item["cited"] for item in answer["sources"])      # заглушка модели номеров не ставит
+    # заглушка модели номеров не ставит — строку «Источники» дописал сервис (блок 5.6, sources_fallback)
+    assert answer["answer"].endswith("\n\nИсточники: [1]")
+    assert [item["cited"] for item in answer["sources"]] == [True, False, False, False, False]
     prompt = service.llm.prompts[-1]
     assert system_prompt("Личный кабинет") in prompt         # русский промпт, а не английский по умолчанию
     assert "[1] (04_api.md)" in prompt and QUESTION in prompt   # нумерованный контекст для цитат
@@ -228,6 +230,41 @@ def test_service_prompt_is_the_measured_sources_variant():
     assert SOURCES_RULE in service[0].content and service[1].content.endswith(f"Ответ ({ANSWER_FORMAT}):")
 
 
+# ---------------------------------------------------------------- строка источников, если модель её забыла
+TEXTS = ["Смена номера телефона. Новый номер укажите в «Настройках профиля» и подтвердите кодом из СМС.",
+         "Не приходит SMS: проверьте номер в профиле и подождите 2 минуты, код можно запросить повторно.",
+         "Лимит запросов к API зависит от тарифа: «Старт» — 60, «Команда» — 300 в минуту."]
+
+
+@pytest.mark.parametrize(("reply", "expected", "added"), [
+    # ответ llama3.2 без строки «Источники» (baseline блока 5.6, raw_005) — номер по совпадению слов
+    ("Если SMS не приходит, проверьте номер в профиле и подождите 2 минуты.",
+     "Если SMS не приходит, проверьте номер в профиле и подождите 2 минуты.\n\nИсточники: [2]", 2),
+    ("Лимит зависит от тарифа: «Команда» — 300 запросов в минуту.\nИсточники:",          # пустая строка источников
+     "Лимит зависит от тарифа: «Команда» — 300 запросов в минуту.\n\nИсточники: [3]", 3),
+    ("Лимит — 300 запросов [3].", "Лимит — 300 запросов [3].", None),                     # ссылка уже есть
+    ("По базе не нашёл, могу эскалировать.", "По базе не нашёл, могу эскалировать.", None),   # отказ
+    ("Фикус поливают зимой раз в неделю.", "Фикус поливают зимой раз в неделю.", None),   # ответ не из фрагментов
+])
+def test_add_sources_line(reply, expected, added):
+    from app.services.rag_common import add_sources_line
+
+    assert add_sources_line(reply, TEXTS) == (expected, added)
+    assert add_sources_line(reply, []) == (reply, None)
+
+
+def test_llamaindex_sources_fallback_can_be_switched_off():
+    from log_capture import captured_logs, events
+
+    on = llama_rag(QdrantClient(":memory:")).build()
+    with captured_logs("INFO") as records:
+        answer = threaded(on.answer, QUESTION)
+    assert answer["answer"].endswith("Источники: [1]") and events(records, "rag_sources_added")[0]["source"] == 1
+    off = llama_rag(QdrantClient(":memory:"), sources_fallback=False).build()
+    answer = threaded(off.answer, QUESTION)
+    assert "Источники" not in answer["answer"] and not any(item["cited"] for item in answer["sources"])
+
+
 def test_llamaindex_reconnects_without_reindexing():
     client = QdrantClient(":memory:")
     embedder = TrigramEmbeddings()
@@ -259,6 +296,53 @@ def test_llamaindex_model_refusal_is_not_confident():
     service.llm.reply = "По базе не нашёл, могу эскалировать."
     answer = threaded(service.answer, QUESTION)
     assert (answer["answer"], answer["confident"], answer["sources"]) == (NO_ANSWER, False, [])
+
+
+def test_evaluate_inputs_gives_full_contexts_the_model_saw():
+    """Блок 5.6: для RAGAS — тот же ответ, что /rag/query, и полный текст фрагментов (не snippet по 200
+    символов), один поиск на вопрос, задержка в мс."""
+    service = llama_rag(QdrantClient(":memory:")).build()
+    service.llm.reply = "«Команда» — 300 запросов в минуту.\nИсточники: [1]"
+    result = threaded(service.evaluate_inputs, QUESTION)
+    answer = threaded(service.answer, QUESTION)
+    assert result["answer"] == answer["answer"] and result["confident"] is True
+    assert result["sources"] == answer["sources"] and result["top_score"] == answer["top_score"]
+    assert len(result["retrieved_contexts"]) == len(result["sources"]) == 5
+    assert result["retrieved_files"][0] == "04_api.md" == result["sources"][0]["file_name"]
+    for context, item in zip(result["retrieved_contexts"], result["sources"], strict=True):
+        assert " ".join(context.split()).startswith(item["snippet"][:50])     # тот же фрагмент, целиком
+    assert max(len(c) for c in result["retrieved_contexts"]) > 200
+    prompt = service.llm.prompts[0]
+    assert all(context[:80] in prompt for context in result["retrieved_contexts"])   # их и видела модель
+    assert isinstance(result["latency_ms"], int) and result["latency_ms"] >= 0
+
+
+def test_evaluate_inputs_score_guard_has_no_contexts():
+    service = llama_rag(QdrantClient(":memory:"), score_threshold=0.99).build()
+    result = threaded(service.evaluate_inputs, "Как часто поливать фикус зимой?")
+    assert (result["answer"], result["confident"], result["retrieved_contexts"], result["retrieved_files"]) == (
+        NO_ANSWER, False, [], [])
+    assert service.llm.prompts == []
+
+
+def test_rag_methods_are_llamaindex_spans():
+    """Блок 5.6: retrieve, answer и evaluate_inputs — спаны диспетчера LlamaIndex: с LlamaIndexInstrumentor
+    в Phoenix они — узлы дерева над retriever, embedding и LLM."""
+    from llama_index.core.instrumentation import get_dispatcher
+    from llama_index.core.instrumentation.span_handlers import SimpleSpanHandler
+
+    handler = SimpleSpanHandler()
+    root = get_dispatcher()
+    root.add_span_handler(handler)
+    try:
+        service = llama_rag(QdrantClient(":memory:")).build()
+        threaded(service.answer, QUESTION)
+    finally:
+        root.span_handlers.remove(handler)
+    names = [span.id_.split("-")[0] for span in handler.completed_spans]
+    assert "RAGService.answer" in names and "RAGService.retrieve" in names
+    by_name = {span.id_.split("-")[0]: span for span in handler.completed_spans}
+    assert by_name["RAGService.retrieve"].parent_id == by_name["RAGService.answer"].id_
 
 
 def test_llamaindex_refuses_collection_of_other_model_or_dimension():
@@ -465,6 +549,25 @@ async def test_rag_query_returns_answer_and_sources(rag_http):
                                   "source": "support/support-regulation_v2.3.pdf", "category": "support", "page": 2,
                                   "score": 0.62, "snippet": "Ошибка 429", "cited": True}
     assert holder["rag"].questions == ["Сколько запросов в минуту?"]
+
+
+def test_rag_query_root_span_has_masked_question_and_answer():
+    """Блок 5.6: в списке трейсов Phoenix у POST /rag/query — вопрос и ответ (как у /chat), без сырых PII."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.routers.rag import describe_root
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    with provider.get_tracer("test").start_as_current_span("POST /rag/query"):
+        describe_root("Мой email anna@example.com — как вернуть оплату?", "Срок — 14 дней.\nИсточники: [1]" * 20)
+    describe_root("вне span-а", "трейсинг выключен — ничего не делает")
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["input.value"] == "Мой email [EMAIL] — как вернуть оплату?"
+    assert span.attributes["output.value"].startswith("Срок — 14 дней.") and len(span.attributes["output.value"]) == 120
 
 
 @pytest.mark.parametrize(("error", "status", "code"), [

@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.5
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -25,6 +25,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 5.3 — Архитектура RAG с LlamaIndex:** корпус из 10 документов (`.md`, `.txt`, `.pdf`, `.docx`) в своей коллекции Qdrant `rag_block_03`, `RAGService` на компонентах LlamaIndex (`SimpleDirectoryReader`, `SentenceSplitter`, `QdrantVectorStore`, query engine) и та же цепочка без фреймворка, порог «не знаю», `POST /rag/query`, сравнение версий и прогон пяти вопросов — см. раздел [«Блок 5.3»](#блок-53--архитектура-rag-с-llamaindex) и [`docs/rag.md`](docs/rag.md).
 - **Блок 5.4 — Chunking и оптимизация качества:** golden dataset из 28 вопросов, три стратегии нарезки (fixed, recursive, semantic) в коллекциях `docs_fixed` / `docs_recursive` / `docs_semantic`, метрики Hit Rate@5, MRR@10, Recall@10 по документам и строже — по фрагменту с ответом, re-ranker `bge-reranker-v2-m3`, подбор `chunk_size`, `overlap` и `top-K` — см. раздел [«Блок 5.4»](#блок-54--chunking-и-оптимизация-качества) и [`docs/chunking_experiment.md`](docs/chunking_experiment.md).
 - **Блок 5.5 — Корпоративный RAG-ассистент:** корпус из 66 документов «Личного кабинета» в PDF, DOCX, HTML и Markdown (`data/<категория>/`), инкрементальная индексация `scripts/ingest.py` (IngestionPipeline + docstore, UPSERTS, `.failed`), метаданные из путей и самих документов, ответы с цитатами [1], [2] и флагом `confident`, score-guard «По базе не нашёл, могу эскалировать.», диалог с переписыванием follow-up, событие `sources` в SSE, загрузка документов `POST /documents/upload`, бот с debounce правок и источниками, весь стек — `docker compose up -d` — см. раздел [«Блок 5.5»](#блок-55--корпоративный-rag-ассистент) и [`docs/rag.md`](docs/rag.md).
+- **Блок 5.6 — Оценка качества и мониторинг RAG:** golden dataset через RAGAS `TestsetGenerator` с ручной вычиткой, `scripts/run_eval.py` — faithfulness, answer_relevancy, context_precision, context_recall (RAGAS 0.4, `ragas.metrics.collections`) и своя `has_citation` (`@discrete_metric`) с судьёй `qwen3:4b-instruct`, два A/B-эксперимента (нарезка, re-ranker), failure analysis по матрице retrieval vs generation; дерево спанов RAG в Phoenix (`LlamaIndexInstrumentor`) и `HallucinationEvaluator` на трейсах — см. раздел [«Блок 5.6»](#блок-56--оценка-качества-и-мониторинг-rag) и [`docs/rag_evaluation.md`](docs/rag_evaluation.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -107,6 +108,7 @@ multapi/
 │   ├── core/                # блок 3.4: config.py (Settings), exceptions.py (ошибки LLM); 3.7: llm_output.py;
 │   │                        #   3.8: charset.py (charset=utf-8 у JSON-ответов)
 │   ├── deps/providers.py    # блок 3.4: внедрение зависимостей
+│   ├── eval/metrics.py      # блок 5.6: судья RAGAS (llm_factory), пять метрик, has_citation, оценка строки
 │   ├── routers/             # блок 3.4: chat.py, models.py, health.py; 5.2: kb.py (GET /kb/search);
 │   │                        #   5.3: rag.py (POST /rag/query)
 │   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py; 5.2: kb.py; 5.3: rag.py
@@ -182,7 +184,14 @@ multapi/
 │   ├── load_to_pgvector.py  # блок 5.2, задача 7: та же база знаний в kb.documents (pgvector)
 │   ├── compare_pgvector.py  # блок 5.2, задача 7: Qdrant против pgvector — задержка, halfvec, фильтры
 │   ├── rag_compare.py       # блок 5.3: пять вопросов на LlamaIndex и bare-metal, строки кода
-│   └── chunking_experiment.py # блок 5.4: три стратегии, re-ranker, подбор параметров, итоговый .env
+│   ├── chunking_experiment.py # блок 5.4: три стратегии, re-ranker, подбор параметров, итоговый .env
+│   ├── generate_testset.py  # блок 5.6: golden dataset — TestsetGenerator на корпусе data/ → сырой CSV
+│   ├── build_golden.py      # блок 5.6: ручная вычитка (golden_review.yaml) → tests/eval/golden_dataset.json
+│   ├── run_eval.py          # блок 5.6: RAGAS-прогон → tests/eval/results/{дата}_{label}.csv и .json
+│   ├── eval_report.py       # блок 5.6: таблицы A/B, худшие ответы, пороги — из CSV и JSON прогонов
+│   ├── verify_eval.py       # блок 5.6: версии и импорты групп eval и tracing, --live — вызов судьи
+│   ├── trace_queries.py     # блок 5.6: 20+ вопросов в /rag/query — трейсы для Phoenix
+│   └── phoenix_hallucinations.py # блок 5.6: HallucinationEvaluator на спанах Phoenix, метки обратно
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
@@ -191,6 +200,8 @@ multapi/
 │   ├── vector_store.md      # блок 5.2: Qdrant — compose, коллекция, загрузка, метрика, фильтры, pgvector
 │   ├── rag.md               # блок 5.3: версии, коллекция, конвейер, LlamaIndex против bare-metal, 5 вопросов
 │   ├── chunking_experiment.md # блок 5.4: golden dataset, метрики, стратегии, re-ranker, подбор, итог
+│   ├── rag_evaluation.md    # блок 5.6: отчёт — конфигурация, golden, baseline, A/B, failure analysis
+│   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -212,10 +223,13 @@ multapi/
 │   │                        #   test_pgvector_store.py — SQL поиска и фильтров, ошибки, без базы;
 │   │                        #   5.3: test_rag.py — обе версии RAG на Qdrant :memory:, порог, /rag/query;
 │   │                        #   5.4: test_chunking.py — нарезка, метрики, golden dataset, re-ranker, эксперимент;
-│   │                        #   rag_fakes.py — подставные эмбеддинги и модель ответа для тестов RAG
+│   │                        #   rag_fakes.py — подставные эмбеддинги и модель ответа для тестов RAG;
+│   │                        #   5.6: test_rag_eval.py, test_eval_tools.py, ragas_fakes.py (судья без сети)
 │   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env (5.3: и RAG)
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── eval/retrieval_dataset.json # блок 5.4: golden dataset — 28 вопросов, нужные документы, цитаты ответа
+│   ├── eval/golden_dataset_raw.csv, golden_review.yaml, golden_dataset.json # блок 5.6: сырой, вычитка, итог
+│   ├── eval/results/        # блок 5.6: прогоны run_eval.py — {дата}_{label}.csv и .json; phoenix/ — галлюцинации
 │   ├── chat/                # блок 4.1: контракт хранилищ (JSON и Postgres), сервис, эндпоинты
 │   ├── bot/                 # блок 4.2: BackendClient (MockTransport), /ask через Dispatcher, команды, поток;
 │   │                        #   4.3: медиа, черновики, /notify; 4.4: admin-команды, оценки, рассылки
@@ -232,6 +246,7 @@ multapi/
 ├── var/chats/               # блок 4.1: история чатов в JSONL (CHAT_STORAGE_DIR, в git не попадает)
 ├── var/embeddings_cache.sqlite # блок 5.1: кеш эмбеддингов (EMBEDDINGS__CACHE_PATH, в git не попадает)
 ├── var/rerank_cache.sqlite  # блок 5.4: оценки re-ranker (RERANK__CACHE_PATH, в git не попадает)
+├── var/ragas_cache/, var/testset_kg.json # блок 5.6: кеш судьи, граф знаний генератора (в git не попадают)
 └── logs/                    # sample_run.log (демо-лог), tool_calls_sample.jsonl (реальный прогон блока 3.1),
                              # app.log, tool_calls.jsonl, llm_calls.jsonl (локальные прогоны, в git не попадают)
 ```
@@ -2966,6 +2981,112 @@ docker compose exec postgres psql -U multapi -d multapi -c "SELECT value, source
 | `docs/rag.md` — Mermaid, параметры chunking, threshold с пояснением | разделы «Схема: два контура», «Параметры», «Порог отказа» и «Калибровка (Windows)»: 0.5 — в зазоре 0.448–0.593 между посторонними вопросами и вопросами по базе |
 | `docs/data_inventory.md` — число документов, форматы, размер | сгенерирован `scripts/data_inventory.py`; `test_inventory_doc_matches_corpus` |
 
+## Блок 5.6 — Оценка качества и мониторинг RAG
+
+Качество RAG-ассистента блока 5.5 — числами, а не «глазами на пяти примерах»: golden dataset из 30+ проверенных вручную пар, RAGAS 0.4 (faithfulness, answer_relevancy, context_precision, context_recall и своя has_citation), два A/B-эксперимента по одному параметру с артефактами в `tests/eval/results/`, разбор худших ответов по матрице retrieval vs generation. Каждый ответ RAG — дерево спанов в Phoenix (поиск со scores, эмбеддинг, промпт и токены), галлюцинации на трафике вне golden — `HallucinationEvaluator`. Отчёт — [`docs/rag_evaluation.md`](docs/rag_evaluation.md).
+
+```mermaid
+flowchart LR
+    D["data/: 102 документа"] --> G["generate_testset.py<br/>TestsetGenerator"] --> R["golden_dataset_raw.csv"] --> V["вычитка<br/>golden_review.yaml → build_golden.py"] --> GD["golden_dataset.json"]
+    GD --> E["run_eval.py --label …<br/>ответы RAG → судья qwen3:4b-instruct"] --> C["results/{дата}_{label}.csv + .json"] --> T["eval_report.py: A/B, худшие, пороги"]
+    Q["trace_queries.py: 22 вопроса"] --> A["/rag/query"] --> P["Phoenix: retriever · embedding · LLM"] --> H["phoenix_hallucinations.py"]
+```
+
+### Что сделано
+
+- **Зависимости — необязательные группы `pyproject.toml`:** `eval` — `ragas>=0.4,<0.5`, `langchain-community<0.4`, `anthropic`, `pandas`, `arize-phoenix`, а также `rapidfuzz` (без него граф знаний `TestsetGenerator` падает на `ImportError`) и `graphql-core<3.3` (с 3.3 локальный сервер Phoenix не открывает трейс с аннотацией); `tracing` — `openinference-instrumentation-llama-index` 4.x и OpenTelemetry. Ветка 3.x, которую называет задание, импортирует модуль, которого нет в `llama-index-core` 0.14, — сервис падал при старте. Для pip — `requirements-eval.txt` и `requirements-tracing.txt` с версиями из `uv.lock`. В Docker-образ идёт только `tracing` (`ARG UV_EXTRAS="--extra tracing"`). Проверка одной командой — `scripts/verify_eval.py` (`--live` — ещё и судья вживую: faithfulness на примере и has_citation на восьми ответах с известным вердиктом).
+- **`app/eval/metrics.py`:** судья — `llm_factory("qwen3:4b-instruct", provider="openai", client=AsyncOpenAI(...))` в той же Ollama, что модель ответа (`RAGAS__JUDGE_*`; OpenRouter — с прокси, сертификатами ОС и `provider.require_parameters`), эмбеддинги для answer_relevancy — `ragas.embeddings.OpenAIEmbeddings` → `bge-m3`. Четыре метрики `ragas.metrics.collections` через `ascore(...).value` и `has_citation` — `@discrete_metric`, судья через `agenerate(prompt, response_model=CitationVerdict)`, промпт по-русски — вопрос из задания и уточнения для 4B-судьи (три вида ссылки списком, номер не проверять, «ссылка из письма» — не ссылка, ответ в тегах, сначала цитата `found`, потом вердикт), отпечаток промпта — в JSON прогона. `score_row` не падает на пустых полях: отказ score-guard — faithfulness NaN, precision и recall 0; нет эталона — NaN; сбой судьи — NaN и текст ошибки. Строку «Источники: [2][3]» faithfulness и answer_relevancy не видят (`strip_citations`): это разметка, а не утверждение. Кеш судьи — `DiskCacheBackend`, папка на каждую модель (ключ RAGAS не включает имя модели).
+- **Строка источников кодом (`RAG__SOURCES_FALLBACK`, по умолчанию `true`):** baseline показал has_citation 0.911 — в 4 ответах из 45 llama3.2 не пишет «Источники: [N]», хотя напоминание стоит прямо перед ответом. Если в ответе нет ни одной ссылки [N], `/rag/query` дописывает строку сам — номер фрагмента с наибольшей долей слов ответа (`rag_common.add_sources_line`, событие `rag_sources_added`); отказ и ответ не из фрагментов не трогаются. faithfulness и answer_relevancy строку источников не видят. В `run_eval.py` — флаг `--sources-fallback on|off` и ключ `sources_fallback` в JSON прогона.
+- **`RAGService.evaluate_inputs(question)`** — тот же путь, что `/rag/query`, за один поиск, плюс полный текст фрагментов, которые видела модель (`retrieved_contexts`), а не snippet по 200 символов, и задержка. `retrieve`, `answer` и `evaluate_inputs` — спаны диспетчера LlamaIndex (`@dispatcher.span`).
+- **`scripts/generate_testset.py`** — `TestsetGenerator` на документах корпуса (без `data/uploads/`), модель — тот же `llm_factory`, что у метрик (JSON-режим и проверка по схеме, кеш ответов): граф знаний — сущности документов и связи по ним (один вызов модели на документ; с `--abstract` — ещё краткие содержания и темы для обобщающих вопросов) сохраняется в `var/testset_kg.json`; сбой модели на одном документе граф не обрывает; синтезаторы single-hop 0.7 / multi-hop specific 0.3, четыре заданные персоны, «пиши по-русски» в промптах извлечения и генерации; сырой CSV с файлами-источниками эталонных контекстов.
+- **`scripts/build_golden.py`** — ручная вычитка: решение по каждой строке в `tests/eval/golden_review.yaml` (оставить; выбросить — с причиной; поправить вопрос или эталон — с пометкой) → `tests/eval/golden_dataset.json` (`user_input`, `reference`, `reference_contexts`, источники, что поправлено). Строка без решения, выброс без причины, повтор вопроса, меньше 30 пар — ошибка.
+- **`scripts/run_eval.py`** — одна команда: два прохода (ответы RAG по одному вопросу, затем судья — `asyncio.gather` с семафором; на CPU модель ответа и судья не вытесняют друг друга), журнал `{…}.partial.jsonl` и `--resume`, `--answers-only`; результат — `tests/eval/results/{YYYY-MM-DD_HHMM}_{label}.csv` (строка на вопрос) и `.json` (средние, задержка p50/p95, отказы, конфигурация RAG, судья, хеш golden, версии). Параметры эксперимента — флагами по одному (`--chunk-size`, `--top-k`, `--rerank` …). Корпус индексируется в коллекцию оценки `kb_docs_<нарезка>_<размер>_<перекрытие>` (baseline и rerank — `kb_docs_recursive_512_64`, chunk_128 — `kb_docs_recursive_128_64`): `kb_docs` сервиса оценка не читает и не пишет — там ещё и загрузки пользователей, которых нет в golden.
+- **`scripts/eval_report.py`** — таблицы для отчёта из CSV и JSON прогонов: A/B со сдвигом от baseline и пометкой несравнимых прогонов (другой судья, golden или промпт has_citation); проверки без судьи — hit@5 и MRR@5 по файлам, сколько разных файлов в пятёрке, маркеры [N] в ответе (сверка с has_citation) и доля ссылок на фрагмент эталона; N худших ответов по faithfulness — куда указывают ссылки и подсказка диагноза по матрице 2×2 (промах по файлу — раньше context_recall); проверка порогов чекпоинта 5 (`--check`, код 1 — порог не пройден).
+- **Phoenix:** `LlamaIndexInstrumentor` регистрируется в lifespan на тот же `TracerProvider`, что инструментация OpenAI SDK (блок 3.6), один раз и под флагом `PHOENIX_LLAMA_INDEX`; пакета нет — трейсинг работает как раньше, в логе `tracing_llama_index_unavailable`. Трейс `/rag/query` — дерево: `RAGService.answer` → `retrieve` → `VectorIndexRetriever` (10 кандидатов с `document.score`) → эмбеддинг вопроса, рядом LLM-спан с промптом и токенами. На корневой span — маскированные вопрос и ответ, как у `/chat`: список трейсов читается без раскрытия. `scripts/trace_queries.py` — 22 запроса (10 из golden, 12 свободных: иначе сформулированные, о продукте без ответа в базе, посторонние) и проверка, что Phoenix видит дерево; `scripts/phoenix_hallucinations.py` — спаны через `phoenix.client.Client().spans.get_spans_dataframe()`, `HallucinationEvaluator` с тем же судьёй на LLM-спанах, доля `hallucinated` на свободных вопросах, метки — аннотацией на трейс.
+- **Настройки:** `RagasSettings` (`RAGAS__*`) и `PHOENIX_LLAMA_INDEX` в `app/core/config.py` и `.env.example` (ключ судьи — только в `.env`); журнал незаконченного прогона — в `.gitignore`.
+- **Тесты:** +71.
+  - `tests/unit/test_rag_eval.py` (пропускается без группы eval) — пять метрик на подставном судье (`tests/unit/ragas_fakes.py`), ответ без строки «Источники», отказ score-guard, пустой ответ, нет эталона, сбой судьи на одной метрике и внутри `@discrete_metric`; судья и кеш из настроек; `run_eval.py` целиком — CSV и JSON, отказы, сбой RAG, `--answers-only` + `--resume` с конфигурацией из журнала, коллекция по нарезке, метка, промпт has_citation; `generate_testset.py` на подставной модели — граф сохраняется и берётся повторно, источники, «по-русски» в промптах один раз, без `CustomNodeFilter` и без кратких содержаний по умолчанию; модель, отвечающая текстом, — граф не сохраняется; сбой на одном документе граф не обрывает; негодный сохранённый граф строится заново; узлы по кругу по категориям, `--append` продолжает id и пропускает взятые документы; `verify_eval.py --live` — и судья, не видящий ссылок, даёт код 1;
+  - `tests/unit/test_eval_tools.py` — вычитка golden (правки, выбросы, все ошибки), `trace_queries.py` (golden + свободные, добор вопросами по базе, 429, сервис недоступен, проверка дерева в Phoenix), `phoenix_hallucinations.py` (ответы RAG из спанов, отказы score-guard, судья через `MockTransport`, аннотации на корневые спаны), `eval_report.py` (таблица A/B, пометка другого промпта has_citation, проверки без судьи, худшие, их ссылки и диагноз, пороги); golden в репозитории собран из актуальных сырого CSV и вычитки;
+  - в `test_rag.py` — `evaluate_inputs`, спаны диспетчера, вопрос и ответ на корневом span, строка источников (дописывается по совпадению слов, не трогает отказ, ответ со ссылкой и ответ не из фрагментов, выключается настройкой); в `test_observability.py` — регистрация `LlamaIndexInstrumentor` на том же провайдере, флаг и отсутствие пакета; в `test_docker_files.py` — tracing в образе, eval — нет, переменные `.env.example`.
+
+### Проверка на Windows
+
+Ollama с `llama3.2`, `bge-m3` и `qwen3:4b-instruct` (судья блоков 3.1 и 3.7); Qdrant с корпусом `kb_docs` (блок 5.5). Новые строки `.env.example` (`RAGAS__*`, `PHOENIX_LLAMA_INDEX`) можно перенести пустыми — значения по умолчанию подходят.
+
+```powershell
+pip install -r requirements.txt -r requirements-eval.txt -r requirements-tracing.txt
+python -m pytest -q                                    # 1385 passed (Qdrant не запущен — 1384 и 1 skipped)
+python scripts/verify_eval.py --live                   # «Всё на месте.», faithfulness 1.0, has_citation 8/8
+docker compose up -d qdrant
+python scripts/ingest.py data/                         # «0 changed» — корпус уже в kb_docs
+
+# 1. Golden dataset (на CPU — 2–3 ч: граф знаний ~100 вызовов судьи, вопросы — ~2 на пару; после сбоя — тот же запуск, готовое берётся из кеша)
+python scripts/generate_testset.py                     # → tests/eval/golden_dataset_raw.csv, граф — var/testset_kg.json
+#    коммит сырого CSV, затем вычитка tests/eval/golden_review.yaml и
+python scripts/build_golden.py                         # → tests/eval/golden_dataset.json, ≥ 30 пар
+#    недостающие категории — дописать пары по ещё не взятым документам (граф — из файла), вычитать, собрать заново
+python scripts/generate_testset.py --append --size 12 --single-hop-only
+
+# 2. Прогоны (около 10 вызовов судьи на вопрос; сначала — время на вопрос на двух вопросах)
+python scripts/run_eval.py --label smoke --limit 2 --out-dir var\eval-smoke
+docker compose stop app bot phoenix                    # на время прогонов: оценке нужны только Qdrant и Ollama
+python scripts/run_eval.py --label baseline            # около 7,5 ч; коллекция kb_docs_recursive_512_64
+python scripts/run_eval.py --label chunk_128 --chunk-size 128
+python scripts/run_eval.py --label rerank --rerank on  # нужен requirements-embeddings.txt (re-ranker блока 5.4)
+python scripts/run_eval.py --label final               # RAG__SOURCES_FALLBACK=true; с --rerank on, если выиграл B
+python scripts/eval_report.py --labels baseline chunk_128 rerank final
+python scripts/eval_report.py --check tests\eval\results\<…>_final.json   # пороги чекпоинта 5
+Select-String -Path "$env:LOCALAPPDATA\Ollama\server.log" -Pattern "truncating input"   # промпты судьи не обрезаны — пусто
+
+# 3. Phoenix: образ сервиса пересобирается (пакет трейсинга LlamaIndex); Ollama в это время свободна
+docker compose build app
+docker compose up -d
+python scripts/trace_queries.py                        # 22 ответа, «трейсов POST /rag/query 22 (ждали 22)»
+#    http://localhost:6006 → diploma-fastapi → Traces → POST /rag/query вопроса из golden → раскрыть дерево,
+#    выбрать retriever-спан → Win+Shift+S → docs\screenshots\phoenix_trace.png
+python scripts/phoenix_hallucinations.py               # доля hallucinated, метки — аннотацией в Phoenix
+#    Traces, колонка span annotations → docs\screenshots\phoenix_hallucination.png
+```
+
+Прогон прервался (сон ноутбука, Ctrl+C) — готовое не теряется: `python scripts/run_eval.py --resume tests\eval\results\<…>.partial.jsonl`.
+
+### Результаты
+
+**Песочница (Linux).** Ollama недоступна: эмбеддинги и модель ответа — подставные серверы (как в блоке 5.5), судья — подставной (`tests/unit/ragas_fakes.py`). Числа смысла не имеют — проверена механика.
+- **Зависимости:** `uv sync --extra eval --extra tracing` и `pip install -r requirements-eval.txt -r requirements-tracing.txt` в чистые окружения — `verify_eval.py`: «Всё на месте.»; без группы eval — понятные ошибки импорта, тесты RAGAS пропускаются. Окружение образа (`uv sync --frozen --no-dev --extra tracing`) — `LlamaIndexInstrumentor` есть, `ragas` нет.
+- **Генерация golden:** `generate_testset.py --size 12` на всём корпусе через настоящий клиент `llm_factory` и подставной OpenAI-совместимый сервер — запросы с `response_format: json_object`, 102 документа, сущности у всех, 196 связей по общим сущностям, 128 вызовов модели, 13 пар (RAGAS округляет доли вверх): single-hop 9, multi-hop specific 4, у каждой — файлы-источники. Повторная сборка графа — 0 вызовов на извлечение (кеш). С `--abstract` — 334 вызова и ещё 3 обобщающих вопроса. Модель, отвечающая текстом вместо JSON, — граф не сохраняется, код 2 и причина; сбой на одном документе — граф строится без него.
+- **`run_eval.py`:** baseline и `--chunk-size 128` (коллекция `kb_live_recursive_128_64`, 352 фрагмента вместо 102) — CSV и JSON с разными timestamp; отказ score-guard — NaN, а не падение; прерванный прогон продолжен `--resume`; `eval_report.py` собрал таблицу A/B и разбор худших.
+- **Phoenix** (локальный сервер 20.3.0, проект песочницы): `trace_queries.py` — 22 ответа, в Phoenix 22 трейса `POST /rag/query`, retriever-спаны со score у всех 22, LLM-спаны с токенами, эмбеддинги; в списке трейсов — вопрос и ответ; `phoenix_hallucinations.py` — 18 ответов модели оценены, 4 отказа score-guard отдельно, метки видны колонкой в списке трейсов. Найдена ошибка Phoenix: с `graphql-core` 3.3 трейс с аннотацией не открывался — в группе eval `graphql-core<3.3`.
+- **Тесты:** `pytest` — 1380 passed и 5 skipped (Presidio не установлен, Qdrant не запущен, golden в песочнице не собран), с `-W error` тоже.
+
+**Windows (Ollama на CPU).**
+- **Установка:** `pip install -r requirements-eval.txt -r requirements-tracing.txt` — версии как в `uv.lock`, `graphql-core` 3.2.13; `pytest` — 1366 passed (первая версия архива, без четырёх тестов генератора).
+- **`verify_eval.py --live`:** «Всё на месте.»; faithfulness 1.0 за 105 с (два вызова `qwen3:4b-instruct`), has_citation `yes` за 9 с, эмбеддинги — 1024. Судья работает, но на этом CPU один вызов с длинным ответом — около минуты: это и определяет время генерации и прогонов.
+- **Генерация, первая версия:** через `LlamaIndexLLMWrapper` (без JSON-режима) каждый вызов `SummaryExtractor` падал с `Invalid json output` — модель отвечала кратким содержанием простым текстом; за 1,5 ч — 56 из 99 документов и ни одного результата, прогон остановлен. Генератор переведён на `llm_factory` (JSON-режим), граф сокращён до сущностей, сбой одного документа больше не обрывает граф (`docs/rag_evaluation.md`, «Подводные камни»).
+- **Генерация 1:** граф — сущности у всех 102 документов, 405 связей, 25 мин; 40 пар (single-hop 28, multi-hop 12) — всего 131 мин, сбоев нет. Вычитка: оставлено 34, поправлено 23 (опечатки и смесь алфавитов, украинский, вопросы о номере статьи и дате обновления, испорченные числа), выброшено 6 (вопросы о метаданных, дубли), выдуманный эталон — один. Single-hop шёл по порядку файлов и покрыл только account, api и billing — генератор теперь ставит документы по кругу по категориям, остальные категории добираются `--append`. Вычитка нашла дефект индексации 5.5: `MarkdownReader` теряет «<ключ>» в «Authorization: Bearer <ключ>».
+- **Генерация 2:** `--append --size 12 --single-hop-only` — граф из файла, 49 ещё не взятых документов, 12 пар по 9 категориям за 15 мин. Вычитка: оставлено 11, поправлено 9, выброшена 1. **Golden — 45 пар** (single-hop 36, multi-hop 9) по всем 11 категориям, поправлено 32 из 52 сырых.
+- **Замер (smoke, 2 вопроса):** ответ RAG — 40 с, судья — около 7,5 мин на вопрос (две строки параллельно — 15 мин на пару); прогон на 45 вопросах — около 6 ч. faithfulness, context_precision и context_recall — 1.0 у обоих ответов, answer_relevancy — 0.80 и 0.92. has_citation у первого — «no», хотя в ответе «Источники: [2][5]»: ошибка судьи. `verify_eval.py --live` теперь проверяет судью на ответах с известным вердиктом. Вторая версия промпта (примеры маркеров, ответ в тегах) — маркеры верно, но «согласно разделу 2.4» и имя файла — «no», 4 из 6; третья — три вида ссылки списком, оговорка про «ссылку из письма» и поле `found` (цитата до вердикта), проверка — на восьми ответах. Вопрос из задания в промпте — дословно во всех версиях. Smoke шёл по `kb_docs`, где лежат и загрузки пользователей, — у оценки теперь своя коллекция.
+- **Baseline** (`2026-10-12_2147_baseline`, 21 мин ответов и 7,2 ч судьи): faithfulness 0.902, answer_relevancy 0.791, context_precision 0.909, context_recall 1.000, has_citation 0.911, задержка 27 с (p95 34 с). Пороги faithfulness и answer_relevancy пройдены, has_citation — нет: четыре ответа без строки «Источники», судья совпал с регулярным выражением на всех 45. Поиск — фрагмент эталона среди пяти у 44 из 45, MRR@5 0.919; провалы — в генерации (числа из соседнего фрагмента, придуманные кнопки, половина двойного вопроса); ссылки на фрагмент эталона — у 18 из 41 ответа со ссылками. Сбоев судьи — 3 оценки из 225. Разбор — `docs/rag_evaluation.md`, разделы 3 и 7.
+- **Эксперимент A** (`2026-10-13_0644_chunk_128`, `chunk_size` 512 → 128, 350 фрагментов вместо 102): faithfulness 0.787 (−0.116), context_precision 0.705 (−0.204), context_recall 0.737 (−0.263), answer_relevancy 0.791 (та же), has_citation 0.978 (+0.067), задержка 14 с вместо 27. Мелкий фрагмент без ответа выигрывает поиск (заголовок или вопрос из FAQ), фрагменты начинаются с середины фразы, в пятёрке 3.3 разных файла вместо 4.8. Решение — оставить 512; разбор — `docs/rag_evaluation.md`, раздел 4.
+- **Эксперимент B** (`2026-10-13_1439_rerank`, re-ranker `bge-reranker-v2-m3` выкл → вкл): faithfulness 0.911 (+0.009), answer_relevancy 0.798 (+0.007), context_precision 0.939 (+0.029), context_recall 1.000, has_citation 0.933 (+0.022), задержка 46,5 с вместо 27. Поиск лучше — фрагмент эталона в пятёрке у 45 из 45, MRR@5 0.948, исправлен ответ raw_014; метрики ответа — в пределах шума судьи. Решение — не включать: +19 с на ответ и `torch` в образе ради сдвига меньше 0.05; разбор — `docs/rag_evaluation.md`, раздел 5.
+- **Финальная конфигурация** (`2026-10-14_0056_final`) — baseline (recursive 512/64, re-ranker выключен) и строка источников `RAG__SOURCES_FALLBACK=true`: faithfulness 0.868, answer_relevancy 0.792, context_precision 0.909, context_recall 1.000, has_citation 1.000 — `eval_report.py --check`: все три порога пройдены. faithfulness ниже baseline на 0.03 — шум генерации (где текст ответа совпал, совпали и оценки). Задержка в JSON — 53,6 с из-за нагрузки машины в ту ночь; повторный замер `--answers-only` днём — 28,4 с (p95 36,4), как у baseline. Раздел 6 отчёта.
+- **Phoenix** (18.10): образ сервиса собрался за 87 с; `trace_queries.py` — 22 ответа из 22, в Phoenix 22 трейса `POST /rag/query`, 229 спанов, retriever со score — 21, LLM с токенами — 40, embedding — 62; дерево — `docs/screenshots/phoenix_trace.png`. `phoenix_hallucinations.py` — оценено 20 ответов (2 отказа score-guard отдельно), hallucinated 12 (60 %): на свободных 6 из 10, на golden 6 из 10; метки — колонкой в списке трейсов, `docs/screenshots/phoenix_hallucination.png`. Доля завышена: 3 из 12 — отказы модели («могу эскалировать» судья счёл неподтверждённым утверждением), а на golden судья Phoenix расходится с RAGAS faithfulness (у четырёх из шести «hallucinated» faithfulness 1.0) — разбор в отчёте.
+
+### Соответствие критериям блока 5.6
+
+| Критерий | Реализация |
+|---|---|
+| `golden_dataset.json` — ≥ 30 пар, каждая прошла ручную вычитку (коммит с правками после автогенерации) | `generate_testset.py` → `golden_dataset_raw.csv` (коммит) → `golden_review.yaml` + `build_golden.py` → `golden_dataset.json` (коммит); без решения по каждой строке и без 30 пар JSON не собирается; `test_build_golden_*`, `test_committed_golden_matches_raw_and_review`. Итог — 45 пар из 52 сырых, поправлено 32, коммиты сырого CSV и обеих вычиток |
+| `run_eval.py` — одна команда, читает golden, пишет `results/{timestamp}_{label}.csv`, не падает на пустых полях | `python scripts/run_eval.py --label baseline`; `test_run_eval_writes_csv_and_json` (отказ, сбой RAG, пустой вопрос), `test_score_guard_refusal_does_not_crash`, `test_empty_response_gives_nan_without_judge_calls` |
+| Пять метрик: четыре из `ragas.metrics.collections` и `has_citation` через `@discrete_metric` | `app/eval/metrics.py` (`build_metrics`, `make_has_citation`, `score_row`, `eval_row`); `test_score_row_good_answer_has_all_five_metrics`, `test_has_citation_discrete_metric` |
+| Phoenix на `localhost:6006` из docker compose, 20+ трейсов LlamaIndex с деревом (retriever, LLM, embedding) | сервис `phoenix` в `compose.yaml` (том `phoenix-data`), `LlamaIndexInstrumentor` в lifespan под `PHOENIX_LLAMA_INDEX`, `${PHOENIX_COLLECTOR_ENDPOINT}/v1/traces`; `trace_queries.py` — 22 запроса и проверка дерева; `test_llama_index_instrumented_on_same_provider`, `test_trace_queries_checks_tree_in_phoenix`. На Windows — 22 трейса, дерево — `docs/screenshots/phoenix_trace.png` |
+| ≥ 3 CSV: baseline, эксперимент A, эксперимент B, разные timestamp | `--label baseline`, `--label chunk_128 --chunk-size 128`, `--label rerank --rerank on`. Baseline — `2026-10-12_2147_baseline.csv`, A — `2026-10-13_0644_chunk_128.csv`, B — `2026-10-13_1439_rerank.csv`, финальный — `2026-10-14_0056_final.csv` |
+| Финальные метрики: faithfulness > 0.7, answer_relevancy > 0.7, has_citation > 0.95 — или честные «известные проблемы» | `eval_report.py --check` по `2026-10-14_0056_final.json`: faithfulness 0.868, answer_relevancy 0.792, has_citation 1.000 — пройдены; известные проблемы — раздел 8 отчёта |
+| В отчёте — две таблицы A/B, финальная конфигурация и «беру вариант X, потому что …» | `docs/rag_evaluation.md`, разделы 4–6, таблицы — `eval_report.py`. Разделы 4 (A, «оставляю 512») и 5 (B, «не беру») готовы, раздел 6 — «беру baseline со строкой источников, потому что …» и числа финального прогона |
+| Failure analysis — 3–5 примеров по матрице retrieval vs generation | раздел 7: пять разборов baseline — три клетки матрицы из четырёх (четвёртая на baseline пуста); `eval_report.py --worst`, `test_eval_report_worst_*` |
+| Финальная конфигурация зафиксирована в `config.py` / `.env` и совпадает с финальным CSV | конфигурация каждого прогона — в его JSON (`config`); финальная — значения по умолчанию `RagSettings` и пустые строки `.env.example` (recursive 512/64, 10 кандидатов, top-5, порог 0.5, re-ranker выключен, `RAG__SOURCES_FALLBACK=true`) — те же, что в `config` финального JSON |
+| Опционально: `HallucinationEvaluator` на трейсах, скриншот | `phoenix_hallucinations.py`; `test_hallucination_evaluator_labels_and_summary`. На Windows — 12 из 20 hallucinated (с разбором, почему доля завышена), метки в Phoenix — `docs/screenshots/phoenix_hallucination.png` |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -3011,7 +3132,9 @@ LLM__MAX_RETRIES=2
 
 Для production-обвязки (блок 4.4): `ADMIN_TOKEN` (заголовок `X-Admin-Token` admin API; тот же токен у бота для `/stats`, `/users`, `/broadcast` и рассылок), `MODERATION__ENABLED`, `MODERATION__KEYWORDS_FILE`, `MODERATION__OPENAI_ENABLED` / `MODERATION__OPENAI_API_KEY` / `MODERATION__OPENAI_MODEL` / `MODERATION__THRESHOLDS` / `MODERATION__FAIL_CLOSED`; у бота — `BOT_BROADCAST_POLL`.
 
-Для RAG (блоки 5.3–5.5): `RAG__DATA_DIR` и `RAG__COLLECTION` (корпус ассистента `data`, `kb_docs`), `RAG__LAB_DIR` / `RAG__LAB_COLLECTION` (учебный корпус), `RAG__DOCSTORE_DIR`, `RAG__INGEST_ON_START`, `RAG__UPLOAD_DIR` / `RAG__UPLOAD_MAX_MB`, `RAG__SCORE_THRESHOLD`, `RAG__SIMILARITY_TOP_K` / `RAG__CANDIDATES_TOP_K`, `RAG__CHAT`, `RAG__CONDENSE`, нарезка и re-ranker блока 5.4; у бота — `BOT_EDIT_INTERVAL`. Полный список — [`docs/rag.md`](docs/rag.md#настройки).
+Для RAG (блоки 5.3–5.5): `RAG__DATA_DIR` и `RAG__COLLECTION` (корпус ассистента `data`, `kb_docs`), `RAG__LAB_DIR` / `RAG__LAB_COLLECTION` (учебный корпус), `RAG__DOCSTORE_DIR`, `RAG__INGEST_ON_START`, `RAG__UPLOAD_DIR` / `RAG__UPLOAD_MAX_MB`, `RAG__SCORE_THRESHOLD`, `RAG__SIMILARITY_TOP_K` / `RAG__CANDIDATES_TOP_K`, `RAG__CHAT`, `RAG__CONDENSE`, `RAG__SOURCES_FALLBACK` (блок 5.6), нарезка и re-ranker блока 5.4; у бота — `BOT_EDIT_INTERVAL`. Полный список — [`docs/rag.md`](docs/rag.md#настройки).
+
+Для оценки RAG (блок 5.6, только офлайн-скрипты): `RAGAS__JUDGE_MODEL` (пусто — `qwen3:4b-instruct`), `RAGAS__JUDGE_BASE_URL` / `RAGAS__JUDGE_API_KEY` (пусто — `LLM__*`; ключ OpenRouter — только в `.env`), `RAGAS__JUDGE_MAX_TOKENS`, `RAGAS__JUDGE_TIMEOUT`, `RAGAS__EMBEDDINGS_MODEL` (пусто — модель поиска), `RAGAS__CONCURRENCY`, `RAGAS__GOLDEN_PATH`, `RAGAS__RESULTS_DIR`, `RAGAS__CACHE_*`; для сервиса — `PHOENIX_LLAMA_INDEX` (пусто — `true`: спаны LlamaIndex в Phoenix).
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 

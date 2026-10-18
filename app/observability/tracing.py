@@ -16,6 +16,13 @@ OpenAI SDK (OpenInference). После этого каждый chat.completions.
 - без PHOENIX_COLLECTOR_ENDPOINT трейсинг выключен: локальный uvicorn и тесты не шлют
   спаны в несуществующий Phoenix. В compose.yaml переменная задана.
 
+Блок 5.6: тот же TracerProvider получает LlamaIndexInstrumentor (OpenInference). RAG тогда виден
+деревом: POST /rag/query -> RAGService.answer -> RAGService.retrieve -> retriever (найденные фрагменты
+и их близость) -> embedding (вектор вопроса), и рядом LLM-спан с промптом и токенами. Регистрация —
+один раз, в lifespan; флаг PHOENIX_LLAMA_INDEX (по умолчанию включён). Пакета
+openinference-instrumentation-llama-index нет (локальный uvicorn без requirements-tracing.txt) —
+трейсинг работает, как в блоке 3.6, только без спанов LlamaIndex.
+
 FastAPI начиная с 0.142 сама пишет span на каждый HTTP-запрос, как только настроен
 TracerProvider. Он становится корнем трейса: POST /chat -> llm.chat -> ChatCompletion.
 Настройки — в fastapi_telemetry(): без healthcheck-ов (иначе каждые 15 с в Phoenix
@@ -64,7 +71,17 @@ def fastapi_telemetry() -> TelemetryConfig:
     }
 
 
-def setup_tracing(project_name: str = "diploma-fastapi", endpoint: str | None = None) -> TracerProvider | None:
+def llama_index_instrumentor() -> Any | None:
+    """LlamaIndexInstrumentor или None, если пакета нет (группа tracing не установлена)."""
+    try:
+        from openinference.instrumentation.llama_index import LlamaIndexInstrumentor
+    except ImportError:
+        return None
+    return LlamaIndexInstrumentor()
+
+
+def setup_tracing(project_name: str = "diploma-fastapi", endpoint: str | None = None, *,
+                  llama_index: bool = True) -> TracerProvider | None:
     """Включает трейсинг; возвращает TracerProvider или None, если Phoenix не настроен."""
     endpoint = endpoint or os.environ.get("PHOENIX_COLLECTOR_ENDPOINT")
     if not endpoint:
@@ -80,7 +97,14 @@ def setup_tracing(project_name: str = "diploma-fastapi", endpoint: str | None = 
     instrumentor = OpenAIInstrumentor()
     if not instrumentor.is_instrumented_by_opentelemetry:
         instrumentor.instrument(tracer_provider=tracer_provider)
-    log.info("tracing_enabled", endpoint=traces_endpoint(endpoint), project=project_name)
+    llama = llama_index_instrumentor() if llama_index else None
+    if llama is not None and not llama.is_instrumented_by_opentelemetry:
+        llama.instrument(tracer_provider=tracer_provider)
+    if llama_index and llama is None:
+        log.warning("tracing_llama_index_unavailable", reason="нет openinference-instrumentation-llama-index",
+                    hint="pip install -r requirements-tracing.txt")
+    log.info("tracing_enabled", endpoint=traces_endpoint(endpoint), project=project_name,
+             llama_index=llama is not None)
     return tracer_provider
 
 
@@ -89,4 +113,7 @@ def shutdown_tracing(tracer_provider: TracerProvider | None) -> None:
     if tracer_provider is None:
         return
     OpenAIInstrumentor().uninstrument()
+    llama = llama_index_instrumentor()
+    if llama is not None and llama.is_instrumented_by_opentelemetry:
+        llama.uninstrument()
     tracer_provider.shutdown()

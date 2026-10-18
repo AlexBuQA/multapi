@@ -1,0 +1,12 @@
+# Блок 5.6: трейсинг RAG на LlamaIndex в Phoenix — LlamaIndexInstrumentor (app/observability/tracing.py).
+# В Docker-образе есть (группа tracing в pyproject.toml, аргумент сборки UV_EXTRAS в Dockerfile); здесь —
+# для локального uvicorn с Phoenix из compose (PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:6006).
+# Без этих пакетов сервис работает, в Phoenix остаются спаны /chat блока 3.6.
+#
+#   pip install -r requirements-tracing.txt
+#
+# Версии — проверенные, как в uv.lock.
+# 4.x, а не 3.x из задания: 3.3.3 не работает с llama-index-core 0.14 (нет llama_index.core.base.agent)
+openinference-instrumentation-llama-index==4.5.4
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp==1.45.1

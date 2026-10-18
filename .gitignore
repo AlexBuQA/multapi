@@ -41,3 +41,6 @@ certs/
 # прочитать (<имя>.failed) — данные стенда, не репозитория
 data/uploads/
 data/**/*.failed
+
+# Блок 5.6: журнал незаконченного прогона scripts/run_eval.py (после успешного прогона удаляется сам)
+tests/eval/results/*.partial.jsonl

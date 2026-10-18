@@ -9,16 +9,22 @@ POST /rag/query — ответ по базе знаний через RAG на Ll
 
 Вопрос проходит ту же проверку входа, что и /chat (блок 3.8): длина, скрытые символы,
 закодированные вставки, шаблоны инъекций.
+
+Блок 5.6: вопрос и ответ — на корневой span запроса, как у /chat (блок 3.6): по ним Phoenix заполняет
+колонки input/output в списке трейсов, и трейсы разных вопросов видно без раскрытия. Только
+маскированный текст длиной, как в логе; полный — в спанах LlamaIndex под RAGService.answer.
 """
 from __future__ import annotations
 
 import asyncio
 
 from fastapi import APIRouter
+from opentelemetry import trace
 
 from app.chat.domain import RequestError
 from app.deps.providers import LimiterDep, RagDep, SettingsDep
 from app.observability.logging import get_logger
+from app.observability.pii import PREVIEW_CHARS, redact_pii
 from app.schemas.rag import RagAnswer, RagQuery
 from app.services import embeddings
 from app.services.rag_common import RAGError, RAGLLMError, RAGNotIndexed, RAGUnavailable
@@ -73,4 +79,14 @@ async def rag_query(body: RagQuery, rag: RagDep, limiter: LimiterDep, settings: 
     log.info("rag_answered", top_score=result["top_score"], confident=result["confident"],
              sources=[s["source"] for s in result["sources"]],
              cited=[s["id"] for s in result["sources"] if s["cited"]])
+    describe_root(question, result["answer"])
     return RagAnswer(**result)
+
+
+def describe_root(question: str, answer: str) -> None:
+    """Маскированные вопрос и ответ — на span HTTP-запроса (его создаёт FastAPI, если трейсинг включён)."""
+    root = trace.get_current_span()
+    if not root.is_recording():
+        return
+    root.set_attribute("input.value", redact_pii(question)[:PREVIEW_CHARS])
+    root.set_attribute("output.value", redact_pii(answer)[:PREVIEW_CHARS])

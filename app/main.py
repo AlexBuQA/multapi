@@ -120,7 +120,8 @@ log = get_logger()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = get_settings()
     # Трейсинг — до создания клиента OpenAI, чтобы инструментация точно применилась.
-    app.state.tracer_provider = setup_tracing(cfg.phoenix_project_name, cfg.phoenix_collector_endpoint)
+    app.state.tracer_provider = setup_tracing(cfg.phoenix_project_name, cfg.phoenix_collector_endpoint,
+                                              llama_index=cfg.phoenix_llama_index)
     proxy = proxy_for(cfg.llm.base_url, cfg.llm.proxy_url)
     if proxy:
         log.info("llm_proxy_enabled", proxy=proxy_display(proxy), base_url=cfg.llm.base_url or "https://api.openai.com/v1")
