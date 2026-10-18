@@ -502,6 +502,7 @@ class AgentSettings(BaseModel):
     max_revisions: int = Field(default=2, ge=0, le=2)             # REVISE критика за один запуск
     premium_model: str | None = None             # пусто — та же, что AGENT__MODEL
     critic_model: str | None = None              # пусто — та же, что AGENT__MODEL
+    final_check: bool = True                     # доработка после 6.2: финальный ответ против trace
 
 
 class Settings(BaseSettings):

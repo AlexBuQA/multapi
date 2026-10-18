@@ -1,0 +1,48 @@
+[
+  {
+    "task_id": "compose_kb_send",
+    "agent": "react",
+    "steps": 3,
+    "revisions": 0,
+    "final_checks": 0,
+    "tokens": {
+      "prompt_tokens": 5008,
+      "completion_tokens": 195,
+      "total_tokens": 5203
+    },
+    "llm_calls": 5,
+    "tools": [
+      "search_knowledge_base",
+      "send_telegram_message"
+    ],
+    "check": {
+      "correct": true,
+      "why": "в чат 12345 ушёл срок 3 дня"
+    },
+    "error": null,
+    "wall_ms": 233592.4
+  },
+  {
+    "task_id": "compose_time_kb_send",
+    "agent": "react",
+    "steps": 4,
+    "revisions": 1,
+    "final_checks": 1,
+    "tokens": {
+      "prompt_tokens": 6618,
+      "completion_tokens": 282,
+      "total_tokens": 6900
+    },
+    "llm_calls": 6,
+    "tools": [
+      "get_current_time",
+      "search_knowledge_base"
+    ],
+    "check": {
+      "correct": false,
+      "why": "в чат 999 не ушла дата 01.11.2026 (сообщений: 0)"
+    },
+    "error": null,
+    "wall_ms": 200474.2
+  }
+]

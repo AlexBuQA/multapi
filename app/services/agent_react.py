@@ -13,7 +13,12 @@ ReAct-агент с лимитами и self-reflection (блок 6.2) — ря�
 - критик (Reflexion-light): после каждого observation — отдельный вызов модели с вердиктом «OK» или
   «REVISE: <причина>». REVISE — системная приписка с критикой к следующей итерации и премиум-модель на
   этот шаг; ревизий не больше max_revisions (2) за запуск, счётчик между итерациями не сбрасывается;
-- аргументы сверяются со строгой схемой инструмента (app/tools/react_tools.py) до вызова функции.
+- аргументы сверяются со строгой схемой инструмента (app/tools/react_tools.py) до вызова функции;
+- проверка финального ответа по trace (доработка после блока 6.2, final_check): задача просит отправить
+  сообщение в чат N, а успешного send_telegram_message в этот чат не было, или ответ говорит
+  «отправлено» без отправки — ответ не отдаётся, а уходит на доработку припиской «Проверка ответа» (ролью
+  user: system-сообщение Ollama уносит в начало промпта). Проверка —
+  правило без модели и без токенов; она тратит тот же счётчик ревизий, что и критик (не больше 2 за запуск).
 
 Токены каждого вызова (и критика) складываются в usage — он возвращается с ответом и пишется в лог.
 
@@ -70,6 +75,10 @@ CRITIC_PROMPT = (
 )
 SKIPPED = "Не выполнено: за шаг вызывается ровно один инструмент. Если он нужен — вызови его на следующем шаге."
 VERDICT = re.compile(r"\b(REVISE|OK)\b\W*(.*)", re.IGNORECASE | re.DOTALL)
+SEND_REQUEST = re.compile(r"\b(отправь|отправьте|напиши|напишите|пришли|пришлите|сообщи|сообщите)\b", re.IGNORECASE)
+CHAT_ID = re.compile(r"\bчат[еау]?\s*(?:№\s*)?(-?\d+)", re.IGNORECASE)
+SENT_CLAIM = re.compile(r"\b(отправлен[оаы]?|отправил[аи]?|отослал[аи]?|доставлен[оаы]?)\b", re.IGNORECASE)
+NOT_SENT = re.compile(r"\bне\s+(?:\w+\s+){0,2}(отправ|отосл|достав)", re.IGNORECASE)
 
 
 class IterationTimeout(Exception):
@@ -125,6 +134,40 @@ def parse_verdict(text: str) -> tuple[str, str]:
     return "REVISE", (lines[0].strip() if lines else "") or "без причины"
 
 
+def sent_chats(trace: list[dict[str, Any]]) -> list[str]:
+    """chat_id успешных вызовов send_telegram_message по trace (ошибка схемы или исключение — не отправка)."""
+    chats = []
+    for entry in trace:
+        if entry.get("tool_name") == "send_telegram_message" and \
+                (entry.get("observation") or "").startswith("Сообщение отправлено в "):
+            try:
+                chats.append(str(json.loads(entry["tool_args"] or "{}").get("chat_id")))
+            except (json.JSONDecodeError, AttributeError):
+                continue
+    return chats
+
+
+def check_final_answer(question: str, answer: str | None, trace: list[dict[str, Any]]) -> str | None:
+    """Финальный ответ против trace: None — всё сходится, иначе — что не так (для приписки модели).
+
+    1. Задача просит отправить клиенту («отправь … в чат 999»), а успешной отправки в этот чат нет, и
+       ответ не говорит честно, что сообщение не отправлено.
+    2. Ответ утверждает, что сообщение отправлено, а send_telegram_message не вызывался.
+    """
+    text = answer or ""
+    admits = bool(NOT_SENT.search(text))
+    sent = sent_chats(trace)
+    wanted = CHAT_ID.findall(question) if SEND_REQUEST.search(question) else []
+    missing = [chat for chat in dict.fromkeys(wanted) if chat not in sent]
+    if missing and not admits:
+        where = ", ".join(missing)
+        return (f"задача просит отправить сообщение в чат {where}, а send_telegram_message в этот чат не вызывался"
+                + (" — в ответе сказано, что сообщение отправлено" if SENT_CLAIM.search(text) else ""))
+    if not sent and SENT_CLAIM.search(text) and not admits:
+        return "в ответе сказано, что сообщение отправлено, а send_telegram_message не вызывался"
+    return None
+
+
 def _remaining(deadline: float) -> float:
     left = deadline - time.monotonic()
     if left <= 0:
@@ -154,8 +197,9 @@ def _run_tool(deadline: float, *args: Any) -> str:
 
 def _critic_input(question: str, thought: str | None, name: str, raw_args: str | None, observation: str,
                   history: list[dict[str, Any]]) -> str:
-    past = "\n".join(f"{n}. {e['tool_name']}({e['tool_args']}) → {e['observation'][:300]}"
-                     for n, e in enumerate(history[-4:], start=1)) or "—"
+    steps = [e for e in history if e.get("tool_name")]     # отклонённый финальный ответ — не шаг с инструментом
+    past = "\n".join(f"{n}. {e['tool_name']}({e['tool_args']}) → {(e.get('observation') or '')[:300]}"
+                     for n, e in enumerate(steps[-4:], start=1)) or "—"
     return (f"Задача: {question}\nПлан агента: {thought or 'агент не написал'}\nВызов: {name}({raw_args})\n"
             f"Результат: {observation[:1500]}\nПрошлые шаги:\n{past}")
 
@@ -171,10 +215,12 @@ def run_react_with_reflection(
     model_main: str = DEFAULT_MODEL,
     model_premium: str | None = None,       # канон — "gpt-5.4" на шаг после REVISE; пусто — model_main
     model_critic: str | None = None,        # пусто — model_main
+    final_check: bool = True,               # проверка финального ответа по trace (доработка после 6.2)
     client: Any = None,
 ) -> dict[str, Any]:
     """{"answer", "steps", "revisions", "usage", "trace"}; лимит итераций или таймаут — answer с явным
-    сообщением и "error": "max_iterations" / "timeout"."""
+    сообщением и "error": "max_iterations" / "timeout". Ответ не прошёл проверку, а ревизии кончились —
+    отдаётся как есть, с "final_check_failed": <что не так>."""
     if not ITERATIONS_RANGE[0] <= max_iterations <= ITERATIONS_RANGE[1]:
         raise ValueError(f"max_iterations={max_iterations}: допустимо {ITERATIONS_RANGE[0]}–{ITERATIONS_RANGE[1]}")
     if not 0 < timeout_per_iteration_sec <= 600 or not 0 <= max_revisions <= 2:
@@ -214,10 +260,29 @@ def run_react_with_reflection(
             entry["thought"] = (message.content or "").strip()[:PREVIEW] or None
             calls = message.tool_calls or []
             if not calls:                                    # данных достаточно — финальный ответ
-                entry.update(final=True, latency_ms=round(llm_ms, 1))
+                problem = check_final_answer(question, message.content, trace) if final_check else None
+                entry.update(final=problem is None, final_check=problem, latency_ms=round(llm_ms, 1))
+                if problem and revisions < max_revisions:    # ответ — на доработку, как REVISE критика
+                    revisions += 1
+                    premium_next = True
+                    entry["revision_applied"] = True
+                    # Ролью user, а не system: Ollama собирает все system-сообщения в один блок в начале
+                    # промпта, и последним в запросе оставался бы ответ самой модели — на Windows она трижды
+                    # повторила «Сообщение отправлено в 999», ни разу не вызвав инструмент.
+                    messages.append({"role": "user", "content": f"Проверка ответа (автоматическая): {problem}. "
+                                     "Если действие нужно — выполни его инструментом сейчас; если выполнить нельзя — "
+                                     "прямо скажи, что не сделал его и почему. Не пиши, что действие выполнено, если "
+                                     "инструмент не вызывался."})
+                    trace.append(entry)
+                    log.info("react_step", **entry)
+                    continue
                 trace.append(entry)
                 log.info("react_step", **entry)
-                return finish(message.content, iteration)
+                result = finish(message.content, iteration)
+                if problem:
+                    result["final_check_failed"] = f"{problem} (лимит ревизий {max_revisions} исчерпан — ответ как есть)"
+                    log.warning("react_final_check_failed", problem=problem)
+                return result
             call, extra = calls[0], calls[1:]                # ровно один инструмент за шаг
             entry.update(tool_name=call.function.name, tool_args=call.function.arguments,
                          skipped_calls=[c.function.name for c in extra])
@@ -269,7 +334,7 @@ def run_react(task: str, *, client: Any = None, model: str | None = None, max_it
         task, max_iterations=max_iterations or cfg.max_iterations,
         timeout_per_iteration_sec=timeout_per_iteration_sec or cfg.timeout_per_iteration_sec,
         max_revisions=cfg.max_revisions, model_main=main_model, model_premium=cfg.premium_model or main_model,
-        model_critic=cfg.critic_model or main_model, client=client)
+        model_critic=cfg.critic_model or main_model, final_check=cfg.final_check, client=client)
 
 
 def main(argv: list[str] | None = None) -> int:
