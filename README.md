@@ -3038,14 +3038,14 @@ python scripts/eval_report.py --labels baseline chunk_128 rerank final
 python scripts/eval_report.py --check tests\eval\results\<…>_final.json   # пороги чекпоинта 5
 Select-String -Path "$env:LOCALAPPDATA\Ollama\server.log" -Pattern "truncating input"   # промпты судьи не обрезаны — пусто
 
-# 3. Phoenix: образ сервиса пересобирается (пакет трейсинга LlamaIndex), Phoenix — свежий
-docker compose pull phoenix
-docker compose up -d --build
+# 3. Phoenix: образ сервиса пересобирается (пакет трейсинга LlamaIndex); Ollama в это время свободна
+docker compose build app
+docker compose up -d
 python scripts/trace_queries.py                        # 22 ответа, «трейсов POST /rag/query 22 (ждали 22)»
-New-Item -ItemType Directory -Force docs\screenshots | Out-Null
-#    http://localhost:6006 → проект → вкладка Traces → вопрос из golden → дерево спанов → скриншот docs\screenshots\phoenix_trace.png
-python scripts/phoenix_hallucinations.py               # доля hallucinated, метки — в Phoenix
-#    список трейсов с колонкой hallucination → docs\screenshots\phoenix_hallucination.png
+#    http://localhost:6006 → diploma-fastapi → Traces → POST /rag/query вопроса из golden → раскрыть дерево,
+#    выбрать retriever-спан → Win+Shift+S → docs\screenshots\phoenix_trace.png
+python scripts/phoenix_hallucinations.py               # доля hallucinated, метки — аннотацией в Phoenix
+#    Traces, колонка span annotations → docs\screenshots\phoenix_hallucination.png
 ```
 
 Прогон прервался (сон ноутбука, Ctrl+C) — готовое не теряется: `python scripts/run_eval.py --resume tests\eval\results\<…>.partial.jsonl`.
@@ -3070,7 +3070,7 @@ python scripts/phoenix_hallucinations.py               # доля hallucinated, 
 - **Эксперимент A** (`2026-10-13_0644_chunk_128`, `chunk_size` 512 → 128, 350 фрагментов вместо 102): faithfulness 0.787 (−0.116), context_precision 0.705 (−0.204), context_recall 0.737 (−0.263), answer_relevancy 0.791 (та же), has_citation 0.978 (+0.067), задержка 14 с вместо 27. Мелкий фрагмент без ответа выигрывает поиск (заголовок или вопрос из FAQ), фрагменты начинаются с середины фразы, в пятёрке 3.3 разных файла вместо 4.8. Решение — оставить 512; разбор — `docs/rag_evaluation.md`, раздел 4.
 - **Эксперимент B** (`2026-10-13_1439_rerank`, re-ranker `bge-reranker-v2-m3` выкл → вкл): faithfulness 0.911 (+0.009), answer_relevancy 0.798 (+0.007), context_precision 0.939 (+0.029), context_recall 1.000, has_citation 0.933 (+0.022), задержка 46,5 с вместо 27. Поиск лучше — фрагмент эталона в пятёрке у 45 из 45, MRR@5 0.948, исправлен ответ raw_014; метрики ответа — в пределах шума судьи. Решение — не включать: +19 с на ответ и `torch` в образе ради сдвига меньше 0.05; разбор — `docs/rag_evaluation.md`, раздел 5.
 - **Финальная конфигурация** (`2026-10-14_0056_final`) — baseline (recursive 512/64, re-ranker выключен) и строка источников `RAG__SOURCES_FALLBACK=true`: faithfulness 0.868, answer_relevancy 0.792, context_precision 0.909, context_recall 1.000, has_citation 1.000 — `eval_report.py --check`: все три порога пройдены. faithfulness ниже baseline на 0.03 — шум генерации (где текст ответа совпал, совпали и оценки). Задержка в JSON — 53,6 с из-за нагрузки машины в ту ночь; повторный замер `--answers-only` днём — 28,4 с (p95 36,4), как у baseline. Раздел 6 отчёта.
-- ⏳ Phoenix: трейсы, доля галлюцинаций, скриншоты.
+- **Phoenix** (18.10): образ сервиса собрался за 87 с; `trace_queries.py` — 22 ответа из 22, в Phoenix 22 трейса `POST /rag/query`, 229 спанов, retriever со score — 21, LLM с токенами — 40, embedding — 62; дерево — `docs/screenshots/phoenix_trace.png`. `phoenix_hallucinations.py` — оценено 20 ответов (2 отказа score-guard отдельно), hallucinated 12 (60 %): на свободных 6 из 10, на golden 6 из 10; метки — колонкой в списке трейсов, `docs/screenshots/phoenix_hallucination.png`. Доля завышена: 3 из 12 — отказы модели («могу эскалировать» судья счёл неподтверждённым утверждением), а на golden судья Phoenix расходится с RAGAS faithfulness (у четырёх из шести «hallucinated» faithfulness 1.0) — разбор в отчёте.
 
 ### Соответствие критериям блока 5.6
 
@@ -3079,13 +3079,13 @@ python scripts/phoenix_hallucinations.py               # доля hallucinated, 
 | `golden_dataset.json` — ≥ 30 пар, каждая прошла ручную вычитку (коммит с правками после автогенерации) | `generate_testset.py` → `golden_dataset_raw.csv` (коммит) → `golden_review.yaml` + `build_golden.py` → `golden_dataset.json` (коммит); без решения по каждой строке и без 30 пар JSON не собирается; `test_build_golden_*`, `test_committed_golden_matches_raw_and_review`. Итог — 45 пар из 52 сырых, поправлено 32, коммиты сырого CSV и обеих вычиток |
 | `run_eval.py` — одна команда, читает golden, пишет `results/{timestamp}_{label}.csv`, не падает на пустых полях | `python scripts/run_eval.py --label baseline`; `test_run_eval_writes_csv_and_json` (отказ, сбой RAG, пустой вопрос), `test_score_guard_refusal_does_not_crash`, `test_empty_response_gives_nan_without_judge_calls` |
 | Пять метрик: четыре из `ragas.metrics.collections` и `has_citation` через `@discrete_metric` | `app/eval/metrics.py` (`build_metrics`, `make_has_citation`, `score_row`, `eval_row`); `test_score_row_good_answer_has_all_five_metrics`, `test_has_citation_discrete_metric` |
-| Phoenix на `localhost:6006` из docker compose, 20+ трейсов LlamaIndex с деревом (retriever, LLM, embedding) | сервис `phoenix` в `compose.yaml` (том `phoenix-data`), `LlamaIndexInstrumentor` в lifespan под `PHOENIX_LLAMA_INDEX`, `${PHOENIX_COLLECTOR_ENDPOINT}/v1/traces`; `trace_queries.py` — 22 запроса и проверка дерева; `test_llama_index_instrumented_on_same_provider`, `test_trace_queries_checks_tree_in_phoenix`. ⏳ скриншот |
+| Phoenix на `localhost:6006` из docker compose, 20+ трейсов LlamaIndex с деревом (retriever, LLM, embedding) | сервис `phoenix` в `compose.yaml` (том `phoenix-data`), `LlamaIndexInstrumentor` в lifespan под `PHOENIX_LLAMA_INDEX`, `${PHOENIX_COLLECTOR_ENDPOINT}/v1/traces`; `trace_queries.py` — 22 запроса и проверка дерева; `test_llama_index_instrumented_on_same_provider`, `test_trace_queries_checks_tree_in_phoenix`. На Windows — 22 трейса, дерево — `docs/screenshots/phoenix_trace.png` |
 | ≥ 3 CSV: baseline, эксперимент A, эксперимент B, разные timestamp | `--label baseline`, `--label chunk_128 --chunk-size 128`, `--label rerank --rerank on`. Baseline — `2026-10-12_2147_baseline.csv`, A — `2026-10-13_0644_chunk_128.csv`, B — `2026-10-13_1439_rerank.csv`, финальный — `2026-10-14_0056_final.csv` |
 | Финальные метрики: faithfulness > 0.7, answer_relevancy > 0.7, has_citation > 0.95 — или честные «известные проблемы» | `eval_report.py --check` по `2026-10-14_0056_final.json`: faithfulness 0.868, answer_relevancy 0.792, has_citation 1.000 — пройдены; известные проблемы — раздел 8 отчёта |
 | В отчёте — две таблицы A/B, финальная конфигурация и «беру вариант X, потому что …» | `docs/rag_evaluation.md`, разделы 4–6, таблицы — `eval_report.py`. Разделы 4 (A, «оставляю 512») и 5 (B, «не беру») готовы, раздел 6 — «беру baseline со строкой источников, потому что …» и числа финального прогона |
 | Failure analysis — 3–5 примеров по матрице retrieval vs generation | раздел 7: пять разборов baseline — три клетки матрицы из четырёх (четвёртая на baseline пуста); `eval_report.py --worst`, `test_eval_report_worst_*` |
 | Финальная конфигурация зафиксирована в `config.py` / `.env` и совпадает с финальным CSV | конфигурация каждого прогона — в его JSON (`config`); финальная — значения по умолчанию `RagSettings` и пустые строки `.env.example` (recursive 512/64, 10 кандидатов, top-5, порог 0.5, re-ranker выключен, `RAG__SOURCES_FALLBACK=true`) — те же, что в `config` финального JSON |
-| Опционально: `HallucinationEvaluator` на трейсах, скриншот | `phoenix_hallucinations.py`; `test_hallucination_evaluator_labels_and_summary`. ⏳ доля и скриншот |
+| Опционально: `HallucinationEvaluator` на трейсах, скриншот | `phoenix_hallucinations.py`; `test_hallucination_evaluator_labels_and_summary`. На Windows — 12 из 20 hallucinated (с разбором, почему доля завышена), метки в Phoenix — `docs/screenshots/phoenix_hallucination.png` |
 
 ## Конфигурация (.env)
 
