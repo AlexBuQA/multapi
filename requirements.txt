@@ -63,3 +63,7 @@ docx2txt==0.9                 # DocxReader из llama-index-readers-file без 
 # Блок 5.5: корпоративный RAG — PDF в ingestion (PyMuPDFReader: страница — документ с номером) и
 # генерация PDF корпуса (scripts/build_corpus.py). Лицензия PyMuPDF — AGPL-3.0 (docs/rag.md, «Версии»).
 pymupdf==1.28.2
+
+# Блок 6.1: наивный агент — get_current_time через zoneinfo; на Windows своей базы часовых поясов нет
+# (без пакета ZoneInfo("Europe/Moscow") падает с ZoneInfoNotFoundError).
+tzdata>=2024.1
