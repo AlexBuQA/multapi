@@ -53,6 +53,12 @@ dependencies = [
     "pymupdf==1.28.2",
     # блок 6.1: get_current_time агента — zoneinfo; на Windows своей базы часовых поясов нет
     "tzdata>=2024.1",
+    # блок 6.3: агент на LangGraph (app/services/agent_graph.py) — StateGraph и create_agent. До блока 6.3
+    # эти пакеты приходили только транзитивно с группой eval (ragas), теперь — явно и с границей мажорной версии
+    "langgraph>=1.0,<2",
+    "langchain>=1.0,<2",
+    "langchain-core>=1.0,<2",
+    "langchain-openai>=1.0,<2",
 ]
 
 [project.optional-dependencies]

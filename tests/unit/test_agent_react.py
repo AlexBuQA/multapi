@@ -382,7 +382,7 @@ def test_run_react_takes_models_and_limits_from_settings(monkeypatch, kb):
     agent_react.run_react("Задача", client="client")
     assert seen == {"max_iterations": 12, "timeout_per_iteration_sec": 240.0, "max_revisions": 1,
                     "model_main": "qwen3:4b-instruct", "model_premium": "qwen3:4b-instruct",
-                    "model_critic": "gpt-5.4-mini", "final_check": True, "client": "client"}
+                    "model_critic": "gpt-5.4-mini", "final_check": True, "temperature": None, "client": "client"}
 
 
 @pytest.fixture

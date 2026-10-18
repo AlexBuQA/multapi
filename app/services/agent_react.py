@@ -216,6 +216,7 @@ def run_react_with_reflection(
     model_premium: str | None = None,       # канон — "gpt-5.4" на шаг после REVISE; пусто — model_main
     model_critic: str | None = None,        # пусто — model_main
     final_check: bool = True,               # проверка финального ответа по trace (доработка после 6.2)
+    temperature: float | None = None,       # блок 6.3: бенчмарк с графами при одной температуре; None — провайдера
     client: Any = None,
 ) -> dict[str, Any]:
     """{"answer", "steps", "revisions", "usage", "trace"}; лимит итераций или таймаут — answer с явным
@@ -226,6 +227,7 @@ def run_react_with_reflection(
     if not 0 < timeout_per_iteration_sec <= 600 or not 0 <= max_revisions <= 2:
         raise ValueError("timeout_per_iteration_sec — от 0 до 600 с, max_revisions — 0–2")
     client = client or build_openai(get_settings())
+    sampling = {} if temperature is None else {"temperature": temperature}
     tool_schemas = schemas(tools)
     messages: list[Any] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": question}]
     usage, critic_usage = Usage(), Usage()
@@ -252,7 +254,7 @@ def run_react_with_reflection(
                                  "critic_reason": None, "revision_applied": False}
         try:
             response = _complete(client, deadline, model=model, messages=messages, tools=tools,
-                                 tool_choice="auto", parallel_tool_calls=False)
+                                 tool_choice="auto", parallel_tool_calls=False, **sampling)
             llm_ms = (time.monotonic() - started) * 1000
             entry.update(usage.add(response.usage), llm_ms=round(llm_ms, 1))
             message = response.choices[0].message
@@ -294,7 +296,7 @@ def run_react_with_reflection(
                 messages.append({"role": "tool", "tool_call_id": skipped.id, "content": SKIPPED})
 
             critic_started = time.monotonic()
-            critic = _complete(client, deadline, model=model_critic or model_main, messages=[
+            critic = _complete(client, deadline, model=model_critic or model_main, **sampling, messages=[
                 {"role": "system", "content": CRITIC_PROMPT},
                 {"role": "user", "content": _critic_input(question, entry["thought"], call.function.name,
                                                           call.function.arguments, observation, trace)}])
@@ -326,7 +328,7 @@ def run_react_with_reflection(
 
 
 def run_react(task: str, *, client: Any = None, model: str | None = None, max_iterations: int | None = None,
-              timeout_per_iteration_sec: float | None = None) -> dict[str, Any]:
+              timeout_per_iteration_sec: float | None = None, temperature: float | None = None) -> dict[str, Any]:
     """run_react_with_reflection с настройками AGENT__* (модели, лимиты) — для CLI и сравнения агентов."""
     cfg = get_settings().agent
     main_model = model or cfg.model or DEFAULT_MODEL
@@ -334,7 +336,8 @@ def run_react(task: str, *, client: Any = None, model: str | None = None, max_it
         task, max_iterations=max_iterations or cfg.max_iterations,
         timeout_per_iteration_sec=timeout_per_iteration_sec or cfg.timeout_per_iteration_sec,
         max_revisions=cfg.max_revisions, model_main=main_model, model_premium=cfg.premium_model or main_model,
-        model_critic=cfg.critic_model or main_model, final_check=cfg.final_check, client=client)
+        model_critic=cfg.critic_model or main_model, final_check=cfg.final_check, temperature=temperature,
+        client=client)
 
 
 def main(argv: list[str] | None = None) -> int:

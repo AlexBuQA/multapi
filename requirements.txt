@@ -67,3 +67,10 @@ pymupdf==1.28.2
 # Блок 6.1: наивный агент — get_current_time через zoneinfo; на Windows своей базы часовых поясов нет
 # (без пакета ZoneInfo("Europe/Moscow") падает с ZoneInfoNotFoundError).
 tzdata>=2024.1
+
+# Блок 6.3: агент на LangGraph (app/services/agent_graph.py) — StateGraph руками и langchain.agents.create_agent.
+# API LangGraph 1.0 сильно отличается от 0.x: старый langgraph<1.0 в окружении — повод поднять чистый venv.
+langgraph>=1.0,<2
+langchain>=1.0,<2
+langchain-core>=1.0,<2
+langchain-openai>=1.0,<2

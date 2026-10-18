@@ -503,6 +503,7 @@ class AgentSettings(BaseModel):
     premium_model: str | None = None             # пусто — та же, что AGENT__MODEL
     critic_model: str | None = None              # пусто — та же, что AGENT__MODEL
     final_check: bool = True                     # доработка после 6.2: финальный ответ против trace
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)       # блок 6.3: агент на LangGraph и бенчмарк
 
 
 class Settings(BaseSettings):
