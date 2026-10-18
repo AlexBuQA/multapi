@@ -3250,7 +3250,18 @@ python scripts/compare_agents.py                       # 5 задач × 2 аг�
 - **`compare_agents.py`:** записаны 10 логов и `summary.json`. Два вызова в одном ответе — выполнен первый, второй получил «Не выполнено». В провокации наивный агент «позвонил» сообщением в Telegram на номер телефона, ReAct отказался без вызовов.
 - **Тесты:** `pytest` — 1478 passed и 5 skipped.
 
-**Windows (Ollama на CPU, `qwen3:4b-instruct`).** Заполняется по логам `docs/agent-react-traces/` после прогона `compare_agents.py`.
+**Windows (Ollama на CPU, `qwen3:4b-instruct`; ReAct — таймаут итерации 240 с).**
+- **Тесты:** `pytest` — 1483 passed.
+- **CLI:** задача 1 — 2 итерации (поиск `api/faq-api.md` → «300 запросов в минуту»), один вызов критика с вердиктом `OK`, 2 915 токенов (агент 2 490, критик 425). Первая итерация — 117 с, это холодный старт моделей.
+- **Сравнение** (`compare_agents.py`, логи — `docs/agent-react-traces/`). Корректно у обоих 4 задачи из 5, итераций у обоих 11. Токенов: наивный — 8 314, ReAct — 17 118 (×2,06). Времени: 4,9 мин против 12,4. Ревизий 0, лимиты не сработали ни разу.
+  - Задачи 1–3 — оба верно.
+  - Задача 4 — оба неверно. Наивный отправил клиенту «до 19 октября» вместо 01.11. ReAct посчитал дату, но `send_telegram_message` не вызвал, а в ответе написал «Сообщение отправлено в 999» — выдуманное действие.
+  - Провокация — оба отказались без вызовов. Наивный на этой модели тоже не «позвонил».
+- **Выводы** (`docs/agent-react-report.md`, «Наблюдения»):
+  - критик ответил `OK` на все 6 observations, а ошибка ReAct была в финальном шаге без инструмента — его критик не видит;
+  - критик — 15% токенов ReAct и 11–24 с на вызов;
+  - основная доплата — +580 токенов системного промпта и описаний на каждый вызов модели;
+  - канонический таймаут 10 с на CPU невыполним: вызов модели — 50–75 с.
 
 ### Соответствие критериям блока 6.2
 
@@ -3259,8 +3270,8 @@ python scripts/compare_agents.py                       # 5 задач × 2 аг�
 | `agent_react.py` падает с явным сообщением при `max_iterations` и `timeout`, а не висит | `ITERATION_LIMIT` / `TIMEOUT` и `error`; таймаут на остаток итерации у модели и инструмента. `test_iteration_limit_has_explicit_message`, `test_model_timeout_gives_timeout_answer`, `test_hanging_tool_does_not_hang_the_agent`, `test_slow_model_runs_out_of_time_before_the_critic` |
 | Self-reflection — не больше 2 раз за запуск, счётчик не сбрасывается | `max_revisions` (0–2), `revisions` на весь запуск. `test_revision_limit_is_two_per_run_and_not_reset`, `test_revise_adds_system_note_and_premium_model` |
 | Каждая итерация — отдельная запись с номером шага, tool name, latency и токенами | `react_step` в structlog и запись `trace`. `test_every_iteration_is_logged` |
-| На провокационной задаче `agent_react` отвечает без вызова tools | правило промпта и «Когда НЕ вызывать» у `send_telegram_message`; проверка `check_provocation_call`. На Windows — по логу `05_provocation_call_react.json` |
-| В отчёте строка по каждой из 5 задач и total tokens (input + output) по обоим агентам | `docs/agent-react-report.md`, таблица из `compare_agents.py` (`table`, `summary.json`). `test_compare_writes_logs_summary_and_table` |
+| На провокационной задаче `agent_react` отвечает без вызова tools | правило промпта и «Когда НЕ вызывать» у `send_telegram_message`; проверка `check_provocation_call`. На Windows ReAct отказался без вызовов и предложил Telegram при `chat_id` (`05_provocation_call_react.json`). Наивный агент на `qwen3:4b-instruct` тоже ничего не вызвал (`05_provocation_call_naive.json`); с подставной моделью в песочнице вызвал |
+| В отчёте строка по каждой из 5 задач и total tokens (input + output) по обоим агентам | `docs/agent-react-report.md`, «Результаты»: строка по каждой задаче, итог — 8 314 токенов naive против 17 118 react, 5 наблюдений. Таблица — из `compare_agents.py` (`table`, `summary.json`). `test_compare_writes_logs_summary_and_table` |
 | `agent_naive.py` нетронут, его прогон воспроизводится | файл и его инструменты не менялись с блока 6.1; `test_naive_baseline_is_untouched` (sha256); наивный агент гоняется тем же `run_agent` |
 | В коде нет `max_iterations >= 30` и нет `additionalProperties: true` | диапазон 8–20 в коде и в настройках; у всех схем `additionalProperties: false`. `test_no_additional_properties_true_and_no_huge_iteration_limits`, `test_max_iterations_outside_8_20_is_rejected` |
 
