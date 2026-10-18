@@ -1,0 +1,48 @@
+{
+  "task_id": "simple_time",
+  "kind": "простая: 1 инструмент",
+  "agent": "naive",
+  "task": "Который сейчас час в Екатеринбурге?",
+  "expect": "get_current_time(Asia/Yekaterinburg) → время из ответа инструмента (UTC+5)",
+  "model": "qwen3:4b-instruct",
+  "started_at": "2026-10-18T17:45:36+03:00",
+  "wall_ms": 28207.0,
+  "answer": "Сейчас 19:46 в Екатеринбурге.",
+  "error": null,
+  "steps": 2,
+  "revisions": 0,
+  "tokens": {
+    "prompt_tokens": 1128,
+    "completion_tokens": 43,
+    "total_tokens": 1171
+  },
+  "llm_calls": 2,
+  "tools": [
+    "get_current_time"
+  ],
+  "telegram": [],
+  "trace": [
+    {
+      "step": 0,
+      "tool_name": "get_current_time",
+      "tool_args": "{\"timezone\":\"Asia/Yekaterinburg\"}",
+      "tool_result": "2026-10-18T19:46:00.275416+05:00",
+      "llm_input_tokens": 529,
+      "llm_output_tokens": 26,
+      "duration_ms": 23218.5
+    },
+    {
+      "step": 1,
+      "tool_name": null,
+      "tool_args": null,
+      "tool_result": null,
+      "llm_input_tokens": 599,
+      "llm_output_tokens": 17,
+      "duration_ms": 4693.3
+    }
+  ],
+  "check": {
+    "correct": true,
+    "why": "в ответе время 19:46"
+  }
+}

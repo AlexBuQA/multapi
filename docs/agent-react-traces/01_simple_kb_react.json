@@ -1,0 +1,86 @@
+{
+  "task_id": "simple_kb",
+  "kind": "простая: 1 инструмент",
+  "agent": "react",
+  "task": "Сколько запросов в минуту можно делать к API на тарифе «Команда»?",
+  "expect": "поиск по базе знаний → 300 запросов в минуту (api/faq-api.md)",
+  "model": "qwen3:4b-instruct",
+  "started_at": "2026-10-18T17:43:36+03:00",
+  "wall_ms": 120466.9,
+  "answer": "На тарифе «Команда» можно делать до 300 запросов в минуту.",
+  "error": null,
+  "steps": 2,
+  "revisions": 0,
+  "tokens": {
+    "prompt_tokens": 2847,
+    "completion_tokens": 69,
+    "total_tokens": 2916
+  },
+  "llm_calls": 3,
+  "tools": [
+    "search_knowledge_base"
+  ],
+  "telegram": [],
+  "trace": [
+    {
+      "iteration": 1,
+      "model": "qwen3:4b-instruct",
+      "thought": null,
+      "tool_name": "search_knowledge_base",
+      "tool_args": "{\"query\":\"сколько запросов в минуту можно делать к API на тарифе \\\"Команда\\\"\"}",
+      "observation": "[api/faq-api.md, близость 0.76] Частые вопросы: API Сколько запросов в минуту можно делать к API?\nЛимит зависит от тарифа: «Старт» — 60 запросов в минуту, «Команда» — 300, «Бизнес» — 1 200. При превыш",
+      "skipped_calls": [],
+      "critic_verdict": "OK",
+      "critic_reason": null,
+      "revision_applied": false,
+      "prompt_tokens": 1121,
+      "completion_tokens": 42,
+      "total_tokens": 1163,
+      "llm_ms": 49909.3,
+      "tool_ms": 182.0,
+      "critic_ms": 14248.1,
+      "critic_tokens": 425,
+      "latency_ms": 64339.4
+    },
+    {
+      "iteration": 2,
+      "model": "qwen3:4b-instruct",
+      "thought": "На тарифе «Команда» можно делать до 300 запросов в минуту.",
+      "tool_name": null,
+      "tool_args": null,
+      "observation": null,
+      "skipped_calls": [],
+      "critic_verdict": null,
+      "critic_reason": null,
+      "revision_applied": false,
+      "prompt_tokens": 1303,
+      "completion_tokens": 25,
+      "total_tokens": 1328,
+      "llm_ms": 55844.0,
+      "final": true,
+      "latency_ms": 55844.0
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 2847,
+    "completion_tokens": 69,
+    "total_tokens": 2916,
+    "calls": 3,
+    "agent": {
+      "prompt_tokens": 2424,
+      "completion_tokens": 67,
+      "total_tokens": 2491,
+      "calls": 2
+    },
+    "critic": {
+      "prompt_tokens": 423,
+      "completion_tokens": 2,
+      "total_tokens": 425,
+      "calls": 1
+    }
+  },
+  "check": {
+    "correct": true,
+    "why": "в ответе 300"
+  }
+}

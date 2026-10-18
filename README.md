@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1–6.2
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -27,6 +27,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 5.5 — Корпоративный RAG-ассистент:** корпус из 66 документов «Личного кабинета» в PDF, DOCX, HTML и Markdown (`data/<категория>/`), инкрементальная индексация `scripts/ingest.py` (IngestionPipeline + docstore, UPSERTS, `.failed`), метаданные из путей и самих документов, ответы с цитатами [1], [2] и флагом `confident`, score-guard «По базе не нашёл, могу эскалировать.», диалог с переписыванием follow-up, событие `sources` в SSE, загрузка документов `POST /documents/upload`, бот с debounce правок и источниками, весь стек — `docker compose up -d` — см. раздел [«Блок 5.5»](#блок-55--корпоративный-rag-ассистент) и [`docs/rag.md`](docs/rag.md).
 - **Блок 5.6 — Оценка качества и мониторинг RAG:** golden dataset через RAGAS `TestsetGenerator` с ручной вычиткой, `scripts/run_eval.py` — faithfulness, answer_relevancy, context_precision, context_recall (RAGAS 0.4, `ragas.metrics.collections`) и своя `has_citation` (`@discrete_metric`) с судьёй `qwen3:4b-instruct`, два A/B-эксперимента (нарезка, re-ranker), failure analysis по матрице retrieval vs generation; дерево спанов RAG в Phoenix (`LlamaIndexInstrumentor`) и `HallucinationEvaluator` на трейсах — см. раздел [«Блок 5.6»](#блок-56--оценка-качества-и-мониторинг-rag) и [`docs/rag_evaluation.md`](docs/rag_evaluation.md).
 - **Блок 6.1 — Что такое агент: цикл и компоненты:** наивный агент без фреймворка — `run_agent(task, max_steps=6)` в `app/services/agent_naive.py`: `for`-цикл вокруг Chat Completions, `tool_calls` → диспетчер по allowlist `DISPATCH` → `role: "tool"` обратно в `messages`, trace шагов (инструмент, аргументы, результат, токены, время) и CLI `--trace`. Три инструмента — поиск по базе знаний через RAG блока 5.5, текущее время и заглушка Telegram; пять задач предметной области с логами в `docs/agent-naive-traces/` — см. раздел [«Блок 6.1»](#блок-61--что-такое-агент-цикл-и-компоненты) и [`docs/agent_naive.md`](docs/agent_naive.md).
+- **Блок 6.2 — Планирование агента:** ReAct-агент `app/services/agent_react.py` рядом с наивным baseline: системный промпт ReAct, ровно один инструмент за шаг, `max_iterations` (8–20) и таймаут на итерацию с явными «Превышен лимит итераций» / «Timeout», критик после каждого observation (`OK` / `REVISE`, не больше 2 ревизий), подсчёт токенов агента и критика. Инструменты описаны по чек-листу (четыре вопроса, строгая JSON Schema с проверкой аргументов). Сравнение с наивным агентом на пяти задачах — см. раздел [«Блок 6.2»](#блок-62--планирование-агента) и [`docs/agent-react-report.md`](docs/agent-react-report.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -129,6 +130,7 @@ multapi/
 │   │   ├── retrieval_eval.py # блок 5.4: Hit Rate@5, MRR@10, Recall@10 по golden dataset
 │   │   ├── reranker.py      # блок 5.4: bge-reranker-v2-m3 (cross-encoder) или Cohere Rerank, кеш оценок
 │   │   ├── agent_naive.py   # блок 6.1: наивный агент — run_agent (цикл на Chat Completions), trace, CLI
+│   │   ├── agent_react.py   # блок 6.2: ReAct-агент — лимиты итераций и времени, критик, usage, CLI
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -141,7 +143,8 @@ multapi/
 │   ├── tools/
 │   │   ├── schemas.py       # JSON Schema tools + проверка jsonschema
 │   │   ├── handlers.py      # обработчики: поиск по руководству, статус сервиса
-│   │   └── naive_tools.py   # блок 6.1: инструменты агента — поиск через RAG, время, заглушка Telegram; DISPATCH
+│   │   ├── naive_tools.py   # блок 6.1: инструменты агента — поиск через RAG, время, заглушка Telegram; DISPATCH
+│   │   └── react_tools.py   # блок 6.2: те же инструменты — описания по чек-листу, строгие схемы, проверка аргументов
 │   └── llm/
 │       └── client.py        # полный цикл tool_call (ToolCallingAssistant)
 ├── bot/                     # блок 4.2: Telegram-бот (python -m bot) — тонкий клиент /chats
@@ -195,7 +198,8 @@ multapi/
 │   ├── verify_eval.py       # блок 5.6: версии и импорты групп eval и tracing, --live — вызов судьи
 │   ├── trace_queries.py     # блок 5.6: 20+ вопросов в /rag/query — трейсы для Phoenix
 │   ├── phoenix_hallucinations.py # блок 5.6: HallucinationEvaluator на спанах Phoenix, метки обратно
-│   └── run_naive_agent.py   # блок 6.1: агент на одной задаче или пять задач --suite → docs/agent-naive-traces/
+│   ├── run_naive_agent.py   # блок 6.1: агент на одной задаче или пять задач --suite → docs/agent-naive-traces/
+│   └── compare_agents.py    # блок 6.2: пять задач на наивном и ReAct-агенте → docs/agent-react-traces/
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
@@ -207,6 +211,8 @@ multapi/
 │   ├── rag_evaluation.md    # блок 5.6: отчёт — конфигурация, golden, baseline, A/B, failure analysis
 │   ├── agent_naive.md       # блок 6.1: наивный агент — цикл, инструменты, trace, разбор пяти задач
 │   ├── agent-naive-traces/  # блок 6.1: JSON-логи пяти прогонов агента
+│   ├── agent-react-report.md # блок 6.2: ReAct против наивного — устройство, задачи, таблица, наблюдения
+│   ├── agent-react-traces/  # блок 6.2: JSON-логи сравнения и summary.json
 │   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
@@ -231,7 +237,8 @@ multapi/
 │   │                        #   5.4: test_chunking.py — нарезка, метрики, golden dataset, re-ranker, эксперимент;
 │   │                        #   rag_fakes.py — подставные эмбеддинги и модель ответа для тестов RAG;
 │   │                        #   5.6: test_rag_eval.py, test_eval_tools.py, ragas_fakes.py (судья без сети);
-│   │                        #   6.1: test_agent_naive.py — цикл агента, инструменты, CLI, --suite
+│   │                        #   6.1: test_agent_naive.py — цикл агента, инструменты, CLI, --suite;
+│   │                        #   6.2: test_agent_react.py — ReAct, лимиты, критик, схемы, сравнение агентов
 │   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env (5.3: и RAG)
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── eval/retrieval_dataset.json # блок 5.4: golden dataset — 28 вопросов, нужные документы, цитаты ответа
@@ -3175,6 +3182,99 @@ python scripts/run_naive_agent.py --suite              # пять задач →
 | CLI печатает ответ или причину остановки и trace | `python -m app.services.agent_naive "<задача>" --trace`; `test_cli_prints_answer`, `test_cli_prints_stop_reason_and_trace`, `test_cli_module_runs` |
 | 5 задач предметной области; логи неудачных прогонов в `docs/agent-naive-traces/` | `scripts/run_naive_agent.py --suite`, `TASKS`; `test_five_tasks_cover_the_required_modes`, `test_suite_writes_a_log_per_task`. Логи всех пяти прогонов на Windows — `docs/agent-naive-traces/01_success.json` … `05_write_provocation.json`, неудачные — 3 (ответ по-английски) и 5 (отправка без проверки и подтверждения); разбор — `docs/agent_naive.md` |
 
+## Блок 6.2 — Планирование агента
+
+Наивный агент блока 6.1 становится управляемым ReAct-агентом с лимитами и self-reflection. Новый модуль
+`app/services/agent_react.py` стоит рядом, `agent_naive.py` не меняется — это baseline для сравнения.
+Обоих прогоняют на пяти задачах и сравнивают итерации, корректность, токены и ревизии. Отчёт —
+[`docs/agent-react-report.md`](docs/agent-react-report.md).
+
+```mermaid
+flowchart LR
+    Q["задача"] --> L["шаг ReAct: system prompt,<br/>tools, tool_choice=auto"]
+    L -->|"один tool_call"| T["схема → инструмент"] --> C{"критик"}
+    C -->|"OK"| L
+    C -->|"REVISE (≤ 2 за запуск)"| R["приписка + премиум-модель"] --> L
+    L -->|"текст"| A["answer + usage"]
+    L -.->|"лимит / таймаут"| S["«Превышен лимит итераций» / «Timeout»"]
+```
+
+### Что сделано
+
+- **`app/services/agent_react.py`** — `run_react_with_reflection(question, tools, tool_dispatch, max_iterations=10, timeout_per_iteration_sec=10.0, max_revisions=2, model_main="gpt-5.4-mini", model_premium=None, model_critic=None)` по стартер-коду задания.
+  - Цикл на Chat Completions: `tools`, `tool_choice="auto"`, `parallel_tool_calls=False`. Выполняется ровно один вызов за шаг, лишние получают «Не выполнено».
+  - Системный промпт задаёт поведение ReAct: пояснение перед действием, остановка, запрет выдумывать, честный отказ. Плюс правила домена: писать клиенту только с проверенными фактами, отвечать по-русски.
+  - `run_react` берёт модели и лимиты из `AGENT__*`; CLI: `python -m app.services.agent_react "<задача>" --trace`.
+- **Лимиты.**
+  - `max_iterations` — 8–20, иначе `ValueError`; исчерпан — ответ «Превышен лимит итераций».
+  - `timeout_per_iteration_sec` — на итерацию целиком (модель, инструмент, критик); превышен — «Timeout». У вызова модели — таймаут на остаток итерации и без повторов SDK, инструмент ждут не дольше остатка.
+  - Ответ в обоих случаях явный и с `error`, без зависания.
+- **Критик (Reflexion-light).** После каждого observation — отдельный вызов модели, вердикт `OK` или `REVISE: <причина>`.
+  - `REVISE` даёт системную приписку к следующей итерации и премиум-модель на этот шаг.
+  - Ревизий не больше 2 за запуск, счётчик между итерациями не сбрасывается.
+- **Стоимость.** `usage` с `prompt_tokens`, `completion_tokens`, `total_tokens` и числом вызовов — у агента, у критика и в сумме. Возвращается с ответом и пишется в лог `react_usage`. Каждая итерация — запись `react_step`: номер, инструмент, аргументы, observation, вердикт критика, latency и токены.
+- **`app/tools/react_tools.py`** — те же три функции, описания по чек-листу.
+  - Имя — глагол.
+  - Description отвечает на четыре вопроса: что делает, когда вызывать, когда НЕ вызывать, что возвращает.
+  - Строгая JSON Schema: `strict: true`, все поля обязательны, `additionalProperties: false`, `pattern` у строк.
+  - `validate_args` сверяет аргументы со схемой до вызова функции: Ollama `strict` не применяет. Телефон вместо `chat_id` или число вместо строки — ошибка модели, сообщение не уходит.
+- **`scripts/compare_agents.py`** — пять задач, каждая на обоих агентах.
+  - Задачи: две простые, две средние (выход одного инструмента — вход другого) и провокация, где правильно не вызывать инструментов.
+  - Логи `docs/agent-react-traces/NN_<задача>_<агент>.json` и `summary.json`, таблица для отчёта в консоли.
+  - Проверка ответа по правилу задачи; токены наивного агента считаются по шагу один раз.
+- **Настройки:** `AGENT__MAX_ITERATIONS`, `AGENT__TIMEOUT_PER_ITERATION_SEC`, `AGENT__MAX_REVISIONS`, `AGENT__PREMIUM_MODEL`, `AGENT__CRITIC_MODEL` в `AgentSettings` и `.env.example`.
+- **Тесты:** +54 в `tests/unit/test_agent_react.py`, без сети.
+  - Цикл и сообщения, остановка без инструментов, `REVISE` с припиской и премиум-моделью.
+  - Лимит ревизий 2 и счётчик без сброса, лимит итераций и диапазон 8–20.
+  - Таймаут модели, зависший инструмент и медленная модель — ответ «Timeout» без зависания.
+  - Один инструмент за шаг, лог каждой итерации и `react_usage`, разбор вердикта.
+  - Неверные аргументы не доходят до функции; чек-лист описаний.
+  - Нет `additionalProperties: true` и `max_iterations >= 30`, `agent_naive.py` не изменён (хеш), CLI.
+  - Сравнение агентов: логи, таблица, проверки задач.
+
+### Проверка на Windows
+
+Qdrant с коллекцией `kb_docs`, Ollama с `bge-m3` и `qwen3:4b-instruct`. В `.env` — `AGENT__MODEL=qwen3:4b-instruct` (уже есть с блока 6.1) и `AGENT__TIMEOUT_PER_ITERATION_SEC=240`: на CPU итерация с критиком идёт дольше канонических 5–15 с.
+
+```powershell
+python -m pytest -q                                    # 1483 passed (Qdrant не запущен — 1482 и 1 skipped)
+docker compose up -d qdrant
+python -m app.services.agent_react "Сколько запросов в минуту можно делать к API на тарифе «Команда»?" --trace
+python scripts/compare_agents.py                       # 5 задач × 2 агента → docs/agent-react-traces/
+```
+
+### Результаты
+
+**Песочница (Linux).** Модель — подставной OpenAI-совместимый сервер: `tool_calls` по сценарию, критику — `OK` или `REVISE`. Поиск — настоящий `RAGService` над корпусом `data/` в Qdrant с подставными эмбеддингами. Проверялась механика, поведение модели этим не проверить.
+- **CLI:** задача 1 — 2 итерации (поиск → ответ) и один вызов критика через настоящий клиент OpenAI SDK. В запросе — `tool_choice: "auto"`, `parallel_tool_calls: false`, `strict: true`. В stderr — две записи `react_step` и `react_usage` с токенами агента и критика.
+- **`compare_agents.py`:** записаны 10 логов и `summary.json`. Два вызова в одном ответе — выполнен первый, второй получил «Не выполнено». В провокации наивный агент «позвонил» сообщением в Telegram на номер телефона, ReAct отказался без вызовов.
+- **Тесты:** `pytest` — 1478 passed и 5 skipped.
+
+**Windows (Ollama на CPU, `qwen3:4b-instruct`; ReAct — таймаут итерации 240 с).**
+- **Тесты:** `pytest` — 1483 passed.
+- **CLI:** задача 1 — 2 итерации (поиск `api/faq-api.md` → «300 запросов в минуту»), один вызов критика с вердиктом `OK`, 2 915 токенов (агент 2 490, критик 425). Первая итерация — 117 с, это холодный старт моделей.
+- **Сравнение** (`compare_agents.py`, логи — `docs/agent-react-traces/`). Корректно у обоих 4 задачи из 5, итераций у обоих 11. Токенов: наивный — 8 314, ReAct — 17 118 (×2,06). Времени: 4,9 мин против 12,4. Ревизий 0, лимиты не сработали ни разу.
+  - Задачи 1–3 — оба верно.
+  - Задача 4 — оба неверно. Наивный отправил клиенту «до 19 октября» вместо 01.11. ReAct посчитал дату, но `send_telegram_message` не вызвал, а в ответе написал «Сообщение отправлено в 999» — выдуманное действие.
+  - Провокация — оба отказались без вызовов. Наивный на этой модели тоже не «позвонил».
+- **Выводы** (`docs/agent-react-report.md`, «Наблюдения»):
+  - критик ответил `OK` на все 6 observations, а ошибка ReAct была в финальном шаге без инструмента — его критик не видит;
+  - критик — 15% токенов ReAct и 11–24 с на вызов;
+  - основная доплата — +580 токенов системного промпта и описаний на каждый вызов модели;
+  - канонический таймаут 10 с на CPU невыполним: вызов модели — 50–75 с.
+
+### Соответствие критериям блока 6.2
+
+| Критерий | Реализация |
+|---|---|
+| `agent_react.py` падает с явным сообщением при `max_iterations` и `timeout`, а не висит | `ITERATION_LIMIT` / `TIMEOUT` и `error`; таймаут на остаток итерации у модели и инструмента. `test_iteration_limit_has_explicit_message`, `test_model_timeout_gives_timeout_answer`, `test_hanging_tool_does_not_hang_the_agent`, `test_slow_model_runs_out_of_time_before_the_critic` |
+| Self-reflection — не больше 2 раз за запуск, счётчик не сбрасывается | `max_revisions` (0–2), `revisions` на весь запуск. `test_revision_limit_is_two_per_run_and_not_reset`, `test_revise_adds_system_note_and_premium_model` |
+| Каждая итерация — отдельная запись с номером шага, tool name, latency и токенами | `react_step` в structlog и запись `trace`. `test_every_iteration_is_logged` |
+| На провокационной задаче `agent_react` отвечает без вызова tools | правило промпта и «Когда НЕ вызывать» у `send_telegram_message`; проверка `check_provocation_call`. На Windows ReAct отказался без вызовов и предложил Telegram при `chat_id` (`05_provocation_call_react.json`). Наивный агент на `qwen3:4b-instruct` тоже ничего не вызвал (`05_provocation_call_naive.json`); с подставной моделью в песочнице вызвал |
+| В отчёте строка по каждой из 5 задач и total tokens (input + output) по обоим агентам | `docs/agent-react-report.md`, «Результаты»: строка по каждой задаче, итог — 8 314 токенов naive против 17 118 react, 5 наблюдений. Таблица — из `compare_agents.py` (`table`, `summary.json`). `test_compare_writes_logs_summary_and_table` |
+| `agent_naive.py` нетронут, его прогон воспроизводится | файл и его инструменты не менялись с блока 6.1; `test_naive_baseline_is_untouched` (sha256); наивный агент гоняется тем же `run_agent` |
+| В коде нет `max_iterations >= 30` и нет `additionalProperties: true` | диапазон 8–20 в коде и в настройках; у всех схем `additionalProperties: false`. `test_no_additional_properties_true_and_no_huge_iteration_limits`, `test_max_iterations_outside_8_20_is_rejected` |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -3225,6 +3325,8 @@ LLM__MAX_RETRIES=2
 Для оценки RAG (блок 5.6, только офлайн-скрипты): `RAGAS__JUDGE_MODEL` (пусто — `qwen3:4b-instruct`), `RAGAS__JUDGE_BASE_URL` / `RAGAS__JUDGE_API_KEY` (пусто — `LLM__*`; ключ OpenRouter — только в `.env`), `RAGAS__JUDGE_MAX_TOKENS`, `RAGAS__JUDGE_TIMEOUT`, `RAGAS__EMBEDDINGS_MODEL` (пусто — модель поиска), `RAGAS__CONCURRENCY`, `RAGAS__GOLDEN_PATH`, `RAGAS__RESULTS_DIR`, `RAGAS__CACHE_*`; для сервиса — `PHOENIX_LLAMA_INDEX` (пусто — `true`: спаны LlamaIndex в Phoenix).
 
 Для наивного агента (блок 6.1, только CLI): `AGENT__MODEL` (пусто — `gpt-5.4-mini`, канон задания; у OpenRouter — `openai/gpt-5.4-mini`, с Ollama — `qwen3:4b-instruct`) и `AGENT__MAX_STEPS` (пусто — 6). Провайдер, ключ и прокси — те же `LLM__*`, поиск — коллекция `RAG__COLLECTION`.
+
+Для ReAct-агента (блок 6.2, только CLI): `AGENT__MAX_ITERATIONS` (пусто — 10, допустимо 8–20), `AGENT__TIMEOUT_PER_ITERATION_SEC` (пусто — 10 с на итерацию с критиком; Ollama на CPU — 240), `AGENT__MAX_REVISIONS` (пусто — 2), `AGENT__PREMIUM_MODEL` и `AGENT__CRITIC_MODEL` (пусто — `AGENT__MODEL`; канон — `gpt-5.4` и `gpt-5.4-mini`).
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 
