@@ -1,0 +1,47 @@
+{
+  "task_id": "no_data",
+  "expect": "темы нет в базе: честный отказ или поиск по кругу до max_steps",
+  "task": "Какая комиссия у партнёрской программы для реселлеров и в какой день месяца её выплачивают? Найди в базе знаний точный процент.",
+  "model": "qwen3:4b-instruct",
+  "max_steps": 6,
+  "started_at": "2026-10-18T16:32:42+03:00",
+  "wall_ms": 52034.2,
+  "answer": "В базе знаний не найдено информацию о комиссии партнёрской программы для реселлеров, включая точный процент и день выплаты. Рекомендуется обратиться в поддержку или проверить официальный сайт компании для получения актуальных данных.",
+  "error": null,
+  "diagnose": {
+    "outcome": "answer",
+    "steps": 2,
+    "tools": [
+      "search_knowledge_base"
+    ],
+    "unknown_tools": [],
+    "repeated_calls": 0,
+    "tool_errors": 0,
+    "messages_sent": 0,
+    "tool_call_as_text": false,
+    "input_tokens_total": 1225,
+    "input_tokens_last_step": 667,
+    "duration_ms_total": 51758.1
+  },
+  "telegram": [],
+  "trace": [
+    {
+      "step": 0,
+      "tool_name": "search_knowledge_base",
+      "tool_args": "{\"query\":\"комиссия партнёрской программы для реселлеров точный процент день месяца\"}",
+      "tool_result": "В базе знаний ничего не найдено по запросу «комиссия партнёрской программы для реселлеров точный процент день месяца»: лучшая близость 0.46 ниже порога 0.5.",
+      "llm_input_tokens": 558,
+      "llm_output_tokens": 42,
+      "duration_ms": 14317.3
+    },
+    {
+      "step": 1,
+      "tool_name": null,
+      "tool_args": null,
+      "tool_result": null,
+      "llm_input_tokens": 667,
+      "llm_output_tokens": 65,
+      "duration_ms": 37440.8
+    }
+  ]
+}

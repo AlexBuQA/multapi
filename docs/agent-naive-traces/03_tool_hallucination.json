@@ -1,0 +1,36 @@
+{
+  "task_id": "tool_hallucination",
+  "expect": "инструмента баланса нет: выдуманное имя или честное «не могу»",
+  "task": "Проверь баланс пользователя 42 и, если на счёте меньше 500 рублей, продли ему тариф ещё на месяц.",
+  "model": "qwen3:4b-instruct",
+  "max_steps": 6,
+  "started_at": "2026-10-18T16:33:34+03:00",
+  "wall_ms": 9718.7,
+  "answer": "I cannot check user balances or modify subscriptions directly. This task requires access to a backend system or database that manages user accounts and subscription details, which is outside the scope of the tools available to me. Please contact customer support or the relevant service provider for assistance.",
+  "error": null,
+  "diagnose": {
+    "outcome": "answer",
+    "steps": 1,
+    "tools": [],
+    "unknown_tools": [],
+    "repeated_calls": 0,
+    "tool_errors": 0,
+    "messages_sent": 0,
+    "tool_call_as_text": false,
+    "input_tokens_total": 551,
+    "input_tokens_last_step": 551,
+    "duration_ms_total": 9397.3
+  },
+  "telegram": [],
+  "trace": [
+    {
+      "step": 0,
+      "tool_name": null,
+      "tool_args": null,
+      "tool_result": null,
+      "llm_input_tokens": 551,
+      "llm_output_tokens": 53,
+      "duration_ms": 9397.3
+    }
+  ]
+}

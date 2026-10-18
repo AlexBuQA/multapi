@@ -41,6 +41,14 @@ ROOT = Path(__file__).resolve().parents[2]
 TRACE_KEYS = {"step", "tool_name", "tool_args", "tool_result", "llm_input_tokens", "llm_output_tokens", "duration_ms"}
 
 
+@pytest.fixture(autouse=True)
+def no_agent_env(monkeypatch):
+    """AGENT__* из .env разработчика тестам не мешают: src/config.py (блоки 2–3) при импорте вызывает
+    load_dotenv(), и в полном прогоне .env попадает в os.environ — Settings(_env_file=None) его видит."""
+    monkeypatch.delenv("AGENT__MODEL", raising=False)
+    monkeypatch.delenv("AGENT__MAX_STEPS", raising=False)
+
+
 # ---------------------------------------------------------------- подставная модель
 def tool_call(name: str, arguments: str, call_id: str = "call_1") -> SimpleNamespace:
     return SimpleNamespace(id=call_id, type="function", function=SimpleNamespace(name=name, arguments=arguments))
@@ -448,6 +456,40 @@ def test_suite_writes_a_log_per_task(runner, tmp_path, kb, monkeypatch):
     assert hallucination["diagnose"]["tool_errors"] == 1 and hallucination["diagnose"]["tool_call_as_text"] is True
     assert hallucination["diagnose"]["input_tokens_total"] == 200 and hallucination["diagnose"]["outcome"] == "answer"
     assert set(success["trace"][0]) == TRACE_KEYS
+
+
+def test_suite_keeps_a_multiline_message_whole(runner, tmp_path):
+    """Windows, задача 4: сводка из нескольких абзацев — в логе было только «[TELEGRAM → 999] <первая строка>»."""
+    summary = "Время: 16:34.\n\n1. Возврат — 14 дней.\n2. Лимиты API — 60/300/1 200."
+    args = json.dumps({"chat_id": "999", "text": summary}, ensure_ascii=False)
+    client = ScriptedClient(reply(None, tool_call("send_telegram_message", args, "a"),
+                                  tool_call("send_telegram_message", '{"chat_id": "1", "text": "Второе"}', "b")),
+                            reply("Отправил."))
+    task = next(t for t in runner.TASKS if t.id == "long_compound")
+    log = runner.run_suite([task], model="m", max_steps=6, out_dir=tmp_path, client=client)[0]
+    assert log["telegram"] == [f"[TELEGRAM → 999] {summary}", "[TELEGRAM → 1] Второе"]
+    assert log["diagnose"]["messages_sent"] == 2
+
+
+def test_started_at_is_taken_before_the_run(runner, tmp_path, monkeypatch):
+    """started_at — начало задачи, а не момент записи лога (в первом прогоне на Windows было наоборот)."""
+    from datetime import datetime, timedelta, timezone
+
+    clock = [datetime(2026, 10, 18, 16, 33, 44, tzinfo=timezone(timedelta(hours=3)))]
+
+    class FakeDatetime:
+        @staticmethod
+        def now(tz: Any = None) -> datetime:
+            return clock[0]
+
+    def slow_agent(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        clock[0] += timedelta(minutes=3)
+        return {"answer": "ok", "steps": 1, "trace": []}
+
+    monkeypatch.setattr(runner, "datetime", FakeDatetime)
+    monkeypatch.setattr(runner, "run_agent", slow_agent)
+    log = runner.run_task(runner.TASKS[0], model="m", max_steps=6)
+    assert log["started_at"] == "2026-10-18T16:33:44+03:00"
 
 
 def test_suite_survives_a_provider_error(runner, tmp_path, monkeypatch):

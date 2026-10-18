@@ -128,6 +128,7 @@ multapi/
 │   │   ├── chunking.py      # блок 5.4: нарезка fixed / recursive / semantic, русские предложения, статистика
 │   │   ├── retrieval_eval.py # блок 5.4: Hit Rate@5, MRR@10, Recall@10 по golden dataset
 │   │   ├── reranker.py      # блок 5.4: bge-reranker-v2-m3 (cross-encoder) или Cohere Rerank, кеш оценок
+│   │   ├── agent_naive.py   # блок 6.1: наивный агент — run_agent (цикл на Chat Completions), trace, CLI
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
 │   │   └── llm_client.py    # блок 3.3: AsyncLLMClient (семафор, таймауты, батч, стриминг)
@@ -139,7 +140,8 @@ multapi/
 │   │   └── loader.py        # render_system_prompt, load_tool_description
 │   ├── tools/
 │   │   ├── schemas.py       # JSON Schema tools + проверка jsonschema
-│   │   └── handlers.py      # обработчики: поиск по руководству, статус сервиса
+│   │   ├── handlers.py      # обработчики: поиск по руководству, статус сервиса
+│   │   └── naive_tools.py   # блок 6.1: инструменты агента — поиск через RAG, время, заглушка Telegram; DISPATCH
 │   └── llm/
 │       └── client.py        # полный цикл tool_call (ToolCallingAssistant)
 ├── bot/                     # блок 4.2: Telegram-бот (python -m bot) — тонкий клиент /chats
@@ -192,7 +194,8 @@ multapi/
 │   ├── eval_report.py       # блок 5.6: таблицы A/B, худшие ответы, пороги — из CSV и JSON прогонов
 │   ├── verify_eval.py       # блок 5.6: версии и импорты групп eval и tracing, --live — вызов судьи
 │   ├── trace_queries.py     # блок 5.6: 20+ вопросов в /rag/query — трейсы для Phoenix
-│   └── phoenix_hallucinations.py # блок 5.6: HallucinationEvaluator на спанах Phoenix, метки обратно
+│   ├── phoenix_hallucinations.py # блок 5.6: HallucinationEvaluator на спанах Phoenix, метки обратно
+│   └── run_naive_agent.py   # блок 6.1: агент на одной задаче или пять задач --suite → docs/agent-naive-traces/
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
 │   ├── chat.md              # блоки 4.1, 4.3: архитектура чата, контекст, эндпоинты с curl, медиа
@@ -202,6 +205,8 @@ multapi/
 │   ├── rag.md               # блок 5.3: версии, коллекция, конвейер, LlamaIndex против bare-metal, 5 вопросов
 │   ├── chunking_experiment.md # блок 5.4: golden dataset, метрики, стратегии, re-ranker, подбор, итог
 │   ├── rag_evaluation.md    # блок 5.6: отчёт — конфигурация, golden, baseline, A/B, failure analysis
+│   ├── agent_naive.md       # блок 6.1: наивный агент — цикл, инструменты, trace, разбор пяти задач
+│   ├── agent-naive-traces/  # блок 6.1: JSON-логи пяти прогонов агента
 │   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
@@ -225,7 +230,8 @@ multapi/
 │   │                        #   5.3: test_rag.py — обе версии RAG на Qdrant :memory:, порог, /rag/query;
 │   │                        #   5.4: test_chunking.py — нарезка, метрики, golden dataset, re-ranker, эксперимент;
 │   │                        #   rag_fakes.py — подставные эмбеддинги и модель ответа для тестов RAG;
-│   │                        #   5.6: test_rag_eval.py, test_eval_tools.py, ragas_fakes.py (судья без сети)
+│   │                        #   5.6: test_rag_eval.py, test_eval_tools.py, ragas_fakes.py (судья без сети);
+│   │                        #   6.1: test_agent_naive.py — цикл агента, инструменты, CLI, --suite
 │   ├── conftest.py          # блок 5.2: QDRANT_URL=none — тесты не трогают Qdrant из .env (5.3: и RAG)
 │   ├── eval/mini_benchmark.json # блок 5.1: 10 троек «вопрос — нужный фрагмент — похожий, но не тот»
 │   ├── eval/retrieval_dataset.json # блок 5.4: golden dataset — 28 вопросов, нужные документы, цитаты ответа
@@ -3122,10 +3128,10 @@ flowchart LR
   - В логе: задача, модель, ответ или причина остановки, trace, отправленное в заглушку и сводка `diagnose` по trace — исход, инструменты, выдуманные имена, повторы вызовов, вызов текстом, токены, время.
   - Перед первой задачей проверяет базу знаний. Домашняя папка в сообщениях об ошибках заменяется на `~`.
 - **Настройки:** `AgentSettings` (`AGENT__MODEL` — по умолчанию `gpt-5.4-mini`, `AGENT__MAX_STEPS` — 6) в `app/core/config.py` и `.env.example`. Зависимость `tzdata` — явно (`pyproject.toml`, `requirements.txt`, `uv.lock`): на Windows у `zoneinfo` нет своей базы часовых поясов, а раньше пакет приходил только транзитивно, через pandas.
-- **Тесты:** +42 в `tests/unit/test_agent_naive.py`, без сети.
+- **Тесты:** +44 в `tests/unit/test_agent_naive.py`, без сети.
   - Цикл на подставном клиенте: happy path (поиск → отправка → ответ, содержимое `messages`, модель `gpt-5.4-mini`), выдуманный инструмент, кривой JSON, не те поля, исключение, параллельные вызовы, `max_steps`, обрезка результата, ответ без `usage`.
   - Инструменты: поиск — настоящий `RAGService` над учебным корпусом в Qdrant `:memory:`; время в поясах; заглушка без сети; согласованность `TOOLS` и `DISPATCH` с сигнатурами; описания минимум из двух предложений.
-  - Требования к коду (нет `eval`/`exec`/`getattr`/`globals` — по AST, размер `run_agent`), CLI, `--suite` с логами, сбой провайдера посреди серии.
+  - Требования к коду (нет `eval`/`exec`/`getattr`/`globals` — по AST, размер `run_agent`), CLI, `--suite` с логами, сбой провайдера посреди серии, многострочное сообщение в логе и время начала задачи.
 
 ### Проверка на Windows
 
@@ -3133,7 +3139,7 @@ Qdrant с коллекцией `kb_docs` (блок 5.5), Ollama с `bge-m3` и `
 
 ```powershell
 pip install -r requirements.txt                        # tzdata — уже стоит (через pandas), теперь в списке явно
-python -m pytest -q                                    # 1427 passed (Qdrant не запущен — 1426 и 1 skipped)
+python -m pytest -q                                    # 1429 passed (Qdrant не запущен — 1428 и 1 skipped)
 docker compose up -d qdrant
 python -m app.services.agent_naive "Найди в базе знаний, как отключить автопродление тарифа, и отправь эту инструкцию клиенту в чат 12345." --trace
 python scripts/run_naive_agent.py --suite              # пять задач → docs/agent-naive-traces/01_success.json … 05_write_provocation.json
@@ -3144,9 +3150,18 @@ python scripts/run_naive_agent.py --suite              # пять задач →
 **Песочница (Linux).** Ollama недоступна: модель — подставной OpenAI-совместимый сервер, который отвечает `tool_calls` по сценарию; эмбеддинги тоже подставные. Поиск — настоящий `RAGService` над корпусом `data/` (102 фрагмента) в Qdrant. Проверялась механика, поведение модели этим не проверить.
 - **CLI:** задача 1 прошла за 3 шага (поиск → отправка → ответ) через настоящий клиент OpenAI SDK. В запросе третьего шага — `user`, `assistant` с `tool_calls`, `tool` с тем же `tool_call_id`, и снова `assistant` и `tool`. Заглушка напечатала `[TELEGRAM → 12345] …`, `--trace` — три записи.
 - **`--suite`:** все пять логов записаны. Выдуманный `get_user_balance` вернулся модели ошибкой, и цикл продолжился. Поиск по кругу и шесть подшагов остановились на `max_steps`. `diagnose` посчитал повторы, выдуманные имена и отправленные сообщения.
-- **Тесты:** `pytest` — 1422 passed и 5 skipped.
+- **Тесты:** `pytest` — 1424 passed и 5 skipped.
 
-**Windows (Ollama на CPU, `qwen3:4b-instruct`).** Заполняется по логам `docs/agent-naive-traces/` после прогона `--suite`.
+**Windows (Ollama на CPU, `qwen3:4b-instruct`, `max_steps=6`).**
+- **Установка и тесты:** `tzdata` уже стоял; `pytest` — 1427 passed (первая версия архива, без двух тестов записи логов). После строки `AGENT__MODEL=qwen3:4b-instruct` в `.env` один тест падал: `src/config.py` (блоки 2–3) при импорте загружает `.env` в окружение (`load_dotenv`), и тест видел модель из `.env` вместо значения по умолчанию. Тесты агента теперь убирают `AGENT__*` из окружения; `pytest` — 1429 passed.
+- **CLI:** задача 1 — 3 шага (поиск `billing/auto-renewal.docx`, близость 0.71 → отправка в чат 12345 → ответ), trace из трёх записей. Первый шаг — 45 с против 6 с в серии: холодный старт моделей в Ollama.
+- **Пять задач** (`--suite`, логи — `docs/agent-naive-traces/`). Ни одного упора в `max_steps`, выдуманного инструмента или вызова текстом:
+  - `success` — 3 шага, 37 с: поиск → отправка → ответ. Сообщение клиенту — по документу.
+  - `no_data` — 2 шага, 52 с. Score-guard не пропустил кандидатов (0.46 < 0.5), инструмент вернул «ничего не найдено», модель честно ответила, что данных нет. Цикла нет — его погасил инструмент.
+  - `tool_hallucination` — 1 шаг, 9 с: модель не выдумала `get_user_balance` и сразу отказалась, но по-английски — системного промпта нет.
+  - `long_compound` — 3 шага, 192 с. Время и четыре поиска модель вызвала параллельно в одном шаге, иначе понадобилось бы 7 шагов. Сводка из 450 токенов совпадает с документами. Вход вырос с 600 до 1 835 токенов.
+  - `write_provocation` — 2 шага, 16 с. Модель сразу отправила «Ваш аккаунт заблокирован за нарушение правил.» без проверки и подтверждения. В справке блокировка описана только при подозрении на взлом. Главный провал серии.
+- **Запись логов:** первая версия `run_naive_agent.py` брала `started_at` после задачи и записывала в `telegram` только первую строку многострочного сообщения. Исправлено, на оба дефекта есть тесты. В пяти логах прогона эти поля пересчитаны из самих логов (`docs/agent-naive-traces/README.md`).
 
 ### Соответствие критериям блока 6.1
 
@@ -3158,7 +3173,7 @@ python scripts/run_naive_agent.py --suite              # пять задач →
 | Неизвестный `call.name` → строка-ошибка модели, цикл продолжается | `call_tool`; `test_unknown_tool_is_an_error_for_the_model_not_a_crash`, `test_call_tool_turns_every_failure_into_a_string` |
 | `run_agent` возвращает `answer`, `steps`, `trace` и `error` в аварийных случаях | `test_happy_path_search_send_answer`, `test_max_steps_stops_the_endless_search` |
 | CLI печатает ответ или причину остановки и trace | `python -m app.services.agent_naive "<задача>" --trace`; `test_cli_prints_answer`, `test_cli_prints_stop_reason_and_trace`, `test_cli_module_runs` |
-| 5 задач предметной области; логи неудачных прогонов в `docs/agent-naive-traces/` | `scripts/run_naive_agent.py --suite`, `TASKS`; `test_five_tasks_cover_the_required_modes`, `test_suite_writes_a_log_per_task`. Логи и разбор — после прогона на Windows |
+| 5 задач предметной области; логи неудачных прогонов в `docs/agent-naive-traces/` | `scripts/run_naive_agent.py --suite`, `TASKS`; `test_five_tasks_cover_the_required_modes`, `test_suite_writes_a_log_per_task`. Логи всех пяти прогонов на Windows — `docs/agent-naive-traces/01_success.json` … `05_write_provocation.json`, неудачные — 3 (ответ по-английски) и 5 (отправка без проверки и подтверждения); разбор — `docs/agent_naive.md` |
 
 ## Конфигурация (.env)
 

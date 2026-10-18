@@ -97,21 +97,28 @@ def scrub(text: str, home: str | None = None) -> str:
     return text
 
 
+def sent_messages(stdout: str) -> list[str]:
+    """Сообщения заглушки Telegram из stdout прогона. Каждое начинается с «[TELEGRAM → », текст бывает
+    многострочным (сводка задачи 4) — сообщение целиком, а не первая строка."""
+    return [chunk.rstrip("\n") for chunk in re.split(r"(?m)^(?=\[TELEGRAM → )", stdout) if chunk.startswith("[TELEGRAM → ")]
+
+
 def run_task(task: Task, *, model: str, max_steps: int, client: Any = None) -> dict[str, Any]:
     """Одна задача: stdout заглушки Telegram — в лог, исключение провайдера — тоже в лог, не обрывает серию."""
     from openai import OpenAIError
 
     captured = io.StringIO()
+    started_at = datetime.now(ZoneInfo("Europe/Moscow")).isoformat(timespec="seconds")
     started = time.perf_counter()
     with contextlib.redirect_stdout(captured):
         try:
             result = run_agent(task.text, max_steps, client=client, model=model)
         except OpenAIError as exc:
             result = {"answer": None, "steps": 0, "trace": [], "exception": f"{type(exc).__name__}: {exc}"}
-    telegram = [line for line in captured.getvalue().splitlines() if line.startswith("[TELEGRAM")]
+    telegram = sent_messages(captured.getvalue())
     return json.loads(scrub(json.dumps({
         "task_id": task.id, "expect": task.expect, "task": task.text, "model": model, "max_steps": max_steps,
-        "started_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(timespec="seconds"),
+        "started_at": started_at,
         "wall_ms": round((time.perf_counter() - started) * 1000, 1),
         "answer": result.get("answer"), "error": result.get("error") or result.get("exception"),
         "diagnose": diagnose(result, telegram), "telegram": telegram, "trace": result.get("trace", []),
@@ -129,8 +136,8 @@ def run_suite(tasks: list[Task], *, model: str, max_steps: int, out_dir: Path = 
         log = run_task(task, model=model, max_steps=max_steps, client=client)
         path = out_dir / f"{number:02d}_{task.id}.json"
         path.write_text(json.dumps(log, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        for line in log["telegram"]:
-            print("   " + line)
+        for message in log["telegram"]:
+            print("   " + message.replace("\n", "\n   "))
         d = log["diagnose"]
         extra = (f", нет в DISPATCH: {d['unknown_tools']}" if d["unknown_tools"] else "") + \
             (f", повторов вызова: {d['repeated_calls']}" if d["repeated_calls"] else "") + \
