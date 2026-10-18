@@ -482,16 +482,26 @@ DEFAULT_CHAT_SYSTEM_PROMPT = (
 
 
 class AgentSettings(BaseModel):
-    """Наивный агент (блок 6.1): app/services/agent_naive.py. Переменные — с префиксом AGENT__.
+    """Агенты блоков 6.1–6.2: наивный app/services/agent_naive.py и ReAct app/services/agent_react.py.
+    Переменные — с префиксом AGENT__.
 
     Провайдер — тот же, что у сервиса (LLM__BASE_URL, ключ, прокси), модель — своя: агенту нужен
     вызов инструментов (tool_calls), и не каждая модель его держит. По умолчанию — канон задания
     gpt-5.4-mini (OpenAI; у OpenRouter — openai/gpt-5.4-mini); локально — qwen3:4b-instruct в Ollama:
     llama3.2 (3B) часто пишет вызов инструмента текстом в ответе.
+
+    Блок 6.2 (ReAct): лимит итераций — 8–20 (задание), таймаут итерации — вызов модели, инструмент и
+    критик вместе. Канон задания — 5–15 с для облачной модели; Ollama на CPU отвечает за 10–130 с,
+    локально нужно 240. Премиум-модель — для шага сразу после REVISE критика (канон — gpt-5.4).
     """
 
     model: str | None = None                     # пусто — gpt-5.4-mini (agent_naive.DEFAULT_MODEL)
-    max_steps: int = Field(default=6, ge=1, le=20)   # guardrail: шагов цикла агента не больше
+    max_steps: int = Field(default=6, ge=1, le=20)   # guardrail наивного агента: шагов цикла не больше
+    max_iterations: int = Field(default=10, ge=8, le=20)          # ReAct: итераций не больше
+    timeout_per_iteration_sec: float = Field(default=10.0, gt=0, le=600)
+    max_revisions: int = Field(default=2, ge=0, le=2)             # REVISE критика за один запуск
+    premium_model: str | None = None             # пусто — та же, что AGENT__MODEL
+    critic_model: str | None = None              # пусто — та же, что AGENT__MODEL
 
 
 class Settings(BaseSettings):
