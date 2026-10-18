@@ -1,0 +1,45 @@
+{
+  "max_iterations": 6,
+  "broken": {
+    "task": "Найди в базе знаний точный срок возврата оплаты. Если поиск не сработал, попробуй ещё раз другими словами — без найденного срока не отвечай.",
+    "custom": {
+      "latency_ms": 65639.7,
+      "steps": 3,
+      "searches_requested": 2,
+      "searches_executed": 2,
+      "force_finish": false,
+      "answer": "В базе знаний ничего не найдено по запросам о сроке возврата оплаты. Данных для ответа нет.",
+      "total_tokens": 3730
+    },
+    "prebuilt": {
+      "latency_ms": 66181.6,
+      "steps": 3,
+      "searches_requested": 2,
+      "searches_executed": 2,
+      "force_finish": false,
+      "answer": "В базе знаний ничего не найдено по запросам о сроке возврата оплаты. Данных для ответа нет.",
+      "total_tokens": 3730
+    }
+  },
+  "useless": {
+    "task": "Найди в базе знаний точный срок возврата оплаты. Ищи по одной формулировке за вызов; если ничего не найдено — переформулируй и ищи снова, всего не меньше восьми попыток. Не отвечай, пока срок не найден.",
+    "custom": {
+      "latency_ms": 92605.5,
+      "steps": 6,
+      "searches_requested": 6,
+      "searches_executed": 5,
+      "force_finish": true,
+      "answer": "Превышен лимит итераций (6): агент не дал финального ответа.",
+      "total_tokens": 8369
+    },
+    "prebuilt": {
+      "latency_ms": 93205.2,
+      "steps": 6,
+      "searches_requested": 6,
+      "searches_executed": 6,
+      "force_finish": true,
+      "answer": "Model call limits exceeded: run limit (6/6)",
+      "total_tokens": 8369
+    }
+  }
+}

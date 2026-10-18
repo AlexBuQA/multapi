@@ -3399,7 +3399,23 @@ python scripts/bench_agents.py                         # 5 × 3 × 3 = 45 про
 - **PNG:** mermaid.ink недоступен — сохранены только `.mmd`.
 - **Тесты:** `pytest` — 1524 passed и 5 skipped.
 
-**Windows.** Первый прогон (18.10): `pytest` — 1527 passed, PNG схемы сохранён через mermaid.ink (`docs/agent-graph.png`), оба графа через CLI, 45 прогонов бенчмарка. Его latency искажена кешем промпта Ollama — разбор в отчёте (раздел 5), файлы — в `docs/agent-graph-bench/run1-no-cache-reset/`. Итоговые числа — по повторному прогону со сбросом кеша.
+**Windows.** `qwen3:4b-instruct` в Ollama на CPU, температура 0.
+- **Тесты:** `pytest` — 1529 passed.
+- **Схема и CLI:** PNG сохранён через mermaid.ink (`docs/agent-graph.png`). Оба графа ответили на «Который сейчас час в Екатеринбурге?» за 2 вызова модели.
+- **Бенчмарк**, 45 прогонов со сбросом кеша перед каждым:
+
+  | | b62_loop | custom | prebuilt |
+  |---|---|---|---|
+  | latency, сумма средних по задачам | 763 с | 336 с | 334 с |
+  | total_tokens | 18 739 | 12 926 | 12 927 |
+  | Вызовов модели | 18 | 10 | 10 |
+  | Корректно | 12 из 15 | 12 из 15 | 12 из 15 |
+
+  - Custom и prebuilt не различимы: запросы одинаковые, разница по latency на задаче не больше 1,6 %.
+  - Цикл 6.2 в 2–3 раза медленнее из-за критика. Агентская часть у него та же, токен в токен.
+  - В `compose_time_kb_send` все три не отправили сообщение. Графы при этом пишут «отправлено», а 6.2 после проверки ответа честно говорит, что нет.
+- **Stop-check:** при сломанном поиске модель сдаётся сама за 3 вызова. В сценарии `useless` кран сработал у обоих графов на 6-м вызове: custom выполнил 5 поисков из 6, prebuilt — 6 из 6.
+- **Первый прогон** (без сброса кеша) показал prebuilt в 2,5–4,5 раза быстрее custom. Это был кеш промпта Ollama, а не фреймворк. Разбор — в отчёте (раздел 5), файлы — в `docs/agent-graph-bench/run1-no-cache-reset/`.
 
 ### Соответствие критериям блока 6.3
 
@@ -3408,10 +3424,10 @@ python scripts/bench_agents.py                         # 5 × 3 × 3 = 45 про
 | `AgentState` с `messages: Annotated[..., add_messages]`, `iteration_count: int`, `tool_results: Annotated[..., operator.add]`; SDK-клиентов и ключей в state нет | `app/services/agent_graph.py`; `test_agent_state_contract` |
 | Два рабочих графа: `custom_graph` (StateGraph, три узла, conditional edge) и `prebuilt_graph` (`create_agent`); оба отвечают на одну задачу | `build_custom_graph`, `build_prebuilt_graph`, атрибуты модуля; `test_prebuilt_graph_same_task_same_answer`, CLI с `--prebuilt` |
 | Router — отдельная функция, читает state, не пишет, без сети, `Literal[...]` | `route_after_model`; `test_route_after_model`, `test_router_is_typed_with_literal` |
-| Stop-кран: `iteration_count >= 6` → `force_finish`; проверено на сломанном инструменте | `test_stop_tap_on_a_broken_tool`, `test_prebuilt_stops_after_six_model_calls`; на живой модели — `bench_agents.py --stop-check`: поиск падает или пуст |
+| Stop-кран: `iteration_count >= 6` → `force_finish`; проверено на сломанном инструменте | `test_stop_tap_on_a_broken_tool`, `test_prebuilt_stops_after_six_model_calls`; на живой модели — `bench_agents.py --stop-check`: в сценарии `useless` оба графа остановлены на 6-м вызове |
 | `visualize_graph.py` сохраняет `agent-graph-custom.mmd` и `agent-graph-prebuilt.mmd`, совпадают с кодом | `docs/agent-graph-*.mmd`; `test_mermaid_files_match_the_code` |
-| `bench_agents.py`: 5 задач × 3 реализации × ≥ 3 повтора, таблица в отчёте с числами | `--repeats 3` по умолчанию, таблицы между метками `bench:start`/`bench:end`; `test_bench_series_journal_resume_and_report`. Числа — после повторного прогона на Windows |
-| В отчёте Mermaid-схема (раздел 4) и вывод custom vs prebuilt (раздел 6) на своих числах | `docs/agent-graph-report.md`; вывод — после повторного прогона |
+| `bench_agents.py`: 5 задач × 3 реализации × ≥ 3 повтора, таблица в отчёте с числами | `--repeats 3` по умолчанию, таблицы между метками `bench:start`/`bench:end`; `test_bench_series_journal_resume_and_report`. На Windows — 45 прогонов, итого 763 / 336 / 334 с и 18 739 / 12 926 / 12 927 токенов |
+| В отчёте Mermaid-схема (раздел 4) и вывод custom vs prebuilt (раздел 6) на своих числах | `docs/agent-graph-report.md`: по скорости и токенам пути не различимы, выбор — по семантике. Prebuilt — для стандартного цикла, custom — для узлов критика и проверки, `interrupt` и остановки без выполнения инструментов шестого вызова; для диплома — custom |
 | Описан реальный баг отладки (раздел 7) | 7.1 — `additionalProperties: false` не доходил до модели без `strict=True`, найден по журналу запросов подставного сервера; 7.2 — переносы строк docstring в описаниях инструментов, найдены по prompt_tokens первого прогона |
 
 ## Конфигурация (.env)
