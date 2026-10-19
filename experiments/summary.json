@@ -1,0 +1,64 @@
+{
+  "single_agent": {
+    "questions": 5,
+    "errors": 0,
+    "tokens_mean": 2126.4,
+    "input_tokens_mean": 1941.0,
+    "output_tokens_mean": 185.4,
+    "llm_calls_mean": 2.0,
+    "llm_calls_without_usage": 0,
+    "latency_p50_ms": 106064.4,
+    "latency_mean_ms": 96475.24,
+    "handoffs_mean": 0.0,
+    "searches_mean": 1.4,
+    "judged": 5,
+    "correctness_mean": 4.8,
+    "faithfulness_mean": 5.0,
+    "facts_hit": 8,
+    "facts_total": 9,
+    "expected": 4,
+    "with_citations": 4,
+    "citable": 4,
+    "with_file_refs": 0,
+    "with_unknown_sources": 1,
+    "models": [
+      "qwen3:4b-instruct"
+    ]
+  },
+  "multi_agent": {
+    "questions": 5,
+    "errors": 0,
+    "tokens_mean": 5153.8,
+    "input_tokens_mean": 4688.2,
+    "output_tokens_mean": 465.6,
+    "llm_calls_mean": 5.4,
+    "llm_calls_without_usage": 0,
+    "latency_p50_ms": 183602.0,
+    "latency_mean_ms": 209874.04,
+    "handoffs_mean": 3.0,
+    "searches_mean": 2.2,
+    "judged": 5,
+    "correctness_mean": 5.0,
+    "faithfulness_mean": 5.0,
+    "facts_hit": 9,
+    "facts_total": 9,
+    "expected": 5,
+    "with_citations": 2,
+    "citable": 4,
+    "with_file_refs": 2,
+    "with_unknown_sources": 2,
+    "models": [
+      "qwen3:4b-instruct"
+    ]
+  },
+  "delta": {
+    "tokens_x": 2.42,
+    "llm_calls_x": 2.7,
+    "latency_p50_x": 1.73,
+    "handoffs_diff": 3.0,
+    "correctness_diff": 0.2,
+    "faithfulness_diff": 0.0,
+    "facts_hit_diff": 1,
+    "expected_diff": 1
+  }
+}

@@ -271,14 +271,45 @@ def test_search_tool_returns_top3_with_sources(monkeypatch: pytest.MonkeyPatch) 
 
 def test_check_answer() -> None:
     by_id = {q.id: q for q in common.QUESTIONS}
-    q4 = common.check_answer(by_id["q4"], "Проверьте баланс [1], оплатите через СБП [1]; поддержка ответит за 1 час [2].")
-    assert q4 == {"facts_hit": 3, "facts_total": 3, "citations": [1, 2], "refused": False, "expected": True}
+    contexts = [f"[billing/card-payment-fails.docx, близость 0.72] текст\n\n{FRAGMENT}",
+                "[support/support-regulation_v2.3.pdf, близость 0.60] текст"]
+    answer = ("Проверьте баланс [1], оплатите через СБП [1]; поддержка ответит за 1 час [2].\n\nИсточники:\n"
+              "[1] billing/card-payment-fails.docx\n[2] support/support-regulation_v2.3.pdf  ")
+    assert common.check_answer(by_id["q4"], answer, contexts) == {
+        "facts_hit": 3, "facts_total": 3, "citations": [1, 2], "file_refs": 0,
+        "sources": ["billing/card-payment-fails.docx", "support/support-regulation_v2.3.pdf"], "unknown_sources": [],
+        "refused": False, "expected": True}
     q5 = common.check_answer(by_id["q5"], "В базе знаний нет информации об интеграции с amoCRM.")
     assert q5["refused"] is True and q5["expected"] is True and q5["facts_total"] == 0
     assert common.check_answer(by_id["q5"], "Откройте «Интеграции» → amoCRM.")["expected"] is False
     q3 = common.check_answer(by_id["q3"], "Письмо придёт за 3 дня, спишут в последний день.")
     assert q3["facts_hit"] == 2 and q3["citations"] == []
     assert common.check_answer(by_id["q5"], "Ничего не нашёл в справке.")["refused"] is True
+
+
+def test_check_answer_counts_citations_only_in_the_answer_text() -> None:
+    """Как у writer на Windows: в тексте — файлы в скобках, номера — только в списке источников; источник с
+    лишним «team/» и пример из промпта в отказе — файлы, которых поиск не возвращал."""
+    by_id = {q.id: q for q in common.QUESTIONS}
+    contexts = [FRAGMENT]
+    files = common.check_answer(by_id["q2"], "Лимит — 300 [api/faq-api.md], при превышении — 429 [api/faq-api.md]."
+                                "\n\nИсточники:\n[1] api/faq-api.md", contexts)
+    assert files["citations"] == [] and files["file_refs"] == 2 and files["unknown_sources"] == []
+    assert files["facts_hit"] == 2 and files["expected"] is True
+    wrong = common.check_answer(by_id["q2"], "Лимит — 300 [1], код 429 [1].\nИсточники:\n[1] team/api/faq-api.md",
+                                contexts)
+    assert wrong["citations"] == [1] and wrong["unknown_sources"] == ["team/api/faq-api.md"]
+    refusal = common.check_answer(by_id["q5"], "В базе знаний нет информации об этом.\n\nИсточники:\n"
+                                  "[1] В базе знаний ничего не найдено по запросу «amoCRM»", ["В базе знаний ничего…"])
+    assert refusal["expected"] is True and refusal["unknown_sources"] == [
+        "В базе знаний ничего не найдено по запросу «amoCRM»"]
+
+
+def test_recheck_updates_stored_checks() -> None:
+    rec = _rec("multi_agent", "q2", 1, 1, 1, 3)
+    rec["answer"] = "300 запросов, код 429 [api/faq-api.md].\nИсточники:\n[1] api/faq-api.md"
+    assert compare.recheck([rec]) == 1 and rec["checks"]["file_refs"] == 1 and rec["checks"]["citations"] == []
+    assert compare.recheck([rec]) == 0
 
 
 def test_save_records_replaces_only_same_implementation_and_question(tmp_path: Any) -> None:

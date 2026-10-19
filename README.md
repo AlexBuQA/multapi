@@ -3550,6 +3550,8 @@ docker compose logs app | Select-String TELEGRAM                                
 
 Исследование с решением на выходе: supervisor-граф из двух агентов против одного `create_agent` на тех же
 инструментах. Решение определяет agent-слой диплома. Прототипы — в `experiments/`, `app/` не менялся.
+**Решение — мультиагент в дипломе не используется:** ×2.42 токенов и +73 % latency p50 за +0.2 балла судьи
+на одном вопросе из пяти. Agent-слой — один агент с tools блоков 6.3–6.4.
 Отчёт — [`docs/multi-agent-report.md`](docs/multi-agent-report.md), схема —
 [`docs/architecture-multi-agent.md`](docs/architecture-multi-agent.md).
 
@@ -3575,9 +3577,11 @@ flowchart LR
   - инструмент — RAG блока 5.5, до 3 фрагментов с файлом и близостью;
   - одинаковые правила поиска и формата ответа, одинаковые бюджеты `create_agent`, сброс KV-кеша Ollama перед вопросом;
   - callback `Meter`: вызовы модели и токены по агентам.
-- **`experiments/compare.py`** — LLM-судья (`RAGAS__JUDGE_*` блока 5.6, correctness и faithfulness 1–5) и детерминированные проверки. Сводка — в `experiments/summary.json`, таблицы для отчёта — markdown в консоль.
+- **`experiments/compare.py`** — LLM-судья (`RAGAS__JUDGE_*` блока 5.6, correctness и faithfulness 1–5) и детерминированные проверки.
+  - Проверки пересчитываются по сохранённым ответам: ключевые факты, номера `[n]` в тексте ответа, ссылки файлом вместо номера, источники, которых не было в поиске.
+  - Сводка — в `experiments/summary.json`, таблицы для отчёта — markdown в консоль.
 - **`experiments/results.json`** — одна запись на (реализация, вопрос): `total_tokens`, `llm_calls`, `latency_ms`, `handoff_count`, вызовы по агентам, поиски, ответ, проверки, оценки судьи.
-- **Тесты:** +21 в `tests/test_multi_agent.py`, без сети, на модели-сценарии.
+- **Тесты:** +23 в `tests/test_multi_agent.py`, без сети, на модели-сценарии.
   - Один объект инструмента в обеих реализациях, общие правила промптов.
   - Маршрут и счётчики, чистый контекст агентов, один thread на все вопросы.
   - Бюджет передач, запасной маршрут, бюджеты `create_agent`.
@@ -3588,8 +3592,8 @@ flowchart LR
 Нужны Ollama с `qwen3:4b-instruct` и `bge-m3`, Qdrant из compose с коллекцией `kb_docs` (блок 5.5) и судья из `.env` (`RAGAS__JUDGE_*`; пусто — та же Ollama).
 
 ```powershell
-python -m pytest tests/test_multi_agent.py -q          # 21 passed
-python -m pytest -q                                    # 1576 passed
+python -m pytest tests/test_multi_agent.py -q          # 23 passed
+python -m pytest -q                                    # 1578 passed
 docker compose up -d qdrant
 New-Item -ItemType Directory -Force var | Out-Null              # логи — в var/ (в .gitignore)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -3597,12 +3601,13 @@ $env:PYTHONUTF8 = "1"
 python experiments/single_agent_baseline.py --model qwen3:4b-instruct | Tee-Object -FilePath var\exp65-single.log
 python experiments/multi_agent_langgraph.py --model qwen3:4b-instruct | Tee-Object -FilePath var\exp65-multi.log
 python experiments/compare.py | Tee-Object -FilePath var\exp65-compare.log
+python experiments/compare.py --no-judge               # таблицы по сохранённым results.json, без вызовов модели
 ```
 
 ### Результаты
 
 **Песочница (Linux).**
-- **Тесты:** `pytest` — 1528 passed и 48 skipped (без Postgres), из них 21 новый.
+- **Тесты:** `pytest` — 1530 passed и 48 skipped (без Postgres), из них 23 новых.
 - **Оба скрипта прогнаны на подставной модели**, по записанному сценарию для каждой роли; поиск — настоящий RAG по Qdrant.
   - Прошли все 5 вопросов, в `results.json` 10 записей.
   - Маршрут мультиагента — `supervisor → researcher → supervisor → writer`; на q4 — два раунда researcher, третий выбор supervisor сделал по бюджету, без вызова модели.
@@ -3610,20 +3615,34 @@ python experiments/compare.py | Tee-Object -FilePath var\exp65-compare.log
   - `compare.py` собрал таблицы. Числа подставной модели — проверка конвейера, а не замер.
 - **Схема** `docs/architecture-multi-agent.md` — обе Mermaid-схемы проходят парсер Mermaid.
 
-**Windows.** Заполняется после прогона.
+**Windows.** `qwen3:4b-instruct` в Ollama на CPU, судья — та же модель.
+- **Тесты:** `pytest` — 1576 passed на первой версии (21 новый тест).
+- **Прогон:**
+  - оба скрипта прошли 5 вопросов без ошибок, в `results.json` 10 записей, usage есть у всех вызовов модели;
+  - маршрут мультиагента на всех пяти — `supervisor → researcher → supervisor → writer`;
+  - в thread `exp-langgraph` 30 чек-пойнтов.
+- **Сравнение** (single → multi):
+  - токены 2 126 → 5 154 (×2.42), вызовов модели 2.0 → 5.4;
+  - latency p50 106 → 184 с (×1.73), передач управления 0 → 3;
+  - судья 4.80 → 5.00, ключевых фактов 8/9 → 9/9.
+- **Разница по ответам:**
+  - на q4 мультиагент сделал 4 поиска и нашёл срок ответа поддержки «1 час», single-agent сделал 2 поиска и написал «в течение нескольких минут»;
+  - номера `[n]` в тексте — 4/4 у single-agent и 2/4 у мультиагента: writer перенёс в ответ пометки researcher «[файл]»;
+  - supervisor исказил в задании writer лимит 300 → 30 000.
+- **Проверка цитат после прогона стала строже:** номер в самом списке «Источники:» больше не считается цитатой. `compare.py --no-judge` пересчитал `checks` по сохранённым ответам, остальные поля `results.json` не менялись.
 
 ### Соответствие критериям блока 6.5
 
 | Критерий | Реализация |
 |---|---|
-| `multi_agent_langgraph.py` прогоняет 5 вопросов, финальный ответ с цитированием | `ask` по `QUESTIONS`; writer по `ANSWER_RULES`; `checks.citations` в `results.json`; `test_team_route_metrics_and_citations` |
+| `multi_agent_langgraph.py` прогоняет 5 вопросов, финальный ответ с цитированием | `ask` по `QUESTIONS`; на Windows — 5 из 5 без ошибок; `test_team_route_metrics_and_citations` |
 | `single_agent_baseline.py` — те же 5 вопросов одним `create_agent` с тем же tool | `build_baseline`; `test_both_implementations_use_the_same_tool_object` |
 | `results.json` — токены, `llm_calls`, `latency_ms`, `handoff_count` для 5 × 2 | `record` и `save_records`; `test_save_records_replaces_only_same_implementation_and_question` |
 | Отчёт: таблица single vs multi, абзац про Anthropic, `## Решение` | `docs/multi-agent-report.md`, разделы 5, 6 и «Решение» |
 | `architecture-multi-agent.md` — Mermaid supervisor-графа из `draw_mermaid()` | `write_architecture`; `test_architecture_file_has_supervisor_graph` |
-| Решение «использую / не использую» обосновано числами и признаками задачи | отчёт, «Решение» — по прогону на Windows |
+| Решение «использую / не использую» обосновано числами и признаками задачи | «не использую»: отчёт, «Решение» — признаки задачи, числа раздела 5, сопоставление с Anthropic |
 | `search_knowledge_base` — реальный RAG, одна реализация в обоих скриптах | `experiments/common.py` поверх `RAGService.retrieve` блока 5.5 |
-| Цитаты `[1]`, `[2]` в ответе мультиагента | `ANSWER_RULES` в промпте writer; проверка `CITATION` в `check_answer` |
+| Цитаты `[1]`, `[2]` в ответе мультиагента | список «Источники:» с номерами — во всех 4 ответах по базе; номера в тексте — в 2 из 4 (q1, q3), в q2 и q4 writer поставил файлы в скобках; `check_answer` считает это отдельно (отчёт, раздел 5) |
 
 ## Конфигурация (.env)
 

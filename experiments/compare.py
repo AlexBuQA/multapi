@@ -12,7 +12,9 @@ Ollama), температура 0. Один вызов на ответ, две �
 - faithfulness — всё ли в ответе опирается на фрагменты, которые вернул search_knowledge_base (тот же смысл,
   что у RAGAS faithfulness, но одной оценкой судьи, а не разбором на утверждения).
 Оценки пишутся в записи results.json (поле judge), сводка — в experiments/summary.json, таблицы для
-docs/multi-agent-report.md — в stdout (markdown).
+docs/multi-agent-report.md — в stdout (markdown). Детерминированные проверки (поле checks) compare.py каждый
+раз пересчитывает по сохранённым ответам и результатам поиска: правка check_answer не требует нового прогона
+агентов.
 """
 from __future__ import annotations
 
@@ -28,7 +30,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experiments.common import IMPLEMENTATIONS, QUESTIONS, RESULTS, load_records, write_json  # noqa: E402
+from experiments.common import (  # noqa: E402
+    IMPLEMENTATIONS,
+    QUESTIONS,
+    RESULTS,
+    check_answer,
+    load_records,
+    write_json,
+)
 
 SUMMARY = ROOT / "experiments" / "summary.json"
 TITLES = {"single_agent": "Single-agent", "multi_agent": "Multi-agent"}
@@ -106,6 +115,18 @@ def judge_records(records: list[dict[str, Any]], model: Any, *, info: dict[str, 
     return done
 
 
+def recheck(records: list[dict[str, Any]]) -> int:
+    """checks по текущему check_answer: из ответа и того, что вернул поиск. Возвращает число изменённых записей."""
+    by_id = {q.id: q for q in QUESTIONS}
+    changed = 0
+    for rec in records:
+        checks = check_answer(by_id[rec["question_id"]], rec.get("answer") or "", rec.get("contexts") or [])
+        if checks != rec.get("checks"):
+            rec["checks"] = checks
+            changed += 1
+    return changed
+
+
 # ---------------------------------------------------------------- сводка
 def _mean(values: list[float]) -> float | None:
     return round(statistics.fmean(values), 2) if values else None
@@ -136,6 +157,8 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "facts_total": sum(r["checks"]["facts_total"] for r in rows),
             "expected": sum(bool(r["checks"]["expected"]) for r in rows),
             "with_citations": sum(bool(r["checks"]["citations"]) for r in citable), "citable": len(citable),
+            "with_file_refs": sum(bool(r["checks"]["file_refs"]) for r in citable),
+            "with_unknown_sources": sum(bool(r["checks"]["unknown_sources"]) for r in rows),
             "models": sorted({str(r.get("model")) for r in rows}),
         }
     if all(impl in out for impl in IMPLEMENTATIONS):
@@ -171,6 +194,10 @@ def _plus(value: float | None, digits: int = 1) -> str:
     return "—" if value is None else f"{value:+.{digits}f}".replace("-", "−")
 
 
+def _share(stats: dict[str, Any], part: str, whole: str) -> str:
+    return f"{stats.get(part, '—')}/{stats.get(whole, '—')}"
+
+
 def main_table(summary: dict[str, Any]) -> str:
     single, multi = summary.get("single_agent", {}), summary.get("multi_agent", {})
     delta = summary.get("delta", {})
@@ -192,8 +219,12 @@ def main_table(summary: dict[str, Any]) -> str:
          f"{multi.get('facts_hit', '—')}/{multi.get('facts_total', '—')}", _plus(delta.get("facts_hit_diff"), 0)),
         ("Ожидаемое поведение (все факты / честный отказ)", f"{single.get('expected', '—')}/{n_single}",
          f"{multi.get('expected', '—')}/{n_multi}", _plus(delta.get("expected_diff"), 0)),
-        ("Ответы с цитатами [n] (вопросы по базе)", f"{single.get('with_citations', '—')}/{single.get('citable', '—')}",
-         f"{multi.get('with_citations', '—')}/{multi.get('citable', '—')}", ""),
+        ("Цитаты [n] в тексте ответа (вопросы по базе)", _share(single, "with_citations", "citable"),
+         _share(multi, "with_citations", "citable"), ""),
+        ("Ссылка файлом вместо номера (вопросы по базе)", _share(single, "with_file_refs", "citable"),
+         _share(multi, "with_file_refs", "citable"), ""),
+        ("В «Источниках» файл, которого не было в поиске", _share(single, "with_unknown_sources", "questions"),
+         _share(multi, "with_unknown_sources", "questions"), ""),
     ]
     head = (f"| Метрика | Single-agent (среднее по {n_single}) | Multi-agent (среднее по {n_multi}) | Δ |\n"
             "|---|---:|---:|---:|")
@@ -202,7 +233,8 @@ def main_table(summary: dict[str, Any]) -> str:
 
 def per_question_table(records: list[dict[str, Any]]) -> str:
     lines = [("| Вопрос | Реализация | Токены | LLM-вызовы (по агентам) | Latency, мс | Передачи | Поиски | Факты | "
-              "Цитаты | Судья c/f |"), "|---|---|---:|---|---:|---:|---:|---:|---|---|"]
+              "Цитаты в тексте | Источник не из поиска | Судья c/f |"),
+             "|---|---|---:|---|---:|---:|---:|---:|---|---|---|"]
     for question in QUESTIONS:
         for impl in IMPLEMENTATIONS:
             rec = next((r for r in records if r["implementation"] == impl and r["question_id"] == question.id), None)
@@ -214,9 +246,13 @@ def per_question_table(records: list[dict[str, Any]]) -> str:
             checks = rec["checks"]
             facts = ("отказ" if checks["refused"] else "нет отказа") if question.kind == "out_of_base" else \
                 f"{checks['facts_hit']}/{checks['facts_total']}"
+            cited = ", ".join(map(str, checks["citations"])) or "—"
+            if checks["file_refs"]:
+                cited += f"; файлом ×{checks['file_refs']}"
+            unknown = "; ".join(checks["unknown_sources"]) or "—"
             lines.append(f"| {question.id} ({question.kind}) | {TITLES[impl]} | {_num(rec['total_tokens'], 0)} | "
                          f"{rec['llm_calls']} ({calls}) | {_num(rec['latency_ms'], 0)} | {rec['handoff_count']} | "
-                         f"{rec['searches']} | {facts} | {checks['citations'] or '—'} | {scores} |")
+                         f"{rec['searches']} | {facts} | {cited} | {unknown} | {scores} |")
     return "\n".join(lines)
 
 
@@ -235,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Нет записей в {args.results}: сначала experiments/single_agent_baseline.py и "
               "experiments/multi_agent_langgraph.py")
         return 1
+    changed = recheck(records)
+    if changed:
+        print(f"Проверки ответов пересчитаны: изменились в {changed} записях")
     if not args.no_judge:
         from urllib.parse import urlsplit
 
@@ -245,12 +284,14 @@ def main(argv: list[str] | None = None) -> int:
         host = urlsplit(cfg.ragas.judge_base_url or cfg.llm.base_url or "").hostname
         info = {"judge_model": cfg.ragas.judge_model, "judge_host": host}
         print(f"Судья: {info['judge_model']} @ {host}")
-        if judge_records(records, model, info=info, rejudge=args.rejudge):
-            write_json(args.results, records)
+        changed += judge_records(records, model, info=info, rejudge=args.rejudge)
+    if changed:
+        write_json(args.results, records)
     summary = summarize(records)
     write_json(args.summary, summary)
     print("\n" + main_table(summary) + "\n\n" + per_question_table(records))
-    print(f"\nСводка: {args.summary.relative_to(ROOT).as_posix() if args.summary.is_relative_to(ROOT) else args.summary}")
+    shown = args.summary.relative_to(ROOT).as_posix() if args.summary.is_relative_to(ROOT) else args.summary
+    print(f"\nСводка: {shown}")
     return 0
 
 

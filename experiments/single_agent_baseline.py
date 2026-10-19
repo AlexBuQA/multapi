@@ -58,7 +58,8 @@ def build_baseline(model: BaseChatModel, *, tools: list[BaseTool] | None = None,
                         checkpointer=checkpointer)
 
 
-def ask(agent: Any, question: Question, *, info: dict[str, Any], model: Any, cache_reset: bool = True) -> dict[str, Any]:
+def ask(agent: Any, question: Question, *, info: dict[str, Any], model: Any,
+        cache_reset: bool = True) -> dict[str, Any]:
     if cache_reset:
         reset_cache(model)
     meter = Meter()

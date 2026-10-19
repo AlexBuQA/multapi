@@ -256,14 +256,35 @@ def normalize(text: str) -> str:
     return " ".join(str(text).lower().replace("ё", "е").replace(" ", " ").replace(" ", " ").split())
 
 
-def check_answer(question: Question, answer: str) -> dict[str, Any]:
-    """Без модели: сколько ключевых фактов эталона есть в ответе, какие номера цитат [n] в нём стоят и есть ли
-    честный отказ. expected — ответ ведёт себя как нужно: все факты (вопрос по базе) или отказ (вне базы)."""
-    text = normalize(answer)
+FILE_REF = re.compile(r"\[([^\]\s]*/[^\]\s]+)\]")                 # «[billing/auto-renewal.docx]» вместо номера
+SOURCES_HEADER = re.compile(r"(?:^|\n)[ \t]*Источники[ \t]*:", re.IGNORECASE)
+LISTED = re.compile(r"^[ \t]*\[(\d{1,2})\][ \t]*(.+?)[ \t]*$", re.MULTILINE)
+SEARCHED = re.compile(r"^\[([^,\]\n]+), близость", re.MULTILINE)
+
+
+def split_answer(answer: str) -> tuple[str, str]:
+    """Текст ответа и список «Источники:» после него (если есть)."""
+    parts = SOURCES_HEADER.split(answer, maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+def check_answer(question: Question, answer: str, contexts: Iterable[str] = ()) -> dict[str, Any]:
+    """Без модели, по тексту ответа до строки «Источники:»:
+    - facts_hit — сколько ключевых фактов эталона есть в ответе; refused — есть ли честный отказ;
+    - expected — ответ ведёт себя как нужно: все факты (вопрос по базе) или отказ (вне базы);
+    - citations — номера [n] в тексте ответа (номера в самом списке источников не считаются);
+    - file_refs — ссылки файлом в скобках вместо номера, «[billing/auto-renewal.docx]»;
+    - sources — файлы из списка «Источники:», unknown_sources — те из них, которых не было в результатах
+      search_knowledge_base (contexts): выдуманный или искажённый источник."""
+    body, tail = split_answer(answer)
+    text = normalize(body)
     hits = sum(any(normalize(alt) in text for alt in alts) for alts in question.key_facts)
     refused = bool(REFUSAL.search(text))
+    sources = [match.group(2) for match in LISTED.finditer(tail)]
+    searched = {name for context in contexts for name in SEARCHED.findall(context)}
     return {"facts_hit": hits, "facts_total": len(question.key_facts),
-            "citations": sorted({int(n) for n in CITATION.findall(answer)}), "refused": refused,
+            "citations": sorted({int(n) for n in CITATION.findall(body)}), "file_refs": len(FILE_REF.findall(body)),
+            "sources": sources, "unknown_sources": [s for s in sources if s not in searched], "refused": refused,
             "expected": refused if question.kind == "out_of_base" else hits == len(question.key_facts)}
 
 
@@ -326,8 +347,9 @@ def record(implementation: str, question: Question, *, info: dict[str, Any], ans
     return {"implementation": implementation, "question_id": question.id, "kind": question.kind,
             "question": question.text, **meter.as_record(), "latency_ms": round(latency_ms, 1),
             "handoff_count": handoff_count, "searches": len(queries), "queries": queries, **extra,
-            "answer": answer, "checks": check_answer(question, answer), "contexts": contexts, "error": error,
-            **info, "cache_reset": cache_reset, "finished_at": datetime.now(UTC).isoformat(timespec="seconds")}
+            "answer": answer, "checks": check_answer(question, answer, contexts), "contexts": contexts,
+            "error": error, **info, "cache_reset": cache_reset,
+            "finished_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
 
 def load_records(path: Path = RESULTS) -> list[dict[str, Any]]:
@@ -355,7 +377,8 @@ def print_result(rec: dict[str, Any]) -> None:
     print(f"\nОтвет:\n{rec['answer'] or '— (пусто)'}")
     print(f"tokens={rec['total_tokens']} llm_calls={rec['llm_calls']} latency_ms={rec['latency_ms']:.0f} "
           f"handoffs={rec['handoff_count']} searches={rec['searches']} facts={checks['facts_hit']}/"
-          f"{checks['facts_total']} citations={checks['citations']} refused={checks['refused']}"
+          f"{checks['facts_total']} citations={checks['citations']} file_refs={checks['file_refs']} "
+          f"unknown_sources={len(checks['unknown_sources'])} refused={checks['refused']}"
           + (f" ERROR={rec['error']}" if rec["error"] else ""))
 
 
