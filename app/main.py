@@ -49,6 +49,10 @@ Swagger: http://localhost:8000/docs
   compose) — индексация новых и изменённых файлов в фоне при старте. /rag/query отвечает с цитатами
   [1], [2] и флагом confident, чаты /chats/{id}/messages — по базе знаний с событием sources в SSE,
   POST /documents/upload — новый документ в индекс через BackgroundTasks (app/routers/documents.py);
+- персистентный агент (блок 6.4, app/services/agent_persistent.py): lifespan открывает checkpointer по
+  AGENT_CHECKPOINTER (memory / sqlite / postgres), один раз вызывает setup() и собирает граф
+  (app.state.agent). POST /agent/stream — поток событий графа в SSE с паузой на подтверждение отправки
+  клиенту, под X-Admin-Token (app/routers/agent.py). Checkpointer не открылся — сервис стартует, /agent/* — 503;
 - обработчики переводят доменные ошибки LLM и ошибки валидации в единый JSON
   {"error": {"code", "message", ...}}; трейсбек в ответ не попадает никогда.
 
@@ -60,7 +64,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -101,7 +105,7 @@ from app.observability.middleware import (
 )
 from app.observability.pii_presidio import load_redactor
 from app.observability.tracing import fastapi_telemetry, setup_tracing, shutdown_tracing
-from app.routers import chat, documents, health, kb, models, rag
+from app.routers import agent, chat, documents, health, kb, models, rag
 from app.services.llm import CACHE_ERRORS
 from app.services.security.canary import new_canary
 from app.services.security.rate_limit import (
@@ -208,6 +212,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         threading.Thread(target=documents.index_files, args=(app.state.ingestion, app.state.rag, None),
                          name="ingest-on-start", daemon=True).start()
 
+    # Блок 6.4: персистентный агент — checkpointer и граф один раз на процесс; setup() — здесь, не на запрос.
+    # Не поднялся (Postgres недоступен, папка для SQLite не создаётся) — сервис работает, /agent/* отвечают 503.
+    app.state.agent_stack = AsyncExitStack()
+    app.state.agent = None
+    try:
+        from app.services.agent_persistent import agent_lifespan
+
+        app.state.agent = await app.state.agent_stack.enter_async_context(agent_lifespan(cfg))
+    except Exception as exc:  # noqa: BLE001 — агент не обязателен для чата: причина в лог, сервис стартует
+        log.warning("agent_unavailable", checkpointer=cfg.agent_checkpointer, error=f"{type(exc).__name__}: {exc}"[:300])
+
     log.info("service_started", default_model=cfg.llm.default_model,
              provider=cfg.llm.base_url or "https://api.openai.com/v1",
              security_enabled=cfg.security.enabled, rate_limit_per_min=cfg.rate_limit_per_min,
@@ -220,12 +235,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
              vector_store=cfg.qdrant_collection if app.state.vector_store is not None else None,
              rag=cfg.rag.collection if app.state.rag is not None else None,
              rag_chat=cfg.rag.chat if app.state.rag is not None else None,
-             ingest_on_start=cfg.rag.ingest_on_start if app.state.rag is not None else None)
+             ingest_on_start=cfg.rag.ingest_on_start if app.state.rag is not None else None,
+             agent_checkpointer=cfg.agent_checkpointer if app.state.agent is not None else None)
     if not cfg.security.enabled:
         log.warning("security_disabled", note="SECURITY__ENABLED=false: проверки входа и ответа выключены "
                                               "(только для прогона garak baseline)")
     yield
 
+    await app.state.agent_stack.aclose()           # блок 6.4: пул Postgres или файл SQLite checkpointer'а
     await app.state.openai.close()
     if app.state.audio is not None:
         await app.state.audio.close()
@@ -261,6 +278,7 @@ app = FastAPI(
         {"name": "kb", "description": "Поиск по базе знаний в Qdrant (блок 5.2)"},
         {"name": "rag", "description": "Ответ по базе знаний с цитатами: RAG на LlamaIndex (блоки 5.3–5.5)"},
         {"name": "documents", "description": "Загрузка документов в базу знаний и переиндексация (блок 5.5)"},
+        {"name": "agent", "description": "Агент с checkpointer и подтверждением отправки клиенту, поток SSE (блок 6.4)"},
         {"name": "health", "description": "Проверка состояния"},
     ],
 )
@@ -391,4 +409,5 @@ app.include_router(models.router)
 app.include_router(kb.router)
 app.include_router(rag.router)
 app.include_router(documents.router)
+app.include_router(agent.router)
 app.include_router(health.router)

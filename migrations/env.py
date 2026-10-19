@@ -9,7 +9,9 @@
 3. значение по умолчанию — Postgres из compose.yaml на 127.0.0.1:5433.
 
 target_metadata — ORM-модели чата: по ним alembic revision --autogenerate находит
-изменения схемы.
+изменения схемы. include_name (блок 6.4) — таблицы checkpointer'а агента (checkpoints,
+checkpoint_writes, checkpoint_blobs, checkpoint_migrations) autogenerate не видит: их схему ведёт
+setup() LangGraph, и без фильтра Alembic предложил бы их удалить.
 
 alembic.ini — только ASCII: Alembic читает его в кодировке системы (cp1251 на русской
 Windows, ascii в контейнере без локали), и кириллица в комментариях ломала бы запуск.
@@ -24,7 +26,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.chat.repositories.pg_models import Base
+from app.chat.repositories.pg_models import Base, alembic_include_name
 from app.core.config import DatabaseSettings, async_database_url
 
 config = context.config
@@ -44,13 +46,13 @@ def database_url() -> str:
 def run_migrations_offline() -> None:
     """alembic upgrade head --sql: SQL миграции без подключения к базе."""
     context.configure(url=database_url(), target_metadata=target_metadata, literal_binds=True,
-                      dialect_opts={"paramstyle": "named"})
+                      dialect_opts={"paramstyle": "named"}, include_name=alembic_include_name)
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(connection=connection, target_metadata=target_metadata, include_name=alembic_include_name)
     with context.begin_transaction():
         context.run_migrations()
 

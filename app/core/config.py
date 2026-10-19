@@ -464,6 +464,17 @@ def async_database_url(raw: str) -> str:
     return url.render_as_string(hide_password=False)
 
 
+def psycopg_database_url(raw: str) -> str:
+    """Тот же Postgres для psycopg 3 (checkpointer агента, блок 6.4): postgresql+asyncpg://… ->
+    postgresql://…. AsyncPostgresSaver принимает только адрес libpq, драйвер в схеме он не понимает."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(raw)
+    if url.drivername in {"postgres", "postgresql"} or url.drivername.startswith("postgresql+"):
+        url = url.set(drivername="postgresql")
+    return url.render_as_string(hide_password=False)
+
+
 class DatabaseSettings(BaseSettings):
     """Только DATABASE_URL — для Alembic (migrations/env.py): миграциям не нужен ключ
     провайдера LLM, без которого Settings не создаётся."""
@@ -614,6 +625,17 @@ class Settings(BaseSettings):
     # Блок 6.1: наивный агент — модель с вызовом инструментов, лимит шагов (AGENT__*).
     agent: AgentSettings = Field(default_factory=AgentSettings)
 
+    # --- Персистентный агент (блок 6.4), app/services/agent_persistent.py и POST /agent/stream ---
+    # Где граф хранит checkpoint'ы — историю шагов каждого thread: memory — в памяти процесса (тесты),
+    # sqlite — файл AGENT_SQLITE_PATH (разработка, по умолчанию), postgres — DATABASE_URL, та же база, что у
+    # чатов (в compose.yaml задан postgres). Имя без «__», как CHAT_REPOSITORY: это переключатель хранилища.
+    agent_checkpointer: Literal["memory", "sqlite", "postgres"] = "sqlite"
+    agent_sqlite_path: Path = Path("./var/agent/checkpoints.sqlite")   # от корня проекта; var/ не в git
+    # Самая широкая роль, которую может получить запрос к /agent/stream: read-only — без отправки сообщений,
+    # write-with-approve — отправка только после подтверждения человеком, full — без подтверждения. Роль из
+    # тела запроса выше этой границы не поднимается.
+    agent_max_role: Literal["read-only", "write-with-approve", "full"] = "write-with-approve"
+
     @field_validator("log_level")
     @classmethod
     def _check_log_level(cls, value: str) -> str:
@@ -631,7 +653,7 @@ class Settings(BaseSettings):
             return value
         return ROOT / value
 
-    @field_validator("chat_storage_dir")
+    @field_validator("chat_storage_dir", "agent_sqlite_path")
     @classmethod
     def _chat_dir_from_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else ROOT / value
