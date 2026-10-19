@@ -16,6 +16,10 @@
 # Для uvicorn на хосте и тестов достаточно одного Postgres: docker compose up -d postgres,
 # он доступен на 127.0.0.1:5433.
 #
+# Блок 6.4: персистентный агент с подтверждением отправки (POST /agent/stream) хранит checkpoint'ы в том же
+# Postgres (AGENT_CHECKPOINTER=postgres у app). Проверка таблиц после старта:
+#   docker compose exec postgres psql -U multapi -d multapi -c '\dt'
+#
 # Модель (Ollama) работает на хосте, а не в контейнере: из контейнера она доступна
 # по адресу host.docker.internal.
 #
@@ -53,6 +57,10 @@ services:
       CHAT_REPOSITORY: postgres
       DATABASE_URL: postgresql+asyncpg://multapi:${POSTGRES_PASSWORD:-multapi}@postgres:5432/multapi
       CHAT_STORAGE_DIR: /app/var/chats
+      # Блок 6.4: checkpoint'ы агента (POST /agent/stream) — в той же базе multapi, в таблицах LangGraph
+      # checkpoints, checkpoint_writes, checkpoint_blobs, checkpoint_migrations. Создаёт их checkpointer.setup()
+      # при старте app, Alembic их не трогает (include_name в migrations/env.py).
+      AGENT_CHECKPOINTER: postgres
       # Блок 4.3: уведомления — в HTTP-API бота по имени сервиса (нужен INTERNAL_TOKEN в .env).
       BOT_URL: http://bot:9000
       # localhost внутри контейнера — сам контейнер. По умолчанию — Ollama на хосте;

@@ -31,6 +31,10 @@ from_attributes=True) в pg_repo.py.
 Миграции — migrations/versions/ (alembic revision --autogenerate): *_chat_tables.py —
 таблицы блока 4.1, *_chat_owner_index.py — индекс блока 4.2, *_message_media_refs.py — столбец
 media_refs блока 4.3, *_production_tables.py — таблицы блока 4.4.
+
+Блок 6.4: в той же базе — таблицы checkpointer'а агента (LANGGRAPH_TABLES). Их схему ведёт
+AsyncPostgresSaver.setup(), а не Alembic; alembic_include_name скрывает их от autogenerate
+(migrations/env.py), иначе он предложил бы их удалить — в target_metadata их нет.
 """
 from __future__ import annotations
 
@@ -47,6 +51,16 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
     pass
+
+
+# Блок 6.4: таблицы LangGraph (app/services/agent_persistent.py, AGENT_CHECKPOINTER=postgres).
+LANGGRAPH_TABLES = frozenset({"checkpoints", "checkpoint_writes", "checkpoint_blobs", "checkpoint_migrations"})
+
+
+def alembic_include_name(name: str | None, type_: str, parent_names: dict[str, Any]) -> bool:
+    """include_name для Alembic: таблицы checkpointer'а — не наши. Доменную схему ведёт Alembic,
+    схему checkpoint'ов — setup() LangGraph."""
+    return not (type_ == "table" and name in LANGGRAPH_TABLES)
 
 
 class ChatRow(Base):

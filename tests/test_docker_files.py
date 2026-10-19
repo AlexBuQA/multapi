@@ -251,6 +251,7 @@ class TestProductionCompose(unittest.TestCase):
 
     def test_app_uses_postgres_and_bot_api(self):
         self.assertIn("CHAT_REPOSITORY: postgres", self.app)
+        self.assertIn("AGENT_CHECKPOINTER: postgres", self.app)      # блок 6.4: checkpoint'ы агента — в той же базе
         self.assertIn("BOT_URL: http://bot:9000", self.app)
 
     def test_image_contains_bot_and_its_dependencies(self):
@@ -417,7 +418,9 @@ class TestSecrets(unittest.TestCase):
                      # доработка после 6.2
                      "AGENT__FINAL_CHECK",
                      # блок 6.3
-                     "AGENT__TEMPERATURE"):
+                     "AGENT__TEMPERATURE",
+                     # блок 6.4
+                     "AGENT_CHECKPOINTER", "AGENT_SQLITE_PATH", "AGENT_MAX_ROLE"):
             self.assertRegex(example, rf"(?m)^{name}=")
 
     def test_env_example_has_no_api_keys(self):

@@ -160,14 +160,18 @@ async def test_pg_partial_index_and_migration_match_models(pg_sessions):
     from alembic.migration import MigrationContext
     from sqlalchemy import text
 
-    from app.chat.repositories.pg_models import Base
+    from app.chat.repositories.pg_models import Base, alembic_include_name
 
     async with pg_sessions() as session:
         async with session.begin():
             indexdef = (await session.execute(text(
                 "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_chat_messages_chat_created'"))).scalar_one()
             conn = await session.connection()
-            diff = await conn.run_sync(lambda sync: compare_metadata(MigrationContext.configure(sync), Base.metadata))
+            # Блок 6.4: тот же фильтр, что у autogenerate в migrations/env.py, — в базе могут быть таблицы
+            # checkpointer'а агента (tests/test_agent_persistent.py, AGENT_CHECKPOINTER=postgres).
+            opts = {"include_name": alembic_include_name}
+            diff = await conn.run_sync(lambda sync: compare_metadata(MigrationContext.configure(sync, opts=opts),
+                                                                     Base.metadata))
     assert "(chat_id, created_at DESC)" in indexdef and "WHERE (deleted_at IS NULL)" in indexdef
     async with pg_sessions() as session, session.begin():
         owner_index = (await session.execute(text(

@@ -1,4 +1,4 @@
-# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1–6.3
+# Мультимодальный ИИ-помощник техподдержки — ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1–6.4
 
 **Автор:** Александра Бужор
 **Репозиторий:** https://github.com/AlexBuQA/multapi
@@ -29,6 +29,7 @@ CLI-приложение с **мультимодальными возможно�
 - **Блок 6.1 — Что такое агент: цикл и компоненты:** наивный агент без фреймворка — `run_agent(task, max_steps=6)` в `app/services/agent_naive.py`: `for`-цикл вокруг Chat Completions, `tool_calls` → диспетчер по allowlist `DISPATCH` → `role: "tool"` обратно в `messages`, trace шагов (инструмент, аргументы, результат, токены, время) и CLI `--trace`. Три инструмента — поиск по базе знаний через RAG блока 5.5, текущее время и заглушка Telegram; пять задач предметной области с логами в `docs/agent-naive-traces/` — см. раздел [«Блок 6.1»](#блок-61--что-такое-агент-цикл-и-компоненты) и [`docs/agent_naive.md`](docs/agent_naive.md).
 - **Блок 6.2 — Планирование агента:** ReAct-агент `app/services/agent_react.py` рядом с наивным baseline: системный промпт ReAct, ровно один инструмент за шаг, `max_iterations` (8–20) и таймаут на итерацию с явными «Превышен лимит итераций» / «Timeout», критик после каждого observation (`OK` / `REVISE`, не больше 2 ревизий), подсчёт токенов агента и критика. Инструменты описаны по чек-листу (четыре вопроса, строгая JSON Schema с проверкой аргументов). Сравнение с наивным агентом на пяти задачах — см. раздел [«Блок 6.2»](#блок-62--планирование-агента) и [`docs/agent-react-report.md`](docs/agent-react-report.md).
 - **Блок 6.3 — LangGraph: основы:** тот же ReAct-агент на LangGraph 1.x в `app/services/agent_graph.py` двумя путями — `custom_graph` (`StateGraph` руками: `AgentState` с reducers, узлы `call_model` / `execute_tool` / `force_finish`, router с stop-краном на 6 итерациях) и `prebuilt_graph` (`create_agent` с middleware лимита); инструменты через `@tool`, Mermaid-схемы, бенчмарк цикла 6.2 против обоих графов на пяти задачах — см. раздел [«Блок 6.3»](#блок-63--langgraph-основы) и [`docs/agent-graph-report.md`](docs/agent-graph-report.md).
+- **Блок 6.4 — LangGraph: продвинутые паттерны:** персистентный агент `app/services/agent_persistent.py` — checkpointer по `AGENT_CHECKPOINTER` (memory / SQLite / Postgres той же базы, `setup()` один раз в lifespan), подтверждение человеком перед `send_telegram_message` через `interrupt()` + `Command(resume=...)` (подготовка и отправка — два узла, ключ идемпотентности), `POST /agent/stream` — поток событий графа в SSE, `scripts/time_travel_demo.py` — история чек-пойнтов и две ветки решения, таблицы LangGraph скрыты от Alembic — см. раздел [«Блок 6.4»](#блок-64--langgraph-продвинутые-паттерны) и [`docs/agent-persistent-report.md`](docs/agent-persistent-report.md).
 - **Блок 3.8 — Безопасность ИИ-приложений:** защитный слой `/chat` — проверка входа до модели, канарейка в системном сообщении, проверка ответа, маскирование персональных данных в ответах и логах, лимит запросов; прогоны NVIDIA garak до и после защиты — см. раздел [«Блок 3.8»](#блок-38--безопасность-ии-приложений).
 
 ## Важно про Ollama и модальности
@@ -113,7 +114,7 @@ multapi/
 │   ├── deps/providers.py    # блок 3.4: внедрение зависимостей
 │   ├── eval/metrics.py      # блок 5.6: судья RAGAS (llm_factory), пять метрик, has_citation, оценка строки
 │   ├── routers/             # блок 3.4: chat.py, models.py, health.py; 5.2: kb.py (GET /kb/search);
-│   │                        #   5.3: rag.py (POST /rag/query)
+│   │                        #   5.3: rag.py (POST /rag/query); 6.4: agent.py (POST /agent/stream — SSE)
 │   ├── schemas/             # блок 3.4: chat.py, models.py, errors.py; 5.2: kb.py; 5.3: rag.py
 │   ├── services/
 │   │   ├── llm.py           # блок 3.4: LLMService — кеш в Redis, поток, перевод ошибок; 3.6: span и лог вызова
@@ -132,6 +133,7 @@ multapi/
 │   │   ├── reranker.py      # блок 5.4: bge-reranker-v2-m3 (cross-encoder) или Cohere Rerank, кеш оценок
 │   │   ├── agent_naive.py   # блок 6.1: наивный агент — run_agent (цикл на Chat Completions), trace, CLI
 │   │   ├── agent_graph.py   # блок 6.3: агент на LangGraph — AgentState, custom_graph, prebuilt_graph, CLI
+│   │   ├── agent_persistent.py # блок 6.4: checkpointer, interrupt перед отправкой, agent_lifespan, события SSE
 │   │   ├── agent_react.py   # блок 6.2: ReAct-агент — лимиты итераций и времени, критик, usage, CLI
 │   │   ├── security/        # блок 3.8: input_validator.py, output_filter.py, canary.py,
 │   │   │                    #   rate_limit.py — защитный слой /chat
@@ -204,6 +206,7 @@ multapi/
 │   ├── run_naive_agent.py   # блок 6.1: агент на одной задаче или пять задач --suite → docs/agent-naive-traces/
 │   ├── visualize_graph.py   # блок 6.3: Mermaid-схемы графов → docs/agent-graph-*.mmd (--png — PNG)
 │   ├── bench_agents.py      # блок 6.3: 5 задач × цикл 6.2 / custom / prebuilt × 3 → docs/agent-graph-bench/
+│   ├── time_travel_demo.py  # блок 6.4: офлайн — interrupt, история чек-пойнтов, прошлый чек-пойнт, две ветки
 │   └── compare_agents.py    # блок 6.2: пять задач на наивном и ReAct-агенте → docs/agent-react-traces/
 ├── docs/
 │   ├── architecture.md      # блок 3.2: архитектурный паспорт (схема, ADR, точки отказа)
@@ -220,6 +223,7 @@ multapi/
 │   ├── agent-graph-report.md # блок 6.3: state, router, схема, бенчмарк, custom vs prebuilt, баги, персистентность
 │   ├── agent-graph-custom.mmd, agent-graph-prebuilt.mmd, agent-graph.png # блок 6.3: схемы графов
 │   ├── agent-graph-bench/   # блок 6.3: журнал, сводка и stop-check бенчмарка; run1-no-cache-reset/ — первый прогон
+│   ├── agent-persistent-report.md # блок 6.4: backend, Postgres, HIL и идемпотентность, time travel, SSE, роли
 │   ├── agent-react-traces/  # блок 6.2: JSON-логи сравнения и summary.json
 │   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
@@ -233,6 +237,7 @@ multapi/
 │   ├── test_async_client.py # блок 3.3: семафор, батчи, таймаут, стриминг
 │   ├── test_service.py      # блок 3.4: настройки, ручки, кеш, ошибки, поток, CORS, Swagger
 │   ├── test_docker_files.py # блок 3.5: Dockerfile, .dockerignore, compose.yaml, .env.example
+│   ├── test_agent_persistent.py # блок 6.4: interrupt и resume на SQLite :memory:, рестарт, роли, SSE, Postgres, Alembic
 │   ├── test_pii.py          # блок 3.6: redact_pii, prompt_hash, prompt_preview
 │   ├── test_observability.py# блок 3.6: JSON-логи, request_id, спаны и атрибуты gen_ai.*
 │   ├── test_pii_presidio.py # блок 3.6: Presidio (фон, откат на regex, настоящая модель)
@@ -3430,6 +3435,105 @@ python scripts/bench_agents.py                         # 5 × 3 × 3 = 45 про
 | В отчёте Mermaid-схема (раздел 4) и вывод custom vs prebuilt (раздел 6) на своих числах | `docs/agent-graph-report.md`: по скорости и токенам пути не различимы, выбор — по семантике. Prebuilt — для стандартного цикла, custom — для узлов критика и проверки, `interrupt` и остановки без выполнения инструментов шестого вызова; для диплома — custom |
 | Описан реальный баг отладки (раздел 7) | 7.1 — `additionalProperties: false` не доходил до модели без `strict=True`, найден по журналу запросов подставного сервера; 7.2 — переносы строк docstring в описаниях инструментов, найдены по prompt_tokens первого прогона |
 
+## Блок 6.4 — LangGraph: продвинутые паттерны
+
+Граф блока 6.3 переживает рестарт, ждёт человека перед отправкой сообщения клиенту и отдаёт прогресс
+наружу потоком. Новый модуль — `app/services/agent_persistent.py`; `agent_graph.py` блока 6.3 не менялся.
+Отчёт — [`docs/agent-persistent-report.md`](docs/agent-persistent-report.md).
+
+```mermaid
+flowchart LR
+    S(["__start__"]) --> M["call_model"]
+    M -.->|"поиск, время"| T["execute_tool"]
+    T -.-> M
+    M -.->|"send_telegram_message"| P["prepare_send_message"]
+    T -.->|"и отправка"| P
+    P --> C["confirm_and_execute_send_message<br/>interrupt()"]
+    C --> M
+    M -.->|"ответ / лимит"| F["force_finish"]
+    F --> E(["__end__"])
+```
+
+### Что сделано
+
+- **Checkpointer по `AGENT_CHECKPOINTER`:** `memory` (тесты), `sqlite` (по умолчанию, файл `var/agent/checkpoints.sqlite`), `postgres` (compose, та же база `multapi`, что у чатов).
+  - `agent_lifespan()` открывает saver, один раз вызывает `setup()` и отдаёт граф; lifespan FastAPI держит его в `app.state.agent`.
+  - Postgres — `AsyncPostgresSaver` поверх `AsyncConnectionPool` (psycopg 3); адрес — из `DATABASE_URL` (`psycopg_database_url`).
+  - Checkpointer не открылся — сервис стартует, `/agent/*` отвечают 503 (лог `agent_unavailable`).
+- **Подтверждение перед `send_telegram_message`:** `interrupt()` + `Command(resume=...)`, без `interrupt_before`.
+  - `prepare_send_message` — идемпотентная подготовка: роль, проверка аргументов, черновик в state.
+  - Ребро к `confirm_and_execute_send_message`: до `interrupt()` — только чтение state, после — отправка или отказ.
+  - `request_id` — из `thread_id` и id вызова модели. `TelegramOutbox` по нему не отправляет одно сообщение дважды: повторный resume прошлого чек-пойнта перезапускает узел отправки.
+  - Роли в `config["configurable"]["user_role"]`: `read-only`, `write-with-approve`, `full`; роль из запроса не выше `AGENT_MAX_ROLE`.
+- **`POST /agent/stream`** (`app/routers/agent.py`, `X-Admin-Token`) — `graph.astream(stream_mode=["updates", "messages"])` в SSE.
+  - События `start`, `node`, `token`, `interrupt`, `end`, `error`; тело — `{"thread_id", "input"}` или `{"thread_id", "resume"}`.
+  - Новое сообщение в thread, который ждёт решения, — 409, resume без паузы — 409; `GET /agent/threads/{thread_id}` — состояние по checkpointer.
+- **Alembic:** `include_name` в `migrations/env.py` скрывает от autogenerate `checkpoints`, `checkpoint_writes`, `checkpoint_blobs`, `checkpoint_migrations` — их схему ведёт `setup()`.
+- **`scripts/time_travel_demo.py`** — офлайн на `AsyncSqliteSaver(":memory:")`: payload `__interrupt__`, история `aget_state_history`, состояние на прошлом чек-пойнте, две ветки на двух `thread_id`, нюанс повторного resume.
+- **Зависимости:** `langgraph-checkpoint-sqlite` 3.1.2, `langgraph-checkpoint-postgres` 3.2.0, `aiosqlite`, `psycopg[binary,pool]` 3.3.6; `langgraph-checkpoint` в `uv.lock` — 4.2.0 → 4.3.0.
+- **Тесты:** +26 в `tests/test_agent_persistent.py`.
+  - Три теста задания на `AsyncSqliteSaver(":memory:")` с `AsyncMock` вместо API отправки: `__interrupt__` и `snapshot.next`, `resume=True` → `sent=True`, `resume=False` → `sent=False` и `assert_not_called()`.
+  - Рестарт процесса на файле SQLite, нюанс повторного resume, роли, смешанные вызовы, лимит итераций, схема в отчёте.
+  - `/agent/stream`: события, 401/403/409/422, ошибка модели событием; lifespan сервиса открывает агента один раз.
+  - Postgres (если запущен): `setup()` ровно один раз и таблицы `checkpoint*`, autogenerate с фильтром.
+  - `tests/chat/test_storage.py` сравнивает схему с тем же фильтром Alembic, что `env.py`.
+
+### Проверка на Windows
+
+На хосте: тесты, демо и проверка Alembic. Docker Desktop и Postgres из compose должны быть запущены.
+
+```powershell
+pip install -r requirements.txt
+python -c "import importlib.metadata as m; print(*(m.version(p) for p in ('langgraph-checkpoint-sqlite', 'langgraph-checkpoint-postgres', 'psycopg')))"   # 3.1.2 3.2.0 3.3.6
+python -m pytest -q                                    # 1555 passed
+python scripts/time_travel_demo.py
+```
+
+В Docker: Postgres-checkpointer, поток SSE, рестарт. Для uvicorn на Windows-хосте Postgres-режим работает только с `--reload`: без него uvicorn запускает `ProactorEventLoop`, а psycopg с ним не работает; `sqlite` работает всегда.
+
+```powershell
+docker compose up -d --build
+docker compose exec postgres psql -U multapi -d multapi -c '\dt'      # checkpoints, checkpoint_writes, checkpoint_blobs, checkpoint_migrations
+alembic check                                                          # No new upgrade operations detected.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$admin = (Select-String -Path .env -Pattern '^ADMIN_TOKEN=\s*"?([^"#\s]+)').Matches[0].Groups[1].Value   # токен не печатается
+curl.exe -N -X POST http://127.0.0.1:8000/agent/stream -H "Content-Type: application/json" -H "X-Admin-Token: $admin" --data-binary "@examples/requests/agent_stream_input.json"
+docker compose restart app
+curl.exe -s http://127.0.0.1:8000/agent/threads/demo-1 -H "X-Admin-Token: $admin"          # pending_approval: true — пауза пережила рестарт
+curl.exe -N -X POST http://127.0.0.1:8000/agent/stream -H "Content-Type: application/json" -H "X-Admin-Token: $admin" --data-binary "@examples/requests/agent_stream_approve.json"
+docker compose logs app | Select-String TELEGRAM                                            # одна строка [TELEGRAM → 12345]
+```
+
+### Результаты
+
+**Песочница (Linux).**
+- **Тесты:** `pytest` — 1550 passed и 5 skipped.
+- **Демо:** `time_travel_demo.py` печатает все пять частей. Повторный resume прошлого чек-пойнта с `False` применил первое решение (`True`), узел отправки выполнился заново, сообщение не задвоилось.
+- **Сервис с `AGENT_CHECKPOINTER=postgres`** на Postgres 16 после `alembic upgrade head`, модель — подставной сервер со стримингом:
+  - `\dt` — четыре таблицы `checkpoint*` рядом с таблицами чатов, `alembic check` — `No new upgrade operations detected.`;
+  - `curl -N` — поиск, `prepare_send_message`, `interrupt`, `end` с `pending_approval: true`;
+  - рестарт uvicorn — `GET /agent/threads/demo-1` показывает тот же чек-пойнт;
+  - `resume: true` — отправка и ответ, `resume: {"approved": false}` на втором thread — `sent: false`, заглушка не вызывалась.
+- **Сервис с `AGENT_CHECKPOINTER=sqlite`** — тот же поток до паузы, файл checkpoint'ов создан.
+
+**Windows.** Заполняется по логам.
+
+### Соответствие критериям блока 6.4
+
+| Критерий | Реализация |
+|---|---|
+| `agent_persistent.py`: фабрика графа и lifespan, backend через `AGENT_CHECKPOINTER` | `build_agent`, `agent_lifespan`, `open_checkpointer`; `test_open_checkpointer_memory_and_sqlite`, `test_postgres_checkpointer_setup_once_and_tables` |
+| `setup()` один раз на старте, не на запрос | `open_checkpointer` в lifespan; `test_postgres_checkpointer_setup_once_and_tables` (ровно 1 вызов), `test_service_lifespan_opens_the_agent_once` |
+| Autogenerate Alembic не удаляет `checkpoint*` | `include_name` в `migrations/env.py`; `test_alembic_ignores_langgraph_tables`, `test_alembic_autogenerate_keeps_checkpoint_tables`, `alembic check` |
+| `interrupt()` + `Command(resume=...)`, не `interrupt_before` / `interrupt_after` | `confirm_and_execute_send_message`; три теста задания |
+| Side-effect после `interrupt()`, до — только идемпотентная подготовка | `prepare_send_message` → ребро → отправка после решения; `request_id` и `TelegramOutbox`; отчёт, раздел 3 |
+| `POST /agent/stream` — SSE, видны узлы и токены, пауза `__interrupt__`, после `resume: true` поток продолжается | `app/routers/agent.py`; `test_stream_pauses_on_interrupt_and_resumes`; curl в отчёте, раздел 6 |
+| `time_travel_demo.py` одной командой: interrupt, история, прошлый чек-пойнт, две ветки; resume детерминирован по thread | `scripts/time_travel_demo.py`; ветки — на двух `thread_id`, нюанс — часть 5; `test_repeated_resume_keeps_the_first_decision_and_outbox_blocks_a_second_send` |
+| `tests/test_agent_persistent.py` — минимум три теста на `AsyncSqliteSaver(":memory:")`, без Postgres | 26 тестов; Postgres-тесты пропускаются без Postgres |
+| `thread_id` стабильный, `uuid4()` на запрос нет | `thread_id` задаёт клиент (`tg-<chat_id>`, имя сценария); `uuid4` есть только в тестовом thread для Postgres |
+| В отчёте 8 разделов, «до interrupt» и «после interrupt» перечислены | `docs/agent-persistent-report.md`, раздел 3 |
+| Postgres — тот же сервис compose, `\dt` показывает таблицы LangGraph | `AGENT_CHECKPOINTER: postgres` у `app`, база `multapi`; `\dt` — отчёт, раздел 2 |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
@@ -3484,6 +3588,8 @@ LLM__MAX_RETRIES=2
 Для ReAct-агента (блок 6.2, только CLI): `AGENT__MAX_ITERATIONS` (пусто — 10, допустимо 8–20), `AGENT__TIMEOUT_PER_ITERATION_SEC` (пусто — 10 с на итерацию с критиком; Ollama на CPU — 240), `AGENT__MAX_REVISIONS` (пусто — 2), `AGENT__PREMIUM_MODEL` и `AGENT__CRITIC_MODEL` (пусто — `AGENT__MODEL`; канон — `gpt-5.4` и `gpt-5.4-mini`); `AGENT__FINAL_CHECK` (пусто — `true`: проверка финального ответа по trace, доработка после блока 6.2).
 
 Для агента на LangGraph (блок 6.3): `AGENT__TEMPERATURE` (пусто — 0; температура графов и всех трёх реализаций в `bench_agents.py`). Модель — та же `AGENT__MODEL`, лимит итераций графов — 6 (константа `MAX_ITERATIONS`).
+
+Для персистентного агента (блок 6.4): `AGENT_CHECKPOINTER` (пусто — `sqlite`; `memory`, `postgres` — `DATABASE_URL`, в `compose.yaml` задан `postgres`), `AGENT_SQLITE_PATH` (пусто — `var/agent/checkpoints.sqlite`), `AGENT_MAX_ROLE` (пусто — `write-with-approve`: отправка клиенту только после подтверждения). `/agent/*` — под `X-Admin-Token` (`ADMIN_TOKEN`).
 
 Для наблюдаемости (блок 3.6): `PHOENIX_COLLECTOR_ENDPOINT` — куда отправлять трейсы (пусто — трейсинг выключен; в Docker `compose.yaml` задаёт `http://phoenix:6006`, для локального uvicorn с Phoenix из compose — `http://127.0.0.1:6006`), `PHOENIX_PROJECT_NAME` (`diploma-fastapi`), `PII_PRESIDIO` (`false`) и закомментированные `OPENINFERENCE_HIDE_INPUTS` / `OPENINFERENCE_HIDE_OUTPUTS`.
 
