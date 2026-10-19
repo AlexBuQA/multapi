@@ -87,11 +87,12 @@ psycopg драйвер в схеме не понимает, и `psycopg_database
 
 Пул открывается на старте и закрывается при остановке сервиса (`AsyncExitStack` в `app/main.py`).
 
-**Проверка `\dt` после `setup()`.** Песочница: сервис с `AGENT_CHECKPOINTER=postgres` на Postgres 16 после
-`alembic upgrade head`:
+**Проверка `\dt` после `setup()`.** Windows, `docker compose up -d` после пересборки образа. В логе `app` —
+`agent_checkpointer_ready` с `"backend": "postgres"`, затем:
 
 ```
-$ psql -U multapi -d multapi -c '\dt'
+> docker compose exec postgres psql -U multapi -d multapi -c '\dt'
+                List of relations
  Schema |         Name          | Type  |  Owner
 --------+-----------------------+-------+---------
  public | alembic_version       | table | multapi
@@ -111,7 +112,8 @@ $ psql -U multapi -d multapi -c '\dt'
 - В `migrations/env.py` обоим `context.configure` (онлайн и `--sql`) передан `include_name` —
   `alembic_include_name` из `app/chat/repositories/pg_models.py`. Он скрывает от autogenerate
   `checkpoints`, `checkpoint_writes`, `checkpoint_blobs` и `checkpoint_migrations`.
-- Проверка на той же базе: `alembic check` → `No new upgrade operations detected.`
+- Проверка на той же базе, уже с таблицами LangGraph: `alembic check` на хосте → `No new upgrade operations
+  detected.`
 - Тест `test_alembic_autogenerate_keeps_checkpoint_tables`: с фильтром `remove_table` для этих таблиц
   нет, без фильтра — все четыре.
 
@@ -153,7 +155,7 @@ $ psql -U multapi -d multapi -c '\dt'
 
 ## 4. `__interrupt__` и продолжение после `Command(resume=True)`
 
-Вывод `python scripts/time_travel_demo.py` (песочница; на Windows то же, кроме `checkpoint_id`):
+Вывод `python scripts/time_travel_demo.py` на Windows:
 
 ```
 === 1. Запуск до interrupt (thread demo-approve) ===
@@ -185,15 +187,15 @@ sent = True; ответ агента: Напоминание отправлен�
 
 ```
 checkpoint_id                          step  next
-1f1cb3b6-7fd8-6e63-8007-3cd0292378bd      7  — (конец)
-1f1cb3b6-7fd7-652c-8006-ed259b4164b9      6  force_finish
-1f1cb3b6-7fd0-66c5-8005-e13cf25240ff      5  call_model
-1f1cb3b6-7fc1-6223-8004-14f5bd8dd028      4  confirm_and_execute_send_message
-1f1cb3b6-7fbc-6f11-8003-59b3542d8b14      3  prepare_send_message
-1f1cb3b6-7fb5-661d-8002-6a0c2f898071      2  call_model
-1f1cb3b6-7fa4-63c2-8001-a1885a2face7      1  execute_tool
-1f1cb3b6-7f96-6541-8000-01a131a032dc      0  call_model
-1f1cb3b6-7f93-6291-bfff-854016203f7c     -1  __start__
+1f1cb8b4-5c14-698e-8007-899df91e060f      7  — (конец)
+1f1cb8b4-5c13-6b31-8006-d3cff73557ee      6  force_finish
+1f1cb8b4-5c0f-68d4-8005-e2a4380407dc      5  call_model
+1f1cb8b4-5bfa-63e1-8004-94b766e4d776      4  confirm_and_execute_send_message
+1f1cb8b4-5bf7-66f7-8003-8be72210d892      3  prepare_send_message
+1f1cb8b4-5bf1-6536-8002-f73318cca391      2  call_model
+1f1cb8b4-5beb-6ff6-8001-ba1938fee6da      1  execute_tool
+1f1cb8b4-5be3-6bd5-8000-bd7fe37be6a1      0  call_model
+1f1cb8b4-5be1-666f-bfff-f2612d60f44a     -1  __start__
 ```
 
 **Состояние на прошлом чек-пойнте** — `aget_state` с `checkpoint_id` шага 4, до отправки: черновик готов,
@@ -265,34 +267,51 @@ sent = True — применилось первое решение (True), а н
 thread без паузы — 409 `nothing_to_resume`. Роль `system` и `assistant` в `input.messages` не принимается,
 текст проходит проверку входа блока 3.8. Состояние thread без запуска — `GET /agent/threads/{thread_id}`.
 
-Поток с паузой, песочница: подставная OpenAI-совместимая модель со стримингом, настоящие `ChatOpenAI`,
-Qdrant и Postgres. Длинные строки сокращены до «…».
+Поток на Windows: сервис в Docker с `AGENT_CHECKPOINTER=postgres`, модель — `qwen3:4b-instruct` в Ollama на
+CPU, поиск — RAG блока 5.5. Длинные строки сокращены до «…».
 
 ```
-> curl -N -X POST http://127.0.0.1:8011/agent/stream -H "X-Admin-Token: …" --data-binary @examples/requests/agent_stream_input.json
+> curl.exe -N -X POST http://127.0.0.1:8000/agent/stream -H "Content-Type: application/json" -H "X-Admin-Token: …" --data-binary "@examples/requests/agent_stream_input.json"
 data: {"event": "start", "thread_id": "demo-1", "user_role": "write-with-approve", "mode": "input"}
-data: {"event": "token", "node": "call_model", "content": "Ищу срок "}
-data: {"event": "token", "node": "call_model", "content": "письма."}
-data: {"event": "node", "node": "call_model", "update": {"messages": [{"type": "ai", "content": "Ищу срок письма.", "tool_calls": [{"name": "search_knowledge_base", "args": {"query": "письмо об автопродлении за сколько дней"}}]}], "iteration_count": 1}}
-data: {"event": "node", "node": "execute_tool", "update": {"messages": [{"type": "tool", "content": "[billing/faq-billing.md, близость 0.39] …", "name": "search_knowledge_base"}], "tool_results": […]}}
-data: {"event": "node", "node": "call_model", "update": {"messages": [{"type": "ai", "content": "", "tool_calls": [{"name": "send_telegram_message", "args": {"chat_id": "12345", "text": "Напоминаем: письмо об автопродлении приходит за 3 дня до окончания периода."}}]}], "iteration_count": 2}}
-data: {"event": "node", "node": "prepare_send_message", "update": {"messages": [], "draft": {"tool_call_id": "call_d349dbc0", "chat_id": "12345", "text": "Напоминаем: …", "request_id": "a8adf1caf1cc0279"}}}
-data: {"event": "interrupt", "interrupts": [{"id": "112984abbd3b4b4d003a65ad0688c97d", "value": {"type": "approve_send_message", "preview": {"chat_id": "12345", "text": "Напоминаем: …", "request_id": "a8adf1caf1cc0279"}, "question": "Отправить это сообщение клиенту?"}}]}
+data: {"event": "node", "node": "call_model", "update": {"messages": [{"type": "ai", "content": "", "tool_calls": [{"name": "search_knowledge_base", "args": {"query": "за сколько дней до окончания периода приходит письмо об автопродлении"}}]}], "iteration_count": 1}}
+data: {"event": "node", "node": "execute_tool", "update": {"messages": [{"type": "tool", "content": "[billing/auto-renewal.docx, близость 0.71] Автопродление тарифа\n\nАвтопродление включено по умолчанию: за 3 дня до окончания периода приходит письмо, …", "name": "search_knowledge_base"}], "tool_results": […]}}
+data: {"event": "node", "node": "call_model", "update": {"messages": [{"type": "ai", "content": "", "tool_calls": [{"name": "send_telegram_message", "args": {"chat_id": "12345", "text": "Вы получите письмо об автопродлении за 3 дня до окончания периода."}}]}], "iteration_count": 2}}
+data: {"event": "node", "node": "prepare_send_message", "update": {"messages": [], "draft": {"tool_call_id": "call_0yxz4grc", "chat_id": "12345", "text": "Вы получите письмо об автопродлении за 3 дня до окончания периода.", "request_id": "b41115da07897b6d"}}}
+data: {"event": "interrupt", "interrupts": [{"id": "7cf0b220b16359adb79bd04052f199f9", "value": {"type": "approve_send_message", "preview": {"chat_id": "12345", "text": "Вы получите письмо об автопродлении за 3 дня до окончания периода.", "request_id": "b41115da07897b6d"}, "question": "Отправить это сообщение клиенту?"}}]}
 data: {"event": "end", "next": ["confirm_and_execute_send_message"], "pending_approval": true, "sent": false, "answer": null}
 
-  (сервис перезапущен: GET /agent/threads/demo-1 → "pending_approval": true, тот же checkpoint_id)
+> curl.exe -s http://127.0.0.1:8000/agent/threads/demo-1 -H "X-Admin-Token: …"     — до и после docker compose restart app одинаково
+{"thread_id":"demo-1","checkpoint_id":"1f1cb8da-beb7-689e-8004-d93c7ade6add","next":["confirm_and_execute_send_message"],"pending_approval":true,"interrupts":[…],"sent":false,"draft":{…},"messages":4}
 
-> curl -N -X POST http://127.0.0.1:8011/agent/stream -H "X-Admin-Token: …" --data-binary @examples/requests/agent_stream_approve.json
+> curl.exe -N -X POST http://127.0.0.1:8000/agent/stream … --data-binary "@examples/requests/agent_stream_approve.json"
 data: {"event": "start", "thread_id": "demo-1", "user_role": "write-with-approve", "mode": "resume"}
 data: {"event": "node", "node": "confirm_and_execute_send_message", "update": {"messages": [{"type": "tool", "content": "Сообщение отправлено в 12345", "name": "send_telegram_message"}], "draft": null, "sent": true, "tool_results": […]}}
-data: {"event": "token", "node": "call_model", "content": "Напоминание отправлено."}
-data: {"event": "node", "node": "call_model", "update": {"messages": [{"type": "ai", "content": "Напоминание отправлено."}], "iteration_count": 3}}
+data: {"event": "token", "node": "call_model", "content": "Вы"}
+data: {"event": "token", "node": "call_model", "content": " получ"}
+data: {"event": "token", "node": "call_model", "content": "ите"}
+  … ещё 22 события token …
+data: {"event": "node", "node": "call_model", "update": {"messages": [{"type": "ai", "content": "Вы получите письмо об автопродлении за 3 дня до окончания периода."}], "iteration_count": 3}}
 data: {"event": "node", "node": "force_finish", "update": {}}
-data: {"event": "end", "next": [], "pending_approval": false, "sent": true, "answer": "Напоминание отправлено."}
+data: {"event": "end", "next": [], "pending_approval": false, "sent": true, "answer": "Вы получите письмо об автопродлении за 3 дня до окончания периода."}
+
+> (thread demo-2: тот же вход до interrupt, затем agent_stream_reject.json — {"approved": false, "comment": "уточнить у менеджера"})
+data: {"event": "node", "node": "confirm_and_execute_send_message", "update": {"messages": [{"type": "tool", "content": "Не отправлено: оператор отклонил отправку (уточнить у менеджера). Скажи пользователю, что сообщение не отправлено.", "name": "send_telegram_message"}], "draft": null, "sent": false, "tool_results": […]}}
+  … 32 события token …
+data: {"event": "end", "next": [], "pending_approval": false, "sent": false, "answer": "Сообщение не отправлено: оператор отклонил отправку. Просьба уточнить у менеджера."}
+
+> docker compose logs app | Select-String TELEGRAM
+app-1  | [TELEGRAM → 12345] Вы получите письмо об автопродлении за 3 дня до окончания периода.
 ```
 
-Между двумя запросами сервис перезапускался: пауза пережила рестарт процесса. Состояние лежало в
-Postgres, и resume продолжил с того же чек-пойнта.
+Что видно в потоке:
+- **Пауза пережила рестарт.** Между первым запросом и подтверждением контейнер `app` перезапускался.
+  `GET /agent/threads/demo-1` до и после рестарта показал тот же `checkpoint_id` и `pending_approval: true`:
+  состояние лежало в Postgres, resume продолжил с того же чек-пойнта.
+- **Отправка — только после решения.** Заглушка Telegram сработала один раз, в одобренном thread `demo-1`. В
+  отклонённом `demo-2` API не вызывался, а модель сама сообщила об отказе по `ToolMessage`.
+- **Токены Ollama приходят кусками слов** (`"Вы"`, `" получ"`, `"ите"`), и только для финального ответа. На
+  шагах с вызовом инструмента текста у модели нет, их видно событиями `node`.
+- **Та же схема проверена в песочнице:** подставная модель со стримингом на Postgres 16, с тем же итогом.
 
 ## 7. Permission policy
 
@@ -318,6 +337,10 @@ Postgres, и resume продолжил с того же чек-пойнта.
   `ProactorEventLoop`, с ним psycopg в async-режиме не работает; с `--reload` — `SelectorEventLoop`. В Docker
   (Linux) ограничения нет. Неподходящий цикл сервис объясняет строкой `agent_unavailable` в логе, а не
   падает.
+- **В потоке не приходит usage модели.** В логе `agent_model` у `input_tokens` и `output_tokens` — `null`:
+  в режиме `messages` модель стримит, а `ChatOpenAI` без `stream_usage=True` не просит у провайдера
+  `stream_options.include_usage`. Модель собирает `build_model()` блока 6.3, и `agent_graph.py` по заданию
+  не менялся. Для учёта токенов агента это нужно включить.
 - **Checkpoint'ы копятся.** Каждый шаг — строка, у thread нет срока жизни. Нужна чистка старых thread
   (`adelete_thread`) по расписанию. `tool_results` с `operator.add` тоже растёт по всему thread.
 - **Thread, который ждёт решения, нельзя отменить иначе как `resume: false`.** Отдельного «отменить и

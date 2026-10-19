@@ -3492,13 +3492,15 @@ python scripts/time_travel_demo.py
 В Docker: Postgres-checkpointer, поток SSE, рестарт. Для uvicorn на Windows-хосте Postgres-режим работает только с `--reload`: без него uvicorn запускает `ProactorEventLoop`, а psycopg с ним не работает; `sqlite` работает всегда.
 
 ```powershell
-docker compose up -d --build
+docker compose stop                                                    # сборка при работающем стеке обрывалась (EOF от сборщика)
+docker compose build app
+docker compose up -d                                                   # app — (healthy); в логе agent_checkpointer_ready, "backend": "postgres"
 docker compose exec postgres psql -U multapi -d multapi -c '\dt'      # checkpoints, checkpoint_writes, checkpoint_blobs, checkpoint_migrations
 alembic check                                                          # No new upgrade operations detected.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $admin = (Select-String -Path .env -Pattern '^ADMIN_TOKEN=\s*"?([^"#\s]+)').Matches[0].Groups[1].Value   # токен не печатается
 curl.exe -N -X POST http://127.0.0.1:8000/agent/stream -H "Content-Type: application/json" -H "X-Admin-Token: $admin" --data-binary "@examples/requests/agent_stream_input.json"
-docker compose restart app
+docker compose restart app                                                                  # дождаться (healthy): docker compose ps app
 curl.exe -s http://127.0.0.1:8000/agent/threads/demo-1 -H "X-Admin-Token: $admin"          # pending_approval: true — пауза пережила рестарт
 curl.exe -N -X POST http://127.0.0.1:8000/agent/stream -H "Content-Type: application/json" -H "X-Admin-Token: $admin" --data-binary "@examples/requests/agent_stream_approve.json"
 docker compose logs app | Select-String TELEGRAM                                            # одна строка [TELEGRAM → 12345]
@@ -3516,7 +3518,17 @@ docker compose logs app | Select-String TELEGRAM                                
   - `resume: true` — отправка и ответ, `resume: {"approved": false}` на втором thread — `sent: false`, заглушка не вызывалась.
 - **Сервис с `AGENT_CHECKPOINTER=sqlite`** — тот же поток до паузы, файл checkpoint'ов создан.
 
-**Windows.** Заполняется по логам.
+**Windows.** `qwen3:4b-instruct` в Ollama на CPU, сервис в Docker.
+- **Тесты:** `pytest` — 1555 passed, включая Postgres-тесты на Postgres из compose.
+- **Демо:** `time_travel_demo.py` — тот же вывод, что в песочнице, кроме `checkpoint_id`.
+- **Postgres:** после пересборки образа в логе `agent_checkpointer_ready` с `"backend": "postgres"`. `\dt` — четыре таблицы `checkpoint*` рядом с таблицами чатов, `alembic check` — `No new upgrade operations detected.`
+- **Поток SSE:**
+  - модель нашла срок в `billing/auto-renewal.docx` и попросила отправку — `prepare_send_message`, `interrupt`, `end` с `pending_approval: true`;
+  - `docker compose restart app` — `GET /agent/threads/demo-1` показал тот же `checkpoint_id`;
+  - `resume: true` — отправка и ответ, токены пришли кусками слов;
+  - на втором thread `resume: {"approved": false}` — `sent: false`, модель сообщила об отказе;
+  - в логе `app` — одна строка `[TELEGRAM → 12345]`.
+- **Сборка образа** обрывалась с `error reading from server: EOF`, пока работал весь стек. После `docker compose stop` сборка прошла за 70 с.
 
 ### Соответствие критериям блока 6.4
 
