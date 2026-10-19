@@ -3546,6 +3546,85 @@ docker compose logs app | Select-String TELEGRAM                                
 | В отчёте 8 разделов, «до interrupt» и «после interrupt» перечислены | `docs/agent-persistent-report.md`, раздел 3 |
 | Postgres — тот же сервис compose, `\dt` показывает таблицы LangGraph | `AGENT_CHECKPOINTER: postgres` у `app`, база `multapi`; `\dt` — отчёт, раздел 2 |
 
+## Блок 6.5 — Мультиагентные системы
+
+Исследование с решением на выходе: supervisor-граф из двух агентов против одного `create_agent` на тех же
+инструментах. Решение определяет agent-слой диплома. Прототипы — в `experiments/`, `app/` не менялся.
+Отчёт — [`docs/multi-agent-report.md`](docs/multi-agent-report.md), схема —
+[`docs/architecture-multi-agent.md`](docs/architecture-multi-agent.md).
+
+```mermaid
+flowchart LR
+    S(["__start__"]) --> SV["supervisor"]
+    SV -.->|"transfer_to_researcher"| R["researcher<br/>search_knowledge_base"]
+    R -.->|"факты"| SV
+    SV -.->|"transfer_to_writer"| W["writer<br/>ответ с [1], [2]"]
+    W --> E(["__end__"])
+```
+
+### Что сделано
+
+- **`experiments/multi_agent_langgraph.py`** — ручной supervisor через `Command(goto=..., update=...)`, без `create_supervisor` (обоснование — отчёт, раздел 3.1).
+  - researcher — `create_agent(name="researcher", tools=[search_knowledge_base])`, возвращает список фактов с источниками; writer — `create_agent(name="writer", tools=[])`, ответ с `[1]`, `[2]`.
+  - Агенты работают с чистым контекстом: на вход — вопрос и задание supervisor. Supervisor видит только факты, writer — последний шаг, его ответ идёт сразу в `END`.
+  - Бюджет — 5 передач управления на вопрос, последняя за writer. Если модель не вызвала handoff-инструмент, срабатывает запасной маршрут.
+  - `InMemorySaver`, `thread_id="exp-langgraph"`, `app.stream(..., stream_mode="updates", subgraphs=True)` в консоль. В конце — `draw_mermaid()` в `docs/architecture-multi-agent.md`.
+- **`experiments/single_agent_baseline.py`** — один `create_agent` с тем же объектом `search_knowledge_base` и промптом обеих ролей.
+- **`experiments/common.py`** — общее для обеих реализаций:
+  - 5 вопросов: 3 по корпусу, многошаговый, вне базы;
+  - инструмент — RAG блока 5.5, до 3 фрагментов с файлом и близостью;
+  - одинаковые правила поиска и формата ответа, одинаковые бюджеты `create_agent`, сброс KV-кеша Ollama перед вопросом;
+  - callback `Meter`: вызовы модели и токены по агентам.
+- **`experiments/compare.py`** — LLM-судья (`RAGAS__JUDGE_*` блока 5.6, correctness и faithfulness 1–5) и детерминированные проверки. Сводка — в `experiments/summary.json`, таблицы для отчёта — markdown в консоль.
+- **`experiments/results.json`** — одна запись на (реализация, вопрос): `total_tokens`, `llm_calls`, `latency_ms`, `handoff_count`, вызовы по агентам, поиски, ответ, проверки, оценки судьи.
+- **Тесты:** +21 в `tests/test_multi_agent.py`, без сети, на модели-сценарии.
+  - Один объект инструмента в обеих реализациях, общие правила промптов.
+  - Маршрут и счётчики, чистый контекст агентов, один thread на все вопросы.
+  - Бюджет передач, запасной маршрут, бюджеты `create_agent`.
+  - Формат инструмента, проверки ответа, запись `results.json`, сводка и судья.
+
+### Проверка на Windows
+
+Нужны Ollama с `qwen3:4b-instruct` и `bge-m3`, Qdrant из compose с коллекцией `kb_docs` (блок 5.5) и судья из `.env` (`RAGAS__JUDGE_*`; пусто — та же Ollama).
+
+```powershell
+python -m pytest tests/test_multi_agent.py -q          # 21 passed
+python -m pytest -q                                    # 1576 passed
+docker compose up -d qdrant
+New-Item -ItemType Directory -Force var | Out-Null              # логи — в var/ (в .gitignore)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8 = "1"
+python experiments/single_agent_baseline.py --model qwen3:4b-instruct | Tee-Object -FilePath var\exp65-single.log
+python experiments/multi_agent_langgraph.py --model qwen3:4b-instruct | Tee-Object -FilePath var\exp65-multi.log
+python experiments/compare.py | Tee-Object -FilePath var\exp65-compare.log
+```
+
+### Результаты
+
+**Песочница (Linux).**
+- **Тесты:** `pytest` — 1528 passed и 48 skipped (без Postgres), из них 21 новый.
+- **Оба скрипта прогнаны на подставной модели**, по записанному сценарию для каждой роли; поиск — настоящий RAG по Qdrant.
+  - Прошли все 5 вопросов, в `results.json` 10 записей.
+  - Маршрут мультиагента — `supervisor → researcher → supervisor → writer`; на q4 — два раунда researcher, третий выбор supervisor сделал по бюджету, без вызова модели.
+  - Ответы с `[1]`, `[2]` и списком «Источники:», на q5 — отказ.
+  - `compare.py` собрал таблицы. Числа подставной модели — проверка конвейера, а не замер.
+- **Схема** `docs/architecture-multi-agent.md` — обе Mermaid-схемы проходят парсер Mermaid.
+
+**Windows.** Заполняется после прогона.
+
+### Соответствие критериям блока 6.5
+
+| Критерий | Реализация |
+|---|---|
+| `multi_agent_langgraph.py` прогоняет 5 вопросов, финальный ответ с цитированием | `ask` по `QUESTIONS`; writer по `ANSWER_RULES`; `checks.citations` в `results.json`; `test_team_route_metrics_and_citations` |
+| `single_agent_baseline.py` — те же 5 вопросов одним `create_agent` с тем же tool | `build_baseline`; `test_both_implementations_use_the_same_tool_object` |
+| `results.json` — токены, `llm_calls`, `latency_ms`, `handoff_count` для 5 × 2 | `record` и `save_records`; `test_save_records_replaces_only_same_implementation_and_question` |
+| Отчёт: таблица single vs multi, абзац про Anthropic, `## Решение` | `docs/multi-agent-report.md`, разделы 5, 6 и «Решение» |
+| `architecture-multi-agent.md` — Mermaid supervisor-графа из `draw_mermaid()` | `write_architecture`; `test_architecture_file_has_supervisor_graph` |
+| Решение «использую / не использую» обосновано числами и признаками задачи | отчёт, «Решение» — по прогону на Windows |
+| `search_knowledge_base` — реальный RAG, одна реализация в обоих скриптах | `experiments/common.py` поверх `RAGService.retrieve` блока 5.5 |
+| Цитаты `[1]`, `[2]` в ответе мультиагента | `ANSWER_RULES` в промпте writer; проверка `CITATION` в `check_answer` |
+
 ## Конфигурация (.env)
 
 Ключевые переменные (полный список — в `.env.example`):
