@@ -1,0 +1,121 @@
+Авторские права © 2026 Александра Бужор (Alexandra Bujor), Telegram: @Angry_C_F_O
+Все права защищены.
+
+Условия использования материалов проекта «AI-ассистент для анализа документов»
+(репозиторий https://github.com/AlexBuQA/multapi)
+
+1. Правообладатель
+
+Исключительное право на материалы этого репозитория, созданные автором, принадлежит Александре Бужор
+(далее — Автор). К таким материалам относятся программный код, веб-интерфейс, документация, презентация,
+корпус документов базы знаний, наборы данных для оценки, тесты, скрипты, изображения и иные материалы
+(далее — Материалы).
+
+2. Что запрещено
+
+Без предварительного согласия Автора запрещается любое использование Материалов, в том числе:
+  - копировать, воспроизводить и распространять Материалы целиком или частично;
+  - создавать копии репозитория (форки), в том числе средствами GitHub, и использовать такие копии;
+  - изменять Материалы и создавать на их основе производные работы;
+  - использовать Материалы — код, документы, данные — в других проектах, продуктах, сервисах,
+    учебных, научных и коммерческих работах;
+  - публиковать Материалы или их части на других ресурсах;
+  - использовать Материалы для обучения, дообучения или оценки моделей машинного обучения;
+  - выдавать Материалы или их части за свои.
+
+3. Что разрешено без отдельного согласия
+
+  - Просматривать Материалы на странице репозитория на GitHub.
+  - Клонировать, запускать и тестировать проект на своём компьютере проверяющим и сотрудникам
+    образовательной организации — только для проверки, оценки и защиты дипломного проекта Автора.
+  - Хранить Материалы в системах образовательной организации в объёме, необходимом для проверки,
+    защиты и хранения работы.
+  - Использовать Материалы в случаях свободного использования, прямо предусмотренных законом, — в том
+    числе цитировать в объёме, оправданном целью цитирования, с обязательным указанием имени Автора и
+    источника (статья 1274 Гражданского кодекса Российской Федерации).
+
+4. Как получить согласие
+
+Запрос на использование Материалов направляйте Автору в Telegram: @Angry_C_F_O. Согласие действует,
+только если оно выражено Автором в письменной форме (в том числе сообщением в Telegram с аккаунта
+@Angry_C_F_O), и только в том объёме и на тот срок, которые в нём указаны.
+
+5. Сторонние компоненты
+
+Эти условия не распространяются на сторонние библиотеки, модели, инструменты, образы контейнеров и иные
+материалы третьих лиц, которые проект использует или упоминает. На них действуют лицензии и права их
+правообладателей. Названия сторонних продуктов и сервисов принадлежат их правообладателям.
+
+6. Отказ от гарантий
+
+Материалы предоставляются «как есть», без каких-либо гарантий. Автор не несёт ответственности за
+последствия использования Материалов, в том числе разрешённого по разделу 3.
+
+7. Нарушение условий
+
+Использование Материалов с нарушением этих условий нарушает исключительное право Автора и влечёт
+ответственность, предусмотренную законодательством.
+
+Текст на русском языке имеет преимущественную силу. Перевод на английский язык ниже приведён для
+удобства.
+
+--------------------------------------------------------------------------------------------------------
+
+Copyright © 2026 Alexandra Bujor, Telegram: @Angry_C_F_O
+All rights reserved.
+
+Terms of use for the "AI assistant for document analysis" project
+(repository https://github.com/AlexBuQA/multapi)
+
+1. Rights holder
+
+The exclusive rights to the materials in this repository created by the author belong to Alexandra
+Bujor (the "Author"). These materials include source code, the web interface, documentation, the
+presentation, the knowledge base document corpus, evaluation datasets, tests, scripts, images and other
+materials (the "Materials").
+
+2. Prohibited
+
+Without the Author's prior consent, any use of the Materials is prohibited, including:
+  - copying, reproducing or distributing the Materials in whole or in part;
+  - creating copies of the repository (forks), including through GitHub, and using such copies;
+  - modifying the Materials or creating derivative works based on them;
+  - using the Materials (code, documents, data) in other projects, products, services, or in
+    educational, research or commercial works;
+  - publishing the Materials or any part of them elsewhere;
+  - using the Materials to train, fine-tune or evaluate machine learning models;
+  - presenting the Materials or any part of them as one's own.
+
+3. Permitted without separate consent
+
+  - Viewing the Materials on the repository page on GitHub.
+  - Cloning, running and testing the project locally by reviewers and staff of the educational
+    institution, solely to review, assess and defend the Author's diploma project.
+  - Storing the Materials in the educational institution's systems to the extent necessary for review,
+    defence and archiving of the work.
+  - Uses expressly permitted by law without the rights holder's consent, including quotation to the
+    extent justified by its purpose, with mandatory attribution to the Author and the source.
+
+4. Obtaining consent
+
+Send requests to use the Materials to the Author on Telegram: @Angry_C_F_O. Consent is valid only if
+given by the Author in writing (including a Telegram message from the @Angry_C_F_O account), and only
+within the scope and term stated in it.
+
+5. Third-party components
+
+These terms do not apply to third-party libraries, models, tools, container images or other third-party
+materials used or referenced by the project; those remain subject to the licenses and rights of their
+respective holders. Third-party product and service names belong to their respective owners.
+
+6. Disclaimer
+
+The Materials are provided "as is", without warranty of any kind. The Author is not liable for any
+consequences of using the Materials, including use permitted under section 3.
+
+7. Breach
+
+Use of the Materials in breach of these terms infringes the Author's exclusive rights and entails
+liability under applicable law.
+
+The Russian text prevails. The English translation is provided for convenience.

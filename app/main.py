@@ -105,7 +105,7 @@ from app.observability.middleware import (
 )
 from app.observability.pii_presidio import load_redactor
 from app.observability.tracing import fastapi_telemetry, setup_tracing, shutdown_tracing
-from app.routers import agent, chat, documents, health, kb, models, rag
+from app.routers import agent, chat, documents, health, kb, models, rag, ui
 from app.services.llm import CACHE_ERRORS
 from app.services.security.canary import new_canary
 from app.services.security.rate_limit import (
@@ -411,3 +411,5 @@ app.include_router(rag.router)
 app.include_router(documents.router)
 app.include_router(agent.router)
 app.include_router(health.router)
+# Итоговая аттестация: GET /ui — веб-интерфейс для демонстрации поверх тех же API (app/routers/ui.py).
+app.include_router(ui.router)

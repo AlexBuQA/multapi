@@ -1,0 +1,858 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-ассистент для анализа документов</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Палитра и шрифты — те же, что в презентации защиты (docs/presentation.pdf). Без сети страница
+   берёт системные шрифты: IBM Plex Sans и JetBrains Mono грузятся из Google Fonts. */
+:root {
+  --ink: #15202B; --paper: #F5F4EF; --surface: #FCFBF7; --line: #DEDAD0;
+  --text: #2E3A45; --muted: #5F6B76; --blue: #1D63A8; --blue-soft: #E6EEF6; --sky: #8CC4F2;
+  --amber: #B5650C; --amber-soft: #FBE6CC; --green: #2E7D4F; --green-soft: #E2F0E7;
+  --red: #B3261E; --red-soft: #F8E0DD;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, "Courier New", monospace;
+  --radius: 10px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--paper); color: var(--text); font: 17px/1.55 var(--sans); }
+button, input, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 3px solid var(--sky); outline-offset: 2px; }
+.mono { font-family: var(--mono); font-size: .88em; }
+.muted { color: var(--muted); }
+.hidden { display: none !important; }
+
+/* Шапка */
+/* Две строки: название и состояние сервиса, под ними вкладки. Высоту шапки страница измеряет сама
+   (--hdr), чтобы окно чата целиком помещалось на экране при любом масштабе. */
+header { background: var(--ink); color: var(--paper); }
+.wrap { max-width: 1480px; margin: 0 auto; padding: 0 32px; }
+.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 32px; padding-top: 14px; padding-bottom: 4px; }
+.brand { min-width: 0; }
+.brand h1 { margin: 0; font-size: 22px; line-height: 1.35; font-weight: 600; letter-spacing: .1px; }
+.brand p { margin: 1px 0 0; font-size: 14px; line-height: 1.4; color: #AEBBC6; }
+.brand .by { margin-left: 10px; font-size: 14px; font-weight: 400; letter-spacing: .2px; color: #AEBBC6; white-space: nowrap; }
+.tabs { display: flex; gap: 4px; margin-left: -14px; }
+.tab { background: none; border: 0; border-bottom: 3px solid transparent; color: #C9D3DB; padding: 8px 14px 9px; cursor: pointer; font-weight: 500; }
+.tab:hover { color: var(--paper); }
+.tab[aria-selected="true"] { color: var(--paper); border-bottom-color: var(--sky); }
+.status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 14px; color: #C9D3DB; }
+#health { white-space: nowrap; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #7A8792; margin-right: 6px; vertical-align: 1px; }
+.dot.ok { background: #5CC38A; } .dot.bad { background: #F07A6E; }
+.keybtn { background: none; border: 1px solid #44525F; border-radius: 999px; color: #E3E9EE; padding: 4px 12px; cursor: pointer; font-size: 14px; }
+.keybtn.set { border-color: #5CC38A; }
+
+main { max-width: 1480px; margin: 0 auto; padding: 20px 32px 12px; }
+/* Подвал: авторство. Его высоту страница тоже измеряет (--ftr), чтобы окно чата помещалось на экране. */
+.site-foot { max-width: 1480px; margin: 0 auto; padding: 0 32px 14px; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.panel { display: none; }
+.panel.active { display: block; }
+.cols { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr); gap: 28px; align-items: start; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+h2 { margin: 0 0 4px; font-size: 20px; font-weight: 600; color: var(--ink); }
+.lead { margin: 0 0 16px; color: var(--muted); font-size: 15px; }
+
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 9px 16px; cursor: pointer; font-weight: 500; }
+.btn:hover { border-color: #C5C0B4; }
+.btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+.btn.primary:hover { background: #17558F; }
+.btn.go { background: var(--amber); border-color: var(--amber); color: #fff; }
+.btn.go:hover { background: #9A560A; }
+.btn:disabled { opacity: .5; cursor: default; }
+.notice { border-radius: 8px; padding: 10px 14px; font-size: 15px; margin: 0 0 14px; }
+.notice.err { background: var(--red-soft); color: #7A1A14; }
+.notice.warn { background: var(--amber-soft); color: #6B3D06; }
+
+/* Вопросы по документам */
+.chat { display: flex; flex-direction: column; height: calc(100vh - var(--hdr, 130px) - var(--ftr, 34px) - 32px); min-height: 360px; }
+.transcript { flex: 1; overflow-y: auto; padding: 22px 26px; }
+.empty { max-width: 640px; margin: 8vh auto 0; text-align: center; }
+.empty h2 { font-size: 24px; }
+.examples { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 18px; }
+.chip { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 6px 14px; cursor: pointer; font-size: 15px; }
+.chip:hover { border-color: var(--blue); color: var(--blue); }
+.turn { padding: 16px 18px; border-left: 3px solid transparent; border-radius: 0 8px 8px 0; cursor: pointer; }
+.turn + .turn { margin-top: 10px; }
+.turn.selected { border-left-color: var(--blue); background: #fff; }
+.q { margin: 0 0 8px; font-weight: 600; color: var(--ink); font-size: 18px; }
+.attach { display: inline-block; margin-left: 8px; font-weight: 400; font-size: 14px; color: var(--muted); }
+.a { margin: 0; white-space: pre-wrap; font-size: 17.5px; }
+.a.refused { color: #6B3D06; }
+.cite { display: inline-block; min-width: 1.6em; padding: 0 .35em; margin: 0 1px; border: 0; border-radius: 5px; background: var(--blue-soft); color: var(--blue); font: 600 .82em/1.5 var(--mono); cursor: pointer; vertical-align: 1px; }
+.cite:hover { background: var(--blue); color: #fff; }
+.turn-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 10px; font-size: 14px; color: var(--muted); }
+.fb-group { display: inline-flex; align-items: center; gap: 6px; }
+.fb { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 1px 8px; cursor: pointer; font-size: 15px; }
+.fb.on { border-color: var(--blue); background: var(--blue-soft); }
+.typing::after { content: "▍"; color: var(--blue); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.composer { border-top: 1px solid var(--line); padding: 14px 18px; display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: end; }
+.composer textarea { resize: none; min-height: 52px; max-height: 160px; overflow-y: hidden; border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; background: #fff; }
+.composer .file { grid-column: 1 / -1; font-size: 14px; color: var(--muted); }
+.iconbtn { width: 46px; height: 48px; border: 1px solid var(--line); border-radius: 8px; background: #fff; cursor: pointer; font-size: 20px; }
+.chat-tools { display: flex; justify-content: space-between; align-items: center; padding: 0 18px 12px; font-size: 14px; }
+.linkbtn { background: none; border: 0; color: var(--blue); cursor: pointer; padding: 0; font-size: 14px; }
+
+/* Источники: шкала близости с отметкой порога — главное, что видно на защите */
+.rail { position: sticky; top: 16px; padding: 20px 22px; max-height: max(360px, calc(100vh - var(--hdr, 130px) - var(--ftr, 34px) - 32px)); overflow-y: auto; }
+.src { padding: 14px 0; border-top: 1px solid var(--line); }
+.src:first-of-type { border-top: 0; }
+.src.focus { background: var(--blue-soft); margin: 0 -22px; padding: 14px 22px; }
+.src-head { display: flex; gap: 10px; align-items: baseline; }
+.src-num { font: 600 14px var(--mono); color: var(--blue); }
+.src-name { font: 600 15px var(--mono); color: var(--ink); word-break: break-all; }
+.src-where { font-size: 14px; color: var(--muted); margin: 2px 0 8px; }
+.src-snip { margin: 8px 0 0; font-size: 15px; color: var(--text); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tag { display: inline-block; font-size: 12.5px; padding: 0 8px; border-radius: 999px; background: var(--green-soft); color: var(--green); margin-left: 6px; font-weight: 500; }
+.meter { position: relative; height: 10px; border-radius: 5px; background: #E9E5DB; }
+.meter .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; background: var(--blue); }
+.meter .fill.low { background: #A9B2BA; }
+.meter .tick { position: absolute; top: -5px; bottom: -5px; width: 2px; background: var(--amber); }
+.meter-legend { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-top: 4px; }
+.meter-legend b { color: var(--ink); font-weight: 600; }
+.verdict { border-radius: 8px; padding: 14px 16px; background: var(--amber-soft); color: #5C3405; font-size: 15px; margin-bottom: 12px; }
+.verdict strong { display: block; font-size: 16px; margin-bottom: 4px; color: #4A2A04; }
+
+/* Агент */
+.task { padding: 18px 20px; }
+.task textarea { width: 100%; min-height: 108px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; background: #fff; }
+.task-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.task-row label { font-size: 14px; color: var(--muted); }
+.task-row input { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; width: 230px; font-family: var(--mono); font-size: 14px; }
+.running { font-size: 15px; color: var(--muted); margin-left: auto; }
+.timeline { list-style: none; margin: 18px 0 0; padding: 0; counter-reset: step; }
+.step { position: relative; padding: 0 0 18px 46px; }
+.step::before { counter-increment: step; content: counter(step); position: absolute; left: 0; top: 0; width: 30px; height: 30px; border-radius: 50%; background: var(--surface); border: 1px solid var(--line); display: grid; place-items: center; font: 600 13px var(--mono); color: var(--muted); }
+.step::after { content: ""; position: absolute; left: 15px; top: 34px; bottom: 4px; width: 1px; background: var(--line); }
+.step:last-child::after { display: none; }
+.step.tool::before { border-color: var(--blue); color: var(--blue); }
+.step.pause::before { border-color: var(--amber); background: var(--amber); color: #fff; }
+.step.done::before { border-color: var(--green); background: var(--green); color: #fff; }
+.step.fail::before { border-color: var(--red); color: var(--red); }
+.step h3 { margin: 3px 0 4px; font-size: 17px; font-weight: 600; color: var(--ink); }
+.step p { margin: 0; }
+.code { font: 14.5px/1.5 var(--mono); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; margin-top: 6px; white-space: pre-wrap; word-break: break-word; }
+.approval { margin-top: 8px; border: 1px solid #E8B474; border-left: 5px solid var(--amber); border-radius: 8px; background: #FFF7EC; padding: 16px 18px; }
+.approval .msg { font-size: 17.5px; color: var(--ink); margin: 6px 0 12px; }
+.approval .meta { font-size: 14px; color: #6B3D06; }
+.approval .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.approval .actions + .meta { margin-top: 10px; font-weight: 600; }
+.approval.decided { background: var(--surface); border-color: var(--line); border-left-color: #D9B48A; }
+.state { padding: 20px 22px; position: sticky; top: 16px; }
+.state dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 12px 0 16px; font-size: 15px; }
+.state dt { color: var(--muted); }
+.state dd { margin: 0; color: var(--ink); word-break: break-all; }
+.hint { font-size: 14.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; margin-top: 16px; }
+.hint code { font-family: var(--mono); font-size: 13px; background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+/* Пополнить базу */
+.upload { max-width: 900px; }
+.drop { display: block; border: 2px dashed #C9C3B6; border-radius: var(--radius); padding: 34px; text-align: center; background: var(--surface); cursor: pointer; }
+.drop.over { border-color: var(--blue); background: var(--blue-soft); }
+.drop strong { display: block; font-size: 18px; color: var(--ink); margin-bottom: 4px; }
+.uploads { list-style: none; margin: 20px 0 0; padding: 0; }
+.uploads li { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: center; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+.state-chip { font-size: 14px; border-radius: 999px; padding: 2px 12px; background: #ECE8DF; color: var(--muted); white-space: nowrap; }
+.state-chip.ok { background: var(--green-soft); color: var(--green); }
+.state-chip.bad { background: var(--red-soft); color: var(--red); }
+
+dialog { border: 1px solid var(--line); border-radius: 12px; padding: 24px; max-width: 460px; width: calc(100% - 32px); background: var(--surface); color: var(--text); }
+dialog::backdrop { background: rgba(21, 32, 43, .45); }
+dialog input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0 6px; background: #fff; }
+dialog .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+
+@media (max-width: 960px) {
+  .wrap, main, .site-foot { padding-left: 16px; padding-right: 16px; }
+  .cols { grid-template-columns: 1fr; }
+  .chat { height: auto; min-height: 0; }
+  .transcript { max-height: 60vh; }
+  .rail, .state { position: static; max-height: none; }
+}
+@media (max-width: 600px) {
+  .brand h1 { font-size: 20px; }
+  .tabs { margin: 4px -16px 0; }
+  .tab { flex: 1; padding: 8px 6px 9px; font-size: 15px; line-height: 1.3; }
+  .composer { grid-template-columns: auto 1fr; }
+  .composer textarea { grid-column: 1 / -1; grid-row: 1; min-height: 72px; }
+  .composer #ask { justify-self: end; }
+  .chat-tools { flex-wrap: wrap; gap: 4px 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .typing::after { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap top">
+    <div class="brand">
+      <h1>AI-ассистент для анализа документов <span class="by">by Alexandra Bujor</span></h1>
+      <p>Помощник аналитика: ответы по документам компании со ссылками на источники</p>
+    </div>
+    <div class="status">
+      <span id="health"><span class="dot"></span>проверяю сервис…</span>
+      <button class="keybtn" id="keyBtn" type="button">Ключ администратора: не задан</button>
+    </div>
+  </div>
+  <div class="wrap">
+    <nav class="tabs" role="tablist" aria-label="Разделы">
+      <button class="tab" role="tab" id="tab-chat" aria-controls="panel-chat" aria-selected="true">Вопросы по документам</button>
+      <button class="tab" role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false">Поручение агенту</button>
+      <button class="tab" role="tab" id="tab-upload" aria-controls="panel-upload" aria-selected="false">Пополнить базу</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- Вопросы по документам -->
+  <section class="panel active" id="panel-chat" role="tabpanel" aria-labelledby="tab-chat">
+    <div class="cols">
+      <div class="card chat">
+        <div class="transcript" id="transcript" aria-live="polite">
+          <div class="empty" id="empty">
+            <h2>Спросите о чём угодно из документов компании</h2>
+            <p class="muted">Ассистент найдёт подходящие фрагменты в базе знаний и ответит только по ним — со ссылками на источники. Можно приложить PDF или DOCX, чтобы разобрать документ, которого нет в базе.</p>
+            <div class="examples" id="examples"></div>
+          </div>
+        </div>
+        <div class="chat-tools">
+          <span class="muted" id="chatHint">Enter — отправить, Shift+Enter — новая строка</span>
+          <button class="linkbtn" id="newChat" type="button">Начать новый диалог</button>
+        </div>
+        <form class="composer" id="composer">
+          <button class="iconbtn" type="button" id="attachBtn" title="Приложить PDF или DOCX" aria-label="Приложить файл">📎</button>
+          <textarea id="question" rows="1" placeholder="Например: сколько действует ссылка для сброса пароля?" aria-label="Вопрос"></textarea>
+          <button class="btn primary" id="ask" type="submit">Спросить</button>
+          <input type="file" id="fileInput" class="hidden" accept=".pdf,.docx,image/jpeg,image/png,image/webp">
+          <div class="file hidden" id="fileLine"></div>
+        </form>
+      </div>
+      <aside class="card rail" id="rail" aria-live="polite">
+        <h2>Источники ответа</h2>
+        <p class="lead" id="railLead">Здесь появятся фрагменты документов, на которых основан ответ, и их близость к вопросу.</p>
+        <div id="railBody"></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Поручение агенту -->
+  <section class="panel" id="panel-agent" role="tabpanel" aria-labelledby="tab-agent">
+    <div class="cols">
+      <div>
+        <div class="card task">
+          <h2>Поручение агенту</h2>
+          <p class="lead">Агент сам решает, какие инструменты вызвать. Сообщение пользователю он отправит только после вашего подтверждения.</p>
+          <textarea id="agentTask" aria-label="Поручение"></textarea>
+          <div class="task-row">
+            <button class="btn primary" id="agentRun" type="button">Выполнить</button>
+            <button class="btn" id="agentNew" type="button">Новое поручение</button>
+            <label for="threadId">Поручение</label>
+            <input id="threadId" spellcheck="false" aria-describedby="threadHelp">
+            <span class="running" id="agentRunning"></span>
+          </div>
+          <p class="muted hidden" id="threadHelp">Идентификатор поручения: по нему сервис находит сохранённое состояние.</p>
+        </div>
+        <div id="agentNotice"></div>
+        <ol class="timeline" id="timeline"></ol>
+      </div>
+      <aside class="card state">
+        <h2>Состояние поручения</h2>
+        <dl>
+          <dt>Поручение</dt><dd class="mono" id="stThread">—</dd>
+          <dt>Ждёт решения</dt><dd id="stPending">—</dd>
+          <dt>Отправлено</dt><dd id="stSent">—</dd>
+          <dt>Контрольная точка</dt><dd class="mono" id="stCheckpoint">—</dd>
+        </dl>
+        <button class="btn" id="stRefresh" type="button">Обновить состояние</button>
+        <p class="hint">Состояние агента хранится в Postgres. Проверка: когда агент встанет на паузу, перезапустите сервис — <code>docker compose restart app</code> или кнопка Restart в Docker Desktop — и нажмите «Обновить состояние». Черновик и кнопки решения вернутся, а отправленное сообщение второй раз не уйдёт.</p>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Пополнить базу -->
+  <section class="panel" id="panel-upload" role="tabpanel" aria-labelledby="tab-upload">
+    <div class="upload">
+      <h2>Пополнить базу знаний</h2>
+      <p class="lead">Новый документ проиндексируется за 30–60 секунд, после чего ассистент начнёт ссылаться на него в ответах. Подходят PDF, DOCX, HTML, Markdown и TXT до 20 МБ. Если загрузить файл с тем же именем, он заменит прежнюю версию.</p>
+      <div id="uploadNotice"></div>
+      <label class="drop" id="drop" for="kbFile">
+        <strong>Перетащите файл сюда или выберите на компьютере</strong>
+        <span class="muted" id="dropName">Файл не выбран</span>
+        <input type="file" id="kbFile" class="hidden" accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt">
+      </label>
+      <p><button class="btn primary" id="kbUpload" type="button" disabled>Добавить в базу</button></p>
+      <ul class="uploads" id="uploads"></ul>
+    </div>
+  </section>
+</main>
+
+<footer class="site-foot">© 2026 Produced by Alexandra Bujor. Все права защищены.</footer>
+
+<dialog id="keyDialog" aria-labelledby="keyTitle">
+  <form method="dialog" id="keyForm">
+    <h2 id="keyTitle">Ключ администратора</h2>
+    <p class="muted" style="margin:6px 0 0;font-size:15px">Нужен для поручений агенту и пополнения базы. Это значение ADMIN_TOKEN из .env сервиса. Страница хранит его только до закрытия вкладки и нигде не показывает.</p>
+    <input type="password" id="keyInput" autocomplete="off" spellcheck="false" aria-label="Ключ администратора">
+    <div class="actions">
+      <button class="btn" value="forget" type="submit" id="keyForget">Забыть ключ</button>
+      <button class="btn" value="cancel" type="submit">Отмена</button>
+      <button class="btn primary" value="save" type="submit">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+// Порог близости RAG подставляет сервис (app/routers/ui.py): отметка «порог» на шкале источников.
+const THRESHOLD = Number("__SCORE_THRESHOLD__") || 0.5;
+const EXAMPLES = [
+  "Сколько действует ссылка для сброса пароля?",
+  "Каков срок возврата оплаты?",
+  "Какой лимит запросов к API на тарифе «Команда»?",
+  "Как приготовить борщ?",
+];
+const AGENT_EXAMPLE = "Найди в базе знаний, за сколько дней до окончания периода приходит письмо об автопродлении, " +
+  "и отправь клиенту в Telegram-чат 12345 короткое напоминание об этом.";
+const FILE_PROMPT = "Перескажи кратко этот документ: о чём он и что в нём главное.";
+
+const $ = (id) => document.getElementById(id);
+const store = {   // sessionStorage может быть недоступен (приватный режим, запрет) — тогда живём в памяти
+  mem: {},
+  get(k) { try { return sessionStorage.getItem(k) ?? this.mem[k] ?? null; } catch { return this.mem[k] ?? null; } },
+  set(k, v) { this.mem[k] = v; try { sessionStorage.setItem(k, v); } catch { /* только память */ } },
+  del(k) { delete this.mem[k]; try { sessionStorage.removeItem(k); } catch { /* только память */ } },
+};
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const fmtScore = (s) => (typeof s === "number" ? s.toFixed(2) : "—");
+const seconds = (ms) => Math.max(1, Math.round(ms / 1000));
+const clock = (ms) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+// ---------- сеть ----------
+function adminHeaders(extra = {}) { const t = store.get("adminToken"); return t ? { ...extra, "X-Admin-Token": t } : extra; }
+async function errorText(resp) {
+  try {
+    const body = await resp.json();
+    const e = body.error || body.detail || body;
+    if (e && (e.message || e.code)) return `${e.message || ""}${e.code ? ` (${e.code})` : ""}`.trim();
+    return JSON.stringify(body).slice(0, 200);
+  } catch { return `HTTP ${resp.status}`; }
+}
+async function* sseEvents(resp) {           // text/event-stream: события через пустую строку, JSON в data:
+  const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      const data = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+      if (data) { try { yield JSON.parse(data); } catch { /* не JSON — пропускаем */ } }
+    }
+  }
+}
+let healthy = null;
+async function checkHealth() {
+  try { const r = await fetch("/health", { cache: "no-store" }); setHealth(r.ok); return r.ok; }
+  catch { setHealth(false); return false; }
+}
+function setHealth(ok, text) {
+  healthy = ok;
+  $("health").innerHTML = "";
+  $("health").append(el("span", "dot " + (ok ? "ok" : "bad")), text || (ok ? "сервис работает" : "сервис недоступен"));
+}
+async function waitForService(limitSec = 90, onWait) {   // после docker compose restart app сервис поднимается не сразу
+  const start = Date.now();
+  while (Date.now() - start < limitSec * 1000) {
+    if (await checkHealth()) return true;
+    setHealth(false, "сервис перезапускается…");
+    if (onWait) onWait(Date.now() - start);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
+// ---------- вкладки и ключ ----------
+const TABS = ["chat", "agent", "upload"];
+function showTab(name) {
+  for (const t of TABS) {
+    $("tab-" + t).setAttribute("aria-selected", String(t === name));
+    $("panel-" + t).classList.toggle("active", t === name);
+  }
+  store.set("tab", name);
+  if (name === "chat") $("question").focus();
+}
+TABS.forEach((t) => $("tab-" + t).addEventListener("click", () => showTab(t)));
+$("tab-chat").parentElement.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+  const cur = TABS.findIndex((t) => $("tab-" + t).getAttribute("aria-selected") === "true");
+  const next = TABS[(cur + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
+  showTab(next); $("tab-" + next).focus();
+});
+function renderKey() {
+  const set = Boolean(store.get("adminToken"));
+  $("keyBtn").textContent = "Ключ администратора: " + (set ? "задан" : "не задан");
+  $("keyBtn").classList.toggle("set", set);
+}
+$("keyBtn").addEventListener("click", () => { $("keyInput").value = ""; $("keyDialog").showModal(); $("keyInput").focus(); });
+$("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("keyDialog").close("save"); } });
+$("keyDialog").addEventListener("close", () => {
+  const action = $("keyDialog").returnValue;
+  if (action === "save" && $("keyInput").value.trim()) store.set("adminToken", $("keyInput").value.trim());
+  if (action === "forget") store.del("adminToken");
+  $("keyInput").value = "";
+  renderKey();
+});
+function needKey(noticeBox) {
+  if (store.get("adminToken")) return false;
+  showNotice(noticeBox, "warn", "Нужен ключ администратора — значение ADMIN_TOKEN из .env. Нажмите «Ключ администратора» вверху справа.");
+  return true;
+}
+function showNotice(box, kind, text) { box.innerHTML = ""; if (text) box.append(el("p", "notice " + kind, text)); }
+
+// ---------- вопросы по документам ----------
+let chatId = null;
+let busy = false;
+let attached = null;
+let selectedTurn = null;
+const turns = new Map();
+let turnSeq = 0;
+
+for (const q of EXAMPLES) {
+  const b = el("button", "chip", q); b.type = "button";
+  b.addEventListener("click", () => { $("question").value = q; ask(); });
+  $("examples").append(b);
+}
+function owner() {
+  let id = store.get("owner");
+  if (!id) { id = "web-" + Math.random().toString(36).slice(2, 10); store.set("owner", id); }
+  return id;
+}
+async function ensureChat() {
+  if (chatId) return chatId;
+  const r = await fetch("/chats", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner_external_id: owner(), interface: "web" }) });
+  if (!r.ok) throw new Error(await errorText(r));
+  chatId = (await r.json()).chat_id;
+  return chatId;
+}
+function renderAnswer(node, text) {           // [1], [2] в ответе — кнопки, которые подсвечивают источник справа
+  node.textContent = "";
+  const parts = text.split(/\[(\d{1,2})\]/);
+  parts.forEach((part, i) => {
+    if (i % 2 === 0) { if (part) node.append(document.createTextNode(part)); return; }
+    const b = el("button", "cite", part); b.type = "button"; b.title = "Показать источник " + part;
+    b.addEventListener("click", (e) => { e.stopPropagation(); selectTurn(node.closest(".turn").dataset.turn, Number(part)); });
+    node.append(b);
+  });
+}
+function meter(score) {
+  const box = el("div");
+  const bar = el("div", "meter"); bar.setAttribute("role", "img");
+  bar.setAttribute("aria-label", `Близость ${fmtScore(score)}, порог ${THRESHOLD.toFixed(2)}`);
+  const fill = el("span", "fill" + (score < THRESHOLD ? " low" : ""));
+  fill.style.width = Math.max(2, Math.min(100, (score || 0) * 100)) + "%";
+  const tick = el("span", "tick"); tick.style.left = (THRESHOLD * 100) + "%";
+  bar.append(fill, tick);
+  const legend = el("div", "meter-legend");
+  const left = el("span"); left.append("близость ", el("b", null, fmtScore(score)));
+  legend.append(left, el("span", null, "порог " + THRESHOLD.toFixed(2)));
+  box.append(bar, legend);
+  return box;
+}
+function renderRail(turn, focusId) {
+  const body = $("railBody"); body.innerHTML = "";
+  if (!turn) { $("railLead").classList.remove("hidden"); return; }
+  $("railLead").classList.add("hidden");
+  if (turn.error) { body.append(el("p", "notice err", turn.error)); return; }
+  if (!turn.sourcesEvent) {
+    body.append(el("p", "muted", turn.done
+      ? (turn.file ? `Ответ по присланному файлу «${turn.file}»: база знаний для него не нужна.` : "Сервис не прислал источников для этого ответа.")
+      : "Ищу фрагменты в документах…"));
+    return;
+  }
+  const ev = turn.sourcesEvent;
+  if (!ev.confident) {
+    const v = el("div", "verdict");
+    v.append(el("strong", null, "В документах ответа нет"));
+    v.append(el("span", null, ev.top_score < THRESHOLD
+      ? `Лучшее совпадение ниже порога — модель ответ не писала, отказ без генерации.`
+      : `Похожие фрагменты нашлись, но ответа в них нет — модель отказалась сама, а не стала выдумывать.`));
+    body.append(v, meter(ev.top_score));
+    return;
+  }
+  const list = (ev.sources || []).slice().sort((a, b) => (b.cited - a.cited) || (a.id - b.id));
+  for (const s of list) {
+    const item = el("div", "src" + (focusId === s.id ? " focus" : "")); item.id = `src-${turn.id}-${s.id}`;
+    const head = el("div", "src-head");
+    head.append(el("span", "src-num", `[${s.id}]`), el("span", "src-name", s.file_name || s.source || "документ"));
+    if (s.cited) head.append(el("span", "tag", "в ответе"));
+    const where = [s.source && s.source !== s.file_name ? s.source : null, s.category, s.page ? `стр. ${s.page}` : null].filter(Boolean).join(" · ");
+    item.append(head, el("div", "src-where", where || " "), meter(s.score));
+    if (s.snippet) item.append(el("p", "src-snip", s.snippet));
+    body.append(item);
+  }
+  if (focusId) { const f = document.getElementById(`src-${turn.id}-${focusId}`); if (f) f.scrollIntoView({ block: "nearest" }); }
+}
+function selectTurn(id, focusId) {
+  const turn = turns.get(String(id)); if (!turn) return;
+  if (selectedTurn) { const prev = turns.get(selectedTurn); if (prev) prev.node.classList.remove("selected"); }
+  selectedTurn = String(id); turn.node.classList.add("selected");
+  renderRail(turn, focusId);
+}
+function turnMeta(turn) {
+  const meta = turn.metaNode; meta.innerHTML = "";
+  if (!turn.done) {
+    const stage = turn.text ? "Пишу ответ" : turn.file ? "Читаю файл" : "Ищу в документах";
+    meta.append(el("span", null, `${stage} · ${seconds(Date.now() - turn.started)} с`));
+    return;
+  }
+  meta.append(el("span", null, `Ответ за ${seconds(turn.finished - turn.started)} с`));
+  const ev = turn.sourcesEvent;
+  if (ev) meta.append(el("span", null, ev.confident ? `источников: ${(ev.sources || []).length}` : "ответа в документах нет"));
+  if (turn.messageId) {
+    const group = el("span", "fb-group");
+    for (const [value, label, title] of [["up", "👍", "Полезный ответ"], ["down", "👎", "Плохой ответ"]]) {
+      const b = el("button", "fb" + (turn.feedback === value ? " on" : ""), label); b.type = "button"; b.title = title;
+      b.setAttribute("aria-label", title); b.disabled = Boolean(turn.feedback);
+      b.addEventListener("click", (e) => { e.stopPropagation(); sendFeedback(turn, value); });
+      group.append(b);
+    }
+    if (turn.feedback) group.append(el("span", null, "оценка сохранена"));
+    meta.append(group);
+  }
+}
+async function sendFeedback(turn, value) {
+  const sources = (turn.sourcesEvent?.sources || []).slice(0, 20).map((s) => ({ id: s.id, file_name: s.file_name, source: s.source, page: s.page, score: s.score, cited: s.cited }));
+  try {
+    const r = await fetch(`/chats/${chatId}/messages/${turn.messageId}/feedback`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value, sources }) });
+    if (r.ok) turn.feedback = (await r.json()).value;
+  } catch { /* оценка необязательна */ }
+  turnMeta(turn);
+}
+function newTurn(question, fileName) {
+  $("empty").classList.add("hidden");
+  const id = String(++turnSeq);
+  const node = el("article", "turn"); node.dataset.turn = id; node.tabIndex = 0;
+  const q = el("p", "q", question);
+  if (fileName) q.append(el("span", "attach", "📎 " + fileName));
+  const a = el("p", "a typing"); const meta = el("footer", "turn-meta");
+  node.append(q, a, meta);
+  node.addEventListener("click", () => selectTurn(id));
+  node.addEventListener("keydown", (e) => { if (e.key === "Enter") selectTurn(id); });
+  $("transcript").append(node);
+  const turn = { id, node, answerNode: a, metaNode: meta, text: "", started: Date.now(), done: false, file: fileName };
+  turns.set(id, turn);
+  selectTurn(id);
+  node.scrollIntoView({ block: "end" });
+  return turn;
+}
+async function ask() {
+  if (busy) return;
+  let question = $("question").value.trim();
+  const file = attached;
+  if (!question && !file) { $("question").focus(); return; }
+  if (!question) question = FILE_PROMPT;
+  busy = true; $("ask").disabled = true;
+  $("question").value = ""; fitQuestion(); clearAttachment();
+  const turn = newTurn(question, file?.name);
+  const timer = setInterval(() => turnMeta(turn), 1000); turnMeta(turn);
+  try {
+    await ensureChat();
+    const form = new FormData(); form.append("content", question); if (file) form.append("media", file);
+    const r = await fetch(`/chats/${chatId}/messages`, { method: "POST", body: form });
+    if (!r.ok) throw new Error(await errorText(r));
+    for await (const ev of sseEvents(r)) {
+      if (ev.type === "token") { turn.text += ev.delta || ""; renderAnswer(turn.answerNode, turn.text); }
+      else if (ev.type === "moderation") { turn.text = ev.message || "Ответ скрыт модерацией."; renderAnswer(turn.answerNode, turn.text); }
+      else if (ev.type === "sources") { turn.sourcesEvent = ev; if (!ev.confident) turn.answerNode.classList.add("refused"); }
+      else if (ev.type === "done") { turn.messageId = ev.message_id || null; }
+      else if (ev.type === "error") { throw new Error(`${ev.message || "Ответ оборвался"} (${ev.code || "error"})`); }
+      if (selectedTurn === turn.id && ev.type !== "token") renderRail(turn);
+    }
+  } catch (e) {
+    const offline = e instanceof TypeError;
+    turn.error = offline ? "Сервис не отвечает. Если он перезапускается, подождите полминуты и спросите ещё раз." : String(e.message || e);
+    if (!turn.text) { turn.answerNode.textContent = turn.error; turn.answerNode.classList.add("refused"); }
+    if (offline) checkHealth();
+  } finally {
+    clearInterval(timer);
+    turn.done = true; turn.finished = Date.now();
+    turn.answerNode.classList.remove("typing");
+    if (!turn.text && !turn.error) turn.answerNode.textContent = "Пустой ответ.";
+    turnMeta(turn);
+    if (selectedTurn === turn.id) renderRail(turn);
+    busy = false; $("ask").disabled = false; $("question").focus();
+  }
+}
+$("composer").addEventListener("submit", (e) => { e.preventDefault(); ask(); });
+$("question").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+function fitQuestion() {   // поле растёт с текстом до 160px, полоса прокрутки — только дальше
+  const t = $("question"); t.style.height = "auto";
+  const need = t.scrollHeight + 2;                 // + рамка: scrollHeight её не включает
+  t.style.height = Math.min(160, Math.max(52, need)) + "px";
+  t.style.overflowY = need > 160 ? "auto" : "hidden";
+}
+$("question").addEventListener("input", fitQuestion);
+$("attachBtn").addEventListener("click", () => $("fileInput").click());
+$("fileInput").addEventListener("change", () => {
+  attached = $("fileInput").files[0] || null;
+  $("fileLine").textContent = attached ? `Приложен файл: ${attached.name}. Без вопроса ассистент перескажет документ.` : "";
+  $("fileLine").classList.toggle("hidden", !attached);
+});
+function clearAttachment() { attached = null; $("fileInput").value = ""; $("fileLine").classList.add("hidden"); }
+$("newChat").addEventListener("click", async () => {
+  if (busy) return;
+  if (chatId) { try { await fetch(`/chats/${chatId}/messages`, { method: "DELETE" }); } catch { /* история и так новая */ } }
+  turns.clear(); selectedTurn = null;
+  $("transcript").querySelectorAll(".turn").forEach((n) => n.remove());
+  $("empty").classList.remove("hidden"); renderRail(null);
+  $("question").focus();
+});
+
+// ---------- поручение агенту ----------
+let agentBusy = false;
+let agentTimer = null;
+function newThreadId() {
+  const d = new Date(); const p = (n) => String(n).padStart(2, "0");
+  return `web-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+function threadId() { return $("threadId").value.trim(); }
+function addStep(kind, title, body) {
+  const li = el("li", "step " + (kind || ""));
+  li.append(el("h3", null, title));
+  if (body instanceof Node) li.append(body); else if (body) li.append(el("p", null, body));
+  $("timeline").append(li);
+  li.scrollIntoView({ block: "nearest" });
+  return li;
+}
+function codeBox(text) { return el("div", "code", text); }
+function callText(call) {
+  const args = Object.entries(call.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
+  return `${call.name}(${args})`;
+}
+const NODE_TITLES = { call_model: "Модель решает, что делать", execute_tool: "Инструмент вернул результат",
+  prepare_send_message: "Черновик сообщения готов", confirm_and_execute_send_message: "Отправка после подтверждения" };
+let answerStep = null;
+function renderAgentEvent(ev) {
+  if (ev.event === "start") {
+    if (ev.mode === "resume") addStep("", "Решение передано агенту", "Агент продолжает с сохранённой контрольной точки.");
+    else addStep("", "Поручение принято", `Поручение ${ev.thread_id}, роль ${ev.user_role}.`);
+  } else if (ev.event === "node") {
+    const update = ev.update || {};
+    for (const m of update.messages || []) {
+      for (const call of m.tool_calls || []) addStep("tool", "Агент вызывает инструмент", codeBox(callText(call)));
+      if (m.type === "tool") addStep("tool", NODE_TITLES.execute_tool + (m.name ? ` · ${m.name}` : ""), codeBox(m.content || ""));
+    }
+    if (ev.node === "prepare_send_message" && update.draft) addStep("", NODE_TITLES.prepare_send_message, "Отправка ждёт вашего решения.");
+  } else if (ev.event === "token") {
+    if (!answerStep) { answerStep = addStep("", "Ответ агента", el("p", "a")); answerStep.dataset.text = ""; }
+    answerStep.dataset.text += ev.content || "";
+    answerStep.querySelector(".a").textContent = answerStep.dataset.text;
+  } else if (ev.event === "interrupt") {
+    renderApproval((ev.interrupts || [{}])[0].value || {});
+  } else if (ev.event === "end") {
+    if (ev.pending_approval) return;
+    const text = answerStep ? "" : (ev.answer || "");     // ответ уже показан шагом «Ответ агента»
+    if (ev.sent) addStep("done", "Сообщение отправлено пользователю", text);
+    else addStep("", "Поручение завершено, сообщение не отправлено", text);
+  } else if (ev.event === "error") {
+    addStep("fail", "Агент остановился с ошибкой", ev.message || ev.code || "");
+  }
+}
+function renderApproval(value) {
+  const preview = value.preview || {};
+  const card = el("div", "approval");
+  card.append(el("div", "meta", `Получатель: Telegram-чат ${preview.chat_id ?? "—"}`));
+  card.append(el("p", "msg", preview.text || "(текст не пришёл)"));
+  const actions = el("div", "actions");
+  const yes = el("button", "btn go", "Отправить"); yes.type = "button";
+  const no = el("button", "btn", "Отклонить"); no.type = "button";
+  const decide = (approved) => {
+    if (agentBusy || needKey($("agentNotice"))) return;
+    yes.disabled = no.disabled = true;
+    card.classList.add("decided");
+    card.closest(".step")?.querySelector(":scope > p.muted")?.remove();   // «Агент на паузе…» уже не про сейчас
+    actions.after(el("div", "meta", approved ? "Ваше решение: отправить." : "Ваше решение: не отправлять."));
+    runAgent({ resume: approved ? true : { approved: false, comment: "Отклонено в веб-интерфейсе" } });
+  };
+  yes.addEventListener("click", () => decide(true));
+  no.addEventListener("click", () => decide(false));
+  actions.append(yes, no);
+  card.append(actions);
+  const step = addStep("pause", value.question || "Отправить это сообщение пользователю?", card);
+  step.querySelector("h3").after(el("p", "muted", "Агент на паузе. Пока вы не решите, ничего не уйдёт, а пауза переживёт перезапуск сервиса."));
+}
+function setRunning(on) {
+  agentBusy = on;
+  $("agentRun").disabled = on; $("agentNew").disabled = on;
+  clearInterval(agentTimer);
+  if (on) {
+    const start = Date.now();
+    const tick = () => { $("agentRunning").textContent = `Агент работает · ${clock(Date.now() - start)}`; };
+    tick(); agentTimer = setInterval(tick, 1000);
+  } else $("agentRunning").textContent = "";
+}
+async function runAgent(payload) {
+  if (agentBusy || needKey($("agentNotice"))) return;
+  const id = threadId();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(id)) { showNotice($("agentNotice"), "err", "Идентификатор поручения: латиница, цифры, точка, дефис, до 128 символов."); return; }
+  showNotice($("agentNotice"));
+  store.set("agentThread", id);
+  setRunning(true); answerStep = null;
+  const body = { thread_id: id, ...payload };
+  try {
+    let r;
+    try { r = await fetch("/agent/stream", { method: "POST", headers: adminHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body) }); }
+    catch (e) {
+      if (!(e instanceof TypeError)) throw e;
+      showNotice($("agentNotice"), "warn", "Сервис не отвечает — жду, пока он поднимется…");
+      if (!(await waitForService(90))) throw new Error("Сервис не поднялся за 90 секунд: docker compose ps app");
+      showNotice($("agentNotice"));
+      r = await fetch("/agent/stream", { method: "POST", headers: adminHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body) });
+    }
+    if (!r.ok) {
+      const msg = await errorText(r);
+      showNotice($("agentNotice"), "err", r.status === 401 ? "Ключ администратора не подошёл. Проверьте ADMIN_TOKEN." : msg);
+      return;
+    }
+    for await (const ev of sseEvents(r)) renderAgentEvent(ev);
+  } catch (e) {
+    showNotice($("agentNotice"), "err", e instanceof TypeError
+      ? "Связь с сервисом оборвалась. Если он перезапускался, нажмите «Обновить состояние» — поручение сохранено."
+      : String(e.message || e));
+  } finally {
+    setRunning(false);
+    refreshState({});
+  }
+}
+// notify — сообщить итог проверки (кнопка «Обновить состояние»); restore — если агент ждёт решения,
+// показать черновик и кнопки из сохранённого состояния (после перезапуска сервиса или перезагрузки страницы).
+let restoredCheckpoint = null;   // контрольная точка, уже показанная шагом «Состояние восстановлено»
+async function refreshState({ notify = false, restore = false } = {}) {
+  const quiet = !notify;
+  const id = threadId();
+  if (!id || !store.get("adminToken")) { if (notify) needKey($("agentNotice")); return; }
+  let r;
+  try { r = await fetch(`/agent/threads/${encodeURIComponent(id)}`, { headers: adminHeaders() }); }
+  catch {
+    if (quiet) return;
+    showNotice($("agentNotice"), "warn", "Сервис не отвечает — жду, пока он поднимется…");
+    if (!(await waitForService(90))) { showNotice($("agentNotice"), "err", "Сервис не поднялся за 90 секунд: docker compose ps app"); return; }
+    showNotice($("agentNotice"));
+    try { r = await fetch(`/agent/threads/${encodeURIComponent(id)}`, { headers: adminHeaders() }); } catch { return; }
+  }
+  if (!r.ok) { if (!quiet) showNotice($("agentNotice"), "err", await errorText(r)); return; }
+  const st = await r.json();
+  $("stThread").textContent = st.thread_id;
+  $("stPending").textContent = st.pending_approval ? "да" : "нет";
+  $("stSent").textContent = st.sent === true ? "да" : st.sent === false ? "нет" : "—";
+  $("stCheckpoint").textContent = st.checkpoint_id ? String(st.checkpoint_id).slice(0, 18) + "…" : "—";
+  const hasCard = Boolean($("timeline").querySelector(".approval .btn.go:not(:disabled)"));
+  if (restore && st.pending_approval && (notify || !hasCard) && st.checkpoint_id !== restoredCheckpoint) {
+    $("timeline").querySelectorAll(".approval:not(.decided)").forEach((old) => {   // прежняя карточка — уже не актуальна
+      old.querySelectorAll(".btn").forEach((b) => { b.disabled = true; });
+      old.classList.add("decided");
+      old.closest(".step")?.querySelector(":scope > p.muted")?.remove();
+      old.append(el("div", "meta", "Решение — в восстановленной карточке ниже."));
+    });
+    addStep("", "Состояние восстановлено из Postgres", `Контрольная точка ${st.checkpoint_id || "—"}: агент по-прежнему ждёт решения.`);
+    renderApproval((st.interrupts || [{}])[0].value || {});
+    restoredCheckpoint = st.checkpoint_id;
+  } else if (notify && !st.pending_approval && st.sent) {
+    showNotice($("agentNotice"), "warn", "Это поручение уже выполнено: сообщение отправлено, повторной отправки не будет.");
+  } else if (notify && !st.pending_approval && !st.messages) {
+    showNotice($("agentNotice"), "warn", "Такого поручения ещё не было — нажмите «Выполнить».");
+  } else if (notify && st.pending_approval) {
+    showNotice($("agentNotice"), "warn", "Агент ждёт решения: черновик и кнопки — в последнем шаге.");
+  }
+}
+$("agentRun").addEventListener("click", () => {
+  const text = $("agentTask").value.trim();
+  if (!text) { $("agentTask").focus(); return; }
+  runAgent({ input: { messages: [{ role: "user", content: text }] } });
+});
+$("agentNew").addEventListener("click", () => {
+  $("threadId").value = newThreadId(); $("timeline").innerHTML = ""; showNotice($("agentNotice")); restoredCheckpoint = null;
+  for (const k of ["stThread", "stPending", "stSent", "stCheckpoint"]) $(k).textContent = "—";
+  store.set("agentThread", threadId());
+});
+$("stRefresh").addEventListener("click", () => refreshState({ notify: true, restore: true }));
+$("threadId").addEventListener("focus", () => $("threadHelp").classList.remove("hidden"));
+$("threadId").addEventListener("blur", () => $("threadHelp").classList.add("hidden"));
+
+// ---------- пополнить базу ----------
+let kbFile = null;
+function pickKbFile(file) {
+  kbFile = file || null;
+  $("dropName").textContent = kbFile ? `${kbFile.name} · ${(kbFile.size / 1024).toFixed(0)} КБ` : "Файл не выбран";
+  $("kbUpload").disabled = !kbFile;
+}
+$("kbFile").addEventListener("change", () => pickKbFile($("kbFile").files[0]));
+for (const ev of ["dragenter", "dragover"]) $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.add("over"); });
+for (const ev of ["dragleave", "drop"]) $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.remove("over"); });
+$("drop").addEventListener("drop", (e) => pickKbFile(e.dataTransfer.files[0]));
+const STATE_TEXT = { queued: "в очереди", new: "в базе", changed: "в базе, новая версия", unchanged: "в базе, без изменений",
+  failed: "не прочитан", removed: "удалён" };
+$("kbUpload").addEventListener("click", async () => {
+  if (!kbFile || needKey($("uploadNotice"))) return;
+  showNotice($("uploadNotice"));
+  const file = kbFile; pickKbFile(null); $("kbFile").value = "";
+  const li = el("li"); const name = el("div"); name.append(el("span", "mono", file.name));
+  const chip = el("span", "state-chip", "загружаю…"); const detail = el("div", "muted", "");
+  detail.style.gridColumn = "1 / -1"; detail.style.fontSize = "14px";
+  li.append(name, chip, detail); $("uploads").prepend(li);
+  try {
+    const form = new FormData(); form.append("file", file);
+    const r = await fetch("/documents/upload", { method: "POST", headers: adminHeaders(), body: form });
+    if (!r.ok) { chip.textContent = "ошибка"; chip.className = "state-chip bad"; detail.textContent = r.status === 401 ? "Ключ администратора не подошёл." : await errorText(r); return; }
+    const acc = await r.json();
+    detail.textContent = `${acc.file}${acc.replaced ? " — заменит прежнюю версию" : ""}`;
+    chip.textContent = "индексируется…";
+    const started = Date.now();
+    while (Date.now() - started < 180000) {
+      await new Promise((res) => setTimeout(res, 2000));
+      let st;
+      try { const s = await fetch(`/documents/status?file=${encodeURIComponent(acc.file)}`, { cache: "no-store" }); if (!s.ok) continue; st = await s.json(); } catch { continue; }
+      chip.textContent = `${STATE_TEXT[st.state] || st.state}${st.indexed ? ` · ${seconds(Date.now() - started)} с` : ""}`;
+      if (st.indexed) {
+        chip.className = "state-chip ok";
+        detail.textContent = `${acc.file} — ассистент уже находит его в поиске.`;
+        const go = el("button", "linkbtn", "Задать вопрос по документу"); go.type = "button"; go.style.marginLeft = "10px";
+        go.addEventListener("click", () => showTab("chat"));
+        detail.append(go);
+        return;
+      }
+      if (st.state === "failed") { chip.className = "state-chip bad"; detail.textContent = st.error || "Файл не прочитался."; return; }
+    }
+    chip.textContent = "долго индексируется"; detail.textContent = `Индексация идёт дольше 3 минут. Проверьте позже: GET /documents/status?file=${acc.file}`;
+  } catch {
+    chip.textContent = "сервис не отвечает"; chip.className = "state-chip bad";
+  }
+});
+
+// ---------- старт ----------
+const frameParts = { "--hdr": document.querySelector("header"), "--ftr": document.querySelector(".site-foot") };
+const fitChrome = () => {   // высоты шапки и подвала — в CSS-переменные; ceil: при масштабе 125 % высота дробная
+  for (const [name, node] of Object.entries(frameParts)) {
+    document.documentElement.style.setProperty(name, Math.ceil(node.getBoundingClientRect().height) + "px");
+  }
+};
+if ("ResizeObserver" in window) { const ro = new ResizeObserver(fitChrome); Object.values(frameParts).forEach((n) => ro.observe(n)); }
+else window.addEventListener("resize", fitChrome);
+fitChrome();
+renderKey();
+$("agentTask").value = AGENT_EXAMPLE;
+$("threadId").value = store.get("agentThread") || newThreadId();
+checkHealth(); setInterval(checkHealth, 20000);
+showTab(TABS.includes(store.get("tab")) ? store.get("tab") : "chat");
+if (store.get("agentThread") && store.get("adminToken")) refreshState({ restore: true });
+</script>
+</body>
+</html>
