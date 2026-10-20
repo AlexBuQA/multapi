@@ -117,7 +117,7 @@ from app.observability.pii import redact_pii
 from app.schemas.chat import ChatDelta, ChatRequest, MediaChatRequest, Usage, content_parts, has_image, map_text
 from app.schemas.models import supports_images
 from app.services.guardrails import mask_message
-from app.services.rag_common import CHAT_RULES, NO_ANSWER, is_no_answer
+from app.services.rag_common import CHAT_RULES, NO_ANSWER, is_no_answer, sources_suffix
 from app.services.security import refusal_for, screen_messages
 from app.services.security.canary import canary_message, with_canary
 from app.services.security.input_validator import validate_document, validate_input
@@ -574,6 +574,15 @@ class ChatService:
                 await self._incident("output", blocked, "".join(parts), chat_id)
                 parts = [OUTPUT_REFUSAL]
                 yield AnswerReplaced(OUTPUT_REFUSAL, blocked.categories)
+            elif knowledge is not None and parts and self.settings.rag.sources_fallback:
+                # Блок 5.6: модель не поставила ни одной ссылки [N] — дописать «Источники: [N]» по фрагменту
+                # с наибольшим совпадением слов, как /rag/query. Ответ уже у клиента, поэтому хвост уходит
+                # последним фрагментом потока и сохраняется вместе с ответом.
+                suffix, added = sources_suffix("".join(parts), knowledge.texts())
+                if added is not None:
+                    parts.append(suffix)
+                    yield suffix
+                    log.info("rag_sources_added", source=added, where="chat", chat_id=str(chat_id))
         except LLMContentFiltered:
             # StreamGuard остановил ответ: придержанный хвост клиенту не ушёл, вместо него — отказ.
             outcome = "filtered"

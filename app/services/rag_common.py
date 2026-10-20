@@ -183,6 +183,19 @@ def add_sources_line(answer: str, texts: Sequence[str]) -> tuple[str, int | None
     return f"{_EMPTY_SOURCES.sub('', answer.rstrip())}\n\nИсточники: [{number}]", number
 
 
+def sources_suffix(answer: str, texts: Sequence[str]) -> tuple[str, int | None]:
+    """То же, что add_sources_line, для ответа, который уже ушёл клиенту потоком (чат): не новый текст
+    целиком, а хвост, который надо дописать. Модель начала строку «Источники:» без номеров — дописывается
+    только номер. Ссылки есть, отказ или источник не определить — ("", None)."""
+    _, number = add_sources_line(answer, texts)
+    if number is None:
+        return "", None
+    if _EMPTY_SOURCES.search(answer):
+        return f" [{number}]", number
+    gap = "" if answer.endswith("\n\n") else "\n" if answer.endswith("\n") else "\n\n"
+    return f"{gap}Источники: [{number}]", number
+
+
 def final_answer(answer: str, top_score: float, sources: list[dict[str, Any]]) -> dict[str, Any]:
     """Ответ модели → словарь контракта. Модель сама отказалась по промпту — confident=false и
     без источников, как у score-guard; иначе источники с пометкой cited."""

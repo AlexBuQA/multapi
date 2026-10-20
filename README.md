@@ -6,7 +6,7 @@
 
 **Презентация защиты:** [`docs/presentation.pdf`](docs/presentation.pdf) — 12 слайдов, ~8 минут.
 
-**Инструкция для развертывания прототипа:** [`docs/reviewer-guide.md`](docs/reviewer-guide.md) — развёртывание на своём
+**Инструкция для проверяющего:** [`docs/reviewer-guide.md`](docs/reviewer-guide.md) — развёртывание на своём
 компьютере и проверка в браузере по шагам, с ожидаемыми результатами.
 
 **Лицензия:** все права защищены. Использовать материалы проекта можно только с согласия автора; условия —
@@ -160,7 +160,7 @@ python scripts/preflight.py --ask           # проверка стенда: Oll
 - **Защита, NVIDIA garak:** DAN-джейлбрейк — 127 из 127 атак до защитного слоя, 0 — после.
 - **Агент:** один агент против мультиагента на 5 вопросах — мультиагент ×2,42 токенов и +73 % времени за
   +0,2 балла судьи. Решение — один агент ([`docs/multi-agent-report.md`](docs/multi-agent-report.md)).
-- **Тесты:** `python -m pytest -q` — 1610 passed.
+- **Тесты:** `python -m pytest -q` — 1613 passed.
 
 ## Документация
 
@@ -189,7 +189,7 @@ python scripts/preflight.py --ask           # проверка стенда: Oll
 
 ---
 
-# Журнал по курсу: блоки 1-2, 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1–6.5
+# Журнал по курсу: ДЗ 2.6, блоки 3.1–3.8, 4.1–4.4, 5.1–5.6, 6.1–6.5
 
 Ниже — как проект собирался по домашним заданиям: что сделано в каждом блоке, как проверялось на Windows и
 соответствие критериям.
@@ -420,7 +420,7 @@ multapi/
 │   ├── agent-graph-bench/   # блок 6.3: журнал, сводка и stop-check бенчмарка; run1-no-cache-reset/ — первый прогон
 │   ├── agent-persistent-report.md # блок 6.4: backend, Postgres, HIL и идемпотентность, time travel, SSE, роли
 │   ├── agent-react-traces/  # блок 6.2: JSON-логи сравнения и summary.json
-│   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций
+│   ├── screenshots/         # блок 5.6: Phoenix — раскрытый трейс RAG, метки галлюцинаций; web-ui/ — веб-интерфейс для docs/reviewer-guide.md
 │   ├── observability/       # блок 3.6: скриншот трейса в Phoenix с подписью
 │   ├── security/            # блок 3.8: отчёты garak baseline и after, reports/ — HTML garak
 │   └── litellm/             # config.yaml LiteLLM proxy, скрипт запросов, инструкция
@@ -3220,7 +3220,7 @@ flowchart LR
 
 - **Зависимости — необязательные группы `pyproject.toml`:** `eval` — `ragas>=0.4,<0.5`, `langchain-community<0.4`, `anthropic`, `pandas`, `arize-phoenix`, а также `rapidfuzz` (без него граф знаний `TestsetGenerator` падает на `ImportError`) и `graphql-core<3.3` (с 3.3 локальный сервер Phoenix не открывает трейс с аннотацией); `tracing` — `openinference-instrumentation-llama-index` 4.x и OpenTelemetry. Ветка 3.x, которую называет задание, импортирует модуль, которого нет в `llama-index-core` 0.14, — сервис падал при старте. Для pip — `requirements-eval.txt` и `requirements-tracing.txt` с версиями из `uv.lock`. В Docker-образ идёт только `tracing` (`ARG UV_EXTRAS="--extra tracing"`). Проверка одной командой — `scripts/verify_eval.py` (`--live` — ещё и судья вживую: faithfulness на примере и has_citation на восьми ответах с известным вердиктом).
 - **`app/eval/metrics.py`:** судья — `llm_factory("qwen3:4b-instruct", provider="openai", client=AsyncOpenAI(...))` в той же Ollama, что модель ответа (`RAGAS__JUDGE_*`; OpenRouter — с прокси, сертификатами ОС и `provider.require_parameters`), эмбеддинги для answer_relevancy — `ragas.embeddings.OpenAIEmbeddings` → `bge-m3`. Четыре метрики `ragas.metrics.collections` через `ascore(...).value` и `has_citation` — `@discrete_metric`, судья через `agenerate(prompt, response_model=CitationVerdict)`, промпт по-русски — вопрос из задания и уточнения для 4B-судьи (три вида ссылки списком, номер не проверять, «ссылка из письма» — не ссылка, ответ в тегах, сначала цитата `found`, потом вердикт), отпечаток промпта — в JSON прогона. `score_row` не падает на пустых полях: отказ score-guard — faithfulness NaN, precision и recall 0; нет эталона — NaN; сбой судьи — NaN и текст ошибки. Строку «Источники: [2][3]» faithfulness и answer_relevancy не видят (`strip_citations`): это разметка, а не утверждение. Кеш судьи — `DiskCacheBackend`, папка на каждую модель (ключ RAGAS не включает имя модели).
-- **Строка источников кодом (`RAG__SOURCES_FALLBACK`, по умолчанию `true`):** baseline показал has_citation 0.911 — в 4 ответах из 45 llama3.2 не пишет «Источники: [N]», хотя напоминание стоит прямо перед ответом. Если в ответе нет ни одной ссылки [N], `/rag/query` дописывает строку сам — номер фрагмента с наибольшей долей слов ответа (`rag_common.add_sources_line`, событие `rag_sources_added`); отказ и ответ не из фрагментов не трогаются. faithfulness и answer_relevancy строку источников не видят. В `run_eval.py` — флаг `--sources-fallback on|off` и ключ `sources_fallback` в JSON прогона.
+- **Строка источников кодом (`RAG__SOURCES_FALLBACK`, по умолчанию `true`):** baseline показал has_citation 0.911 — в 4 ответах из 45 llama3.2 не пишет «Источники: [N]», хотя напоминание стоит прямо перед ответом. Если в ответе нет ни одной ссылки [N], `/rag/query` дописывает строку сам — номер фрагмента с наибольшей долей слов ответа (`rag_common.add_sources_line`, событие `rag_sources_added`); отказ и ответ не из фрагментов не трогаются. С итоговой аттестации то же делает чат — `POST /chats/{id}/messages`, через который отвечают веб-интерфейс и бот: ответ уже ушёл потоком, поэтому строка приходит последним фрагментом (`rag_common.sources_suffix`, `rag_sources_added` с `where=chat`). faithfulness и answer_relevancy строку источников не видят. В `run_eval.py` — флаг `--sources-fallback on|off` и ключ `sources_fallback` в JSON прогона.
 - **`RAGService.evaluate_inputs(question)`** — тот же путь, что `/rag/query`, за один поиск, плюс полный текст фрагментов, которые видела модель (`retrieved_contexts`), а не snippet по 200 символов, и задержка. `retrieve`, `answer` и `evaluate_inputs` — спаны диспетчера LlamaIndex (`@dispatcher.span`).
 - **`scripts/generate_testset.py`** — `TestsetGenerator` на документах корпуса (без `data/uploads/`), модель — тот же `llm_factory`, что у метрик (JSON-режим и проверка по схеме, кеш ответов): граф знаний — сущности документов и связи по ним (один вызов модели на документ; с `--abstract` — ещё краткие содержания и темы для обобщающих вопросов) сохраняется в `var/testset_kg.json`; сбой модели на одном документе граф не обрывает; синтезаторы single-hop 0.7 / multi-hop specific 0.3, четыре заданные персоны, «пиши по-русски» в промптах извлечения и генерации; сырой CSV с файлами-источниками эталонных контекстов.
 - **`scripts/build_golden.py`** — ручная вычитка: решение по каждой строке в `tests/eval/golden_review.yaml` (оставить; выбросить — с причиной; поправить вопрос или эталон — с пометкой) → `tests/eval/golden_dataset.json` (`user_input`, `reference`, `reference_contexts`, источники, что поправлено). Строка без решения, выброс без причины, повтор вопроса, меньше 30 пар — ошибка.

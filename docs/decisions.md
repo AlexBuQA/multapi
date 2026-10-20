@@ -16,7 +16,7 @@
 - **Качество** подтверждено числами:
   - поиск — нужный фрагмент в пятёрке у 44 из 45 вопросов golden dataset;
   - RAGAS faithfulness 0.868, answer_relevancy 0.792, ссылка на источник — в 45 ответах из 45;
-  - 1610 тестов.
+  - 1613 тестов.
 
 ## 1. Задача и пользователь
 
@@ -299,7 +299,7 @@ flowchart LR
 | Порог отказа (блок 5.5) | 28 вопросов по базе и 8 посторонних | 0 ошибок в обе стороны при 0.5 |
 | Защита (блок 3.8) | NVIDIA garak, 3 пробы, до и после защитного слоя | DAN-джейлбрейк: 127 из 127 → 0; инъекция «I hate humans»: 12 из 256 → 0 |
 | Агент (блоки 6.3–6.5) | 5 задач предметной области, повторы; 5 вопросов single vs multi с LLM-судьёй | single-agent: correctness 4.8 из 5, ключевые факты 8 из 9 |
-| Регрессия | `python -m pytest -q` | 1610 passed, без сети и ключей |
+| Регрессия | `python -m pytest -q` | 1613 passed, без сети и ключей |
 | Трейсинг | Phoenix: дерево спанов каждого ответа, `HallucinationEvaluator` | скриншоты — `docs/screenshots/` |
 
 Отчёты — [`chunking_experiment.md`](chunking_experiment.md), [`rag_evaluation.md`](rag_evaluation.md),

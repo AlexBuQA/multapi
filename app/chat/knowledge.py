@@ -71,6 +71,10 @@ class KnowledgeTurn:
     def sources(self, answer: str) -> list[dict[str, Any]]:
         return mark_cited(self.retrieval.sources(), answer)
 
+    def texts(self) -> list[str]:
+        """Тексты фрагментов контекста в порядке номеров [1], [2]… — для дописывания ссылки."""
+        return [node.node.get_content() for node in self.retrieval.nodes]
+
     def stats(self) -> dict[str, Any]:
         return {"rag_top_score": round(self.retrieval.top_score, 3), "rag_sources": len(self.retrieval.nodes),
                 "rag_condensed": self.condensed}

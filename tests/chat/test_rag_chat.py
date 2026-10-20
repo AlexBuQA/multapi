@@ -31,7 +31,7 @@ from app.core.exceptions import LLMError
 from app.main import app
 from app.schemas.chat import ChatRequest, content_text
 from app.services.rag import Retrieval
-from app.services.rag_common import ANSWER_FORMAT, CHAT_RULES, NO_ANSWER, RAGNotIndexed
+from app.services.rag_common import ANSWER_FORMAT, CHAT_RULES, NO_ANSWER, RAGNotIndexed, sources_suffix
 
 REFUND = "Вернуть оплату можно в течение 14 дней после списания. Деньги приходят на карту за 5–10 рабочих дней, " \
          "при оплате по счёту — на расчётный счёт плательщика."
@@ -137,6 +137,49 @@ async def test_answer_from_knowledge_base_streams_sources_before_done(rag_chat):
     assert "[2] (support-regulation_v2.3.pdf, стр. 2)" in context.content[0].text
     assert context.content[0].text.endswith(f"В ответе: {ANSWER_FORMAT}")       # формат цитат — в конце контекста
     assert req.temperature == 0.1
+
+
+async def test_answer_without_citation_gets_sources_line_in_stream_and_history(rag_chat):
+    """Блок 5.6 в чате: модель забыла «Источники: [N]» — сервис дописывает строку, как /rag/query. Ответ
+    уже ушёл потоком, поэтому строка — последний фрагмент; источник помечен cited, в истории — то же."""
+    from log_capture import captured_logs
+    from log_capture import events as log_events
+
+    _, llm, _ = rag_chat
+    llm.reply = lambda req: "Вернуть оплату можно в течение 14 дней после списания."
+    async with await client() as http:
+        chat_id = await new_chat(http)
+        with captured_logs("INFO") as records:
+            answer, parsed = await ask(http, chat_id, "Каков срок возврата?")
+        history = (await http.get(f"/chats/{chat_id}/messages")).json()
+    assert answer == "Вернуть оплату можно в течение 14 дней после списания.\n\nИсточники: [1]"
+    assert [e["delta"] for _, e in parsed if e["type"] == "token"][-1] == "\n\nИсточники: [1]"
+    first, second = parsed[-2][1]["sources"]
+    assert (first["cited"], second["cited"]) == (True, False)
+    assert log_events(records, "rag_sources_added")[0]["where"] == "chat"
+    messages = history["messages"] if isinstance(history, dict) else history
+    assert messages[-1]["content"] == answer
+
+
+async def test_sources_line_is_not_added_when_switched_off(rag_chat):
+    settings, llm, _ = rag_chat
+    settings.rag = settings.rag.model_copy(update={"sources_fallback": False})
+    llm.reply = lambda req: "Вернуть оплату можно в течение 14 дней после списания."
+    async with await client() as http:
+        answer, parsed = await ask(http, await new_chat(http), "Каков срок возврата?")
+    assert answer == "Вернуть оплату можно в течение 14 дней после списания."
+    assert [s["cited"] for s in parsed[-2][1]["sources"]] == [False, False]
+
+
+def test_sources_suffix_for_streamed_answer():
+    texts = [REFUND, REGULATION]
+    answer = "Вернуть оплату можно в течение 14 дней."
+    assert sources_suffix(answer, texts) == ("\n\nИсточники: [1]", 1)
+    assert sources_suffix(answer + "\n", texts) == ("\nИсточники: [1]", 1)
+    assert sources_suffix(answer + "\n\nИсточники:", texts) == (" [1]", 1)        # строку начала модель
+    assert sources_suffix("Вернуть оплату можно в течение 14 дней [1].", texts) == ("", None)   # ссылка есть
+    assert sources_suffix(NO_ANSWER, texts) == ("", None)                              # отказ
+    assert sources_suffix("Погода сегодня солнечная.", texts) == ("", None)            # не из фрагментов
 
 
 async def test_score_guard_answers_without_model(rag_chat):
